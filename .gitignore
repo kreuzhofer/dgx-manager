@@ -1,17 +1,16 @@
 # dependencies
-/node_modules
-/.pnp
-.pnp.*
+node_modules
 
 # testing
 /coverage
 
 # next.js
-/.next/
+.next/
 /out/
 
 # production
 /build
+**/dist/
 
 # misc
 .DS_Store

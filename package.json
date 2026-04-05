@@ -2,27 +2,24 @@
   "name": "dgx-manager",
   "version": "0.1.0",
   "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "next lint",
+    "dev": "npm run dev --workspace=packages/server & npm run dev --workspace=packages/dashboard & wait",
+    "dev:server": "npm run dev --workspace=packages/server",
+    "dev:dashboard": "npm run dev --workspace=packages/dashboard",
+    "build": "npm run build --workspaces",
     "db:push": "prisma db push",
-    "db:studio": "prisma studio",
-    "db:seed": "tsx prisma/seed.ts"
-  },
-  "dependencies": {
-    "@prisma/client": "^6.5.0",
-    "next": "^15.3.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "db:generate": "prisma generate",
+    "db:studio": "prisma studio"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
     "prisma": "^6.5.0",
-    "tsx": "^4.19.0",
     "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.5.0"
   }
 }

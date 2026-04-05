@@ -7,11 +7,92 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model DgxNode {
-  id        String   @id @default(cuid())
-  name      String
-  host      String   @unique
-  status    String   @default("unknown")
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+model Node {
+  id              String           @id @default(cuid())
+  name            String           @unique
+  ipAddress       String           @unique
+  agentPort       Int              @default(8089)
+  status          String           @default("new")
+  provisionStatus String           @default("pending")
+  provisionLog    String?
+  gpuModel        String?
+  vramTotal       Int?
+  dockerAvailable Boolean          @default(false)
+  ollamaInstalled Boolean          @default(false)
+  lastSeen        DateTime?
+  createdAt       DateTime         @default(now())
+  deployments     Deployment[]
+  finetuneJobs    FineTuneJob[]
+  metrics         MetricSnapshot[]
+}
+
+model Model {
+  id          String       @id @default(cuid())
+  name        String       @unique
+  runtime     String
+  parameters  String?
+  createdAt   DateTime     @default(now())
+  deployments Deployment[]
+}
+
+model Deployment {
+  id          String                 @id @default(cuid())
+  nodeId      String
+  modelId     String
+  status      String                 @default("pending")
+  port        Int?
+  config      String?
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+  node        Node                   @relation(fields: [nodeId], references: [id])
+  model       Model                  @relation(fields: [modelId], references: [id])
+  lbEndpoints LoadBalancerEndpoint[]
+}
+
+model MetricSnapshot {
+  id             String   @id @default(cuid())
+  nodeId         String
+  gpuUtil        Float
+  vramUsed       Int
+  tps            Float?
+  activeRequests Int?
+  temperature    Float?
+  timestamp      DateTime @default(now())
+  node           Node     @relation(fields: [nodeId], references: [id])
+}
+
+model LoadBalancerRule {
+  id         String                 @id @default(cuid())
+  name       String                 @unique
+  modelName  String
+  strategy   String                 @default("round-robin")
+  listenPath String                 @default("/v1")
+  createdAt  DateTime               @default(now())
+  endpoints  LoadBalancerEndpoint[]
+}
+
+model LoadBalancerEndpoint {
+  id           String           @id @default(cuid())
+  ruleId       String
+  deploymentId String
+  weight       Int              @default(1)
+  rule         LoadBalancerRule @relation(fields: [ruleId], references: [id])
+  deployment   Deployment       @relation(fields: [deploymentId], references: [id])
+}
+
+model FineTuneJob {
+  id          String    @id @default(cuid())
+  nodeId      String
+  baseModel   String
+  method      String
+  dataset     String
+  config      String?
+  status      String    @default("pending")
+  progress    Float?
+  outputPath  String?
+  logs        String?
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  node        Node      @relation(fields: [nodeId], references: [id])
 }
