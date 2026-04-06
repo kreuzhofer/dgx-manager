@@ -69,6 +69,9 @@ export default function DeploymentsPage() {
   const [selectedNode, setSelectedNode] = useState<string>("");
   const [selectedNodes, setSelectedNodes] = useState<string[]>([]);
   const [port, setPort] = useState("8000");
+  const [maxModelLen, setMaxModelLen] = useState("");
+  const [tensorParallel, setTensorParallel] = useState("");
+  const [gpuMem, setGpuMem] = useState("");
   const [deploying, setDeploying] = useState(false);
 
   // Log viewer
@@ -146,16 +149,23 @@ export default function DeploymentsPage() {
     if (!selectedRecipe || !hasNodes) return;
     setDeploying(true);
     try {
+      const configOverrides: Record<string, unknown> = {
+        port: parseInt(port) || 8000,
+      };
+      if (maxModelLen) configOverrides.maxModelLen = parseInt(maxModelLen);
+      if (tensorParallel) configOverrides.tensorParallel = parseInt(tensorParallel);
+      if (gpuMem) configOverrides.gpuMem = parseFloat(gpuMem);
+
       const body = isClusterRecipe
         ? {
             nodeIds: selectedNodes,
             recipeFile: selectedRecipe,
-            config: { port: parseInt(port) || 8000 },
+            config: configOverrides,
           }
         : {
             nodeId: selectedNode,
             recipeFile: selectedRecipe,
-            config: { port: parseInt(port) || 8000 },
+            config: configOverrides,
           };
       const deployment = await apiFetch<Deployment>("/api/deployments", {
         method: "POST",
@@ -197,6 +207,18 @@ export default function DeploymentsPage() {
   const selectedRecipeData = recipes.find((r) => r.file === selectedRecipe);
   const onlineNodes = nodes.filter((n) => n.status === "online");
 
+  // Pre-fill config when recipe changes
+  const onRecipeChange = (file: string) => {
+    setSelectedRecipe(file);
+    const recipe = recipes.find((r) => r.file === file);
+    if (recipe?.defaults) {
+      setPort(String(recipe.defaults.port ?? 8000));
+      setMaxModelLen(String(recipe.defaults.max_model_len ?? ""));
+      setTensorParallel(String(recipe.defaults.tensor_parallel ?? ""));
+      setGpuMem(String(recipe.defaults.gpu_memory_utilization ?? ""));
+    }
+  };
+
   if (loading) return <p className="text-gray-400">Loading...</p>;
 
   return (
@@ -225,7 +247,7 @@ export default function DeploymentsPage() {
             <label className="block text-xs text-gray-400 mb-1">Recipe</label>
             <select
               value={selectedRecipe}
-              onChange={(e) => setSelectedRecipe(e.target.value)}
+              onChange={(e) => onRecipeChange(e.target.value)}
               className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
             >
               <option value="">Select a recipe...</option>
@@ -282,36 +304,64 @@ export default function DeploymentsPage() {
               </select>
             )}
           </div>
-          <div>
-            <label className="block text-xs text-gray-400 mb-1">Port</label>
-            <input
-              type="number"
-              value={port}
-              onChange={(e) => setPort(e.target.value)}
-              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
-            />
-          </div>
         </div>
 
-        {/* Recipe details */}
+        {/* Recipe config overrides */}
         {selectedRecipeData && (
-          <div className="mt-3 p-3 bg-gray-800/50 rounded border border-gray-700/50">
-            <p className="text-xs text-gray-400">
-              {selectedRecipeData.description || "No description"}
-            </p>
-            <div className="flex gap-4 mt-2 text-xs text-gray-500">
-              {selectedRecipeData.model && (
-                <span>Model: <span className="text-gray-300">{selectedRecipeData.model}</span></span>
-              )}
-              <span>Container: <span className="text-gray-300">{selectedRecipeData.container}</span></span>
-              {selectedRecipeData.defaults.tensor_parallel !== undefined && (
-                <span>TP: <span className="text-gray-300">{String(selectedRecipeData.defaults.tensor_parallel)}</span></span>
-              )}
-              {selectedRecipeData.defaults.gpu_memory_utilization !== undefined && (
-                <span>GPU Mem: <span className="text-gray-300">{String(selectedRecipeData.defaults.gpu_memory_utilization)}</span></span>
-              )}
+          <>
+            <div className="mt-3 p-3 bg-gray-800/50 rounded border border-gray-700/50">
+              <p className="text-xs text-gray-400 mb-2">
+                {selectedRecipeData.description || "No description"}
+                {selectedRecipeData.model && (
+                  <span className="ml-2 text-gray-500">({selectedRecipeData.model})</span>
+                )}
+              </p>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div>
+                  <label className="block text-[10px] text-gray-500 mb-0.5">Port</label>
+                  <input
+                    type="number"
+                    value={port}
+                    onChange={(e) => setPort(e.target.value)}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-green-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-gray-500 mb-0.5">Tensor Parallel</label>
+                  <input
+                    type="number"
+                    value={tensorParallel}
+                    onChange={(e) => setTensorParallel(e.target.value)}
+                    placeholder={String(selectedRecipeData.defaults.tensor_parallel ?? "")}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-green-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-gray-500 mb-0.5">Max Model Length</label>
+                  <input
+                    type="number"
+                    value={maxModelLen}
+                    onChange={(e) => setMaxModelLen(e.target.value)}
+                    placeholder={String(selectedRecipeData.defaults.max_model_len ?? "")}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-green-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-gray-500 mb-0.5">GPU Memory Util</label>
+                  <input
+                    type="number"
+                    step="0.05"
+                    min="0.1"
+                    max="0.99"
+                    value={gpuMem}
+                    onChange={(e) => setGpuMem(e.target.value)}
+                    placeholder={String(selectedRecipeData.defaults.gpu_memory_utilization ?? "")}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-green-500"
+                  />
+                </div>
+              </div>
             </div>
-          </div>
+          </>
         )}
 
         <div className="mt-4 flex justify-end">

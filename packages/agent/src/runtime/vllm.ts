@@ -32,7 +32,7 @@ const running = new Map<string, VllmInstance>();
 export function launchRecipe(
   deploymentId: string,
   recipeFile: string,
-  options?: { port?: number; gpuMem?: number; maxModelLen?: number; clusterNodes?: string[] },
+  options?: { port?: number; gpuMem?: number; maxModelLen?: number; tensorParallel?: number; clusterNodes?: string[] },
   onLog?: (line: string) => void,
   onExit?: (code: number | null) => void
 ): number {
@@ -61,6 +61,7 @@ export function launchRecipe(
   if (options?.port) args.push("--port", String(options.port));
   if (options?.gpuMem) args.push("--gpu-mem", String(options.gpuMem));
   if (options?.maxModelLen) args.push("--max-model-len", String(options.maxModelLen));
+  if (options?.tensorParallel) args.push("--tp", String(options.tensorParallel));
 
   console.log(`Launching recipe: ${runRecipe} ${args.join(" ")}`);
 

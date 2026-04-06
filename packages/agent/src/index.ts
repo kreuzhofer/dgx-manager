@@ -192,6 +192,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             port: (config?.port as number) ?? 8000,
             gpuMem: config?.gpuMem as number,
             maxModelLen: config?.maxModelLen as number,
+            tensorParallel: config?.tensorParallel as number,
             clusterNodes,
           },
           (line) => {
