@@ -2,6 +2,7 @@ import { Router } from "express";
 import { prisma } from "../prisma.js";
 import { auditNode, provisionNode } from "../ssh/provisioner.js";
 import { deployAgent } from "../ssh/agent-deployer.js";
+import { broadcast as sseBroadcast } from "../sse.js";
 import type { AgentHub } from "../ws/agent-hub.js";
 
 export const nodesRouter = Router();
@@ -42,7 +43,7 @@ nodesRouter.post("/", async (req, res) => {
   });
 
   // Run audit in background
-  auditNode(ipAddress).then(async (report) => {
+  auditNode(ipAddress, node.id).then(async (report) => {
     await prisma.node.update({
       where: { id: node.id },
       data: {
@@ -51,6 +52,17 @@ nodesRouter.post("/", async (req, res) => {
         gpuModel: report.checks.find((c) => c.name === "NVIDIA Drivers")?.detail || null,
         dockerAvailable: report.checks.find((c) => c.name === "Docker")?.status === "green",
         ollamaInstalled: report.checks.find((c) => c.name === "Ollama")?.status === "green",
+      },
+    });
+    sseBroadcast({
+      type: "node:provision",
+      payload: {
+        nodeId: node.id,
+        step: "Audit complete",
+        status: report.reachable ? "done" : "failed",
+        detail: report.reachable ? "All checks complete" : "Node unreachable",
+        provisionStatus: report.reachable ? "audited" : "unreachable",
+        report,
       },
     });
   }).catch((err) => {
@@ -76,9 +88,9 @@ nodesRouter.post("/:id/provision", async (req, res) => {
   });
 
   // Provision in background
-  provisionNode(node.ipAddress, report.checks).then(async (log) => {
+  provisionNode(node.ipAddress, report.checks, node.id).then(async (log) => {
     // Re-audit after provisioning
-    const newReport = await auditNode(node.ipAddress);
+    const newReport = await auditNode(node.ipAddress, node.id);
     await prisma.node.update({
       where: { id: node.id },
       data: {
@@ -88,10 +100,24 @@ nodesRouter.post("/:id/provision", async (req, res) => {
         ollamaInstalled: newReport.checks.find((c) => c.name === "Ollama")?.status === "green",
       },
     });
+    sseBroadcast({
+      type: "node:provision",
+      payload: {
+        nodeId: node.id,
+        step: "Provisioning complete",
+        status: "done",
+        provisionStatus: "provisioned",
+        report: newReport,
+      },
+    });
   }).catch(async (err) => {
     await prisma.node.update({
       where: { id: node.id },
       data: { provisionStatus: "failed", provisionLog: String(err) },
+    });
+    sseBroadcast({
+      type: "node:provision",
+      payload: { nodeId: node.id, step: "Provisioning", status: "failed", detail: String(err), provisionStatus: "failed" },
     });
   });
 
