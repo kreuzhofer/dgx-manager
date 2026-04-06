@@ -1,6 +1,7 @@
 import { execSync, spawn, ChildProcess } from "child_process";
 import { existsSync } from "fs";
 import { join } from "path";
+import { saveDeployment, removeDeployment, loadDeployments, clearDeployments, type TrackedDeployment } from "./deployment-store.js";
 
 const VLLM_REPO_PATH =
   process.env.VLLM_REPO_PATH || "/mnt/tank/src/github/spark-vllm-docker";
@@ -83,6 +84,16 @@ export function launchRecipe(
   });
 
   running.set(deploymentId, { process: child, recipeName, port });
+
+  // Persist to disk for recovery after agent restart
+  saveDeployment({
+    deploymentId,
+    recipeFile,
+    recipeName,
+    port,
+    startedAt: new Date().toISOString(),
+  });
+
   return port;
 }
 
@@ -102,6 +113,7 @@ export function stopRecipe(deploymentId: string): boolean {
   }
 
   running.delete(deploymentId);
+  removeDeployment(deploymentId);
   return true;
 }
 
@@ -127,7 +139,7 @@ export function isVllmContainerRunning(): boolean {
   }
 }
 
-/** Force stop any vLLM containers. */
+/** Force stop any vLLM containers and clear tracking. */
 export function forceStopVllm(): void {
   try {
     execSync(
@@ -135,11 +147,17 @@ export function forceStopVllm(): void {
       { cwd: VLLM_REPO_PATH, timeout: 30_000, stdio: "pipe" }
     );
   } catch {
-    // Fallback: docker stop directly
     try {
       execSync("docker stop vllm_node", { timeout: 15_000, stdio: "pipe" });
     } catch { /* nothing running */ }
   }
+  // Clear all tracked deployments since we stopped everything
+  clearDeployments();
+}
+
+/** Get deployments from persistent store (survives agent restarts). */
+export function getTrackedDeployments(): TrackedDeployment[] {
+  return loadDeployments();
 }
 
 /**
@@ -149,12 +167,24 @@ export function forceStopVllm(): void {
 export async function checkDeployments(): Promise<VllmStatus[]> {
   const results: VllmStatus[] = [];
 
-  for (const [deploymentId, instance] of running) {
+  // Merge in-memory tracking with disk-persisted tracking
+  const tracked = loadDeployments();
+  const allDeployments = new Map<string, { recipeName: string; port: number; process?: ChildProcess }>();
+
+  for (const t of tracked) {
+    allDeployments.set(t.deploymentId, { recipeName: t.recipeName, port: t.port });
+  }
+  for (const [id, inst] of running) {
+    allDeployments.set(id, { recipeName: inst.recipeName, port: inst.port, process: inst.process });
+  }
+
+  for (const [deploymentId, info] of allDeployments) {
+    const proc = info.process;
     const status: VllmStatus = {
       deploymentId,
-      recipeName: instance.recipeName,
-      port: instance.port,
-      alive: !instance.process.killed && instance.process.exitCode === null,
+      recipeName: info.recipeName,
+      port: info.port,
+      alive: proc ? !proc.killed && proc.exitCode === null : false,
       containerRunning: false,
       requestsRunning: null,
       requestsWaiting: null,
@@ -178,7 +208,7 @@ export async function checkDeployments(): Promise<VllmStatus[]> {
     if (status.containerRunning) {
       try {
         const metrics = execSync(
-          `curl -sf --max-time 3 http://localhost:${instance.port}/metrics`,
+          `curl -sf --max-time 3 http://localhost:${info.port}/metrics`,
           { timeout: 5000, encoding: "utf-8" }
         );
         status.requestsRunning = parsePrometheusGauge(metrics, "vllm:num_requests_running");

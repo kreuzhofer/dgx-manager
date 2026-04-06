@@ -4,7 +4,7 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
 import { discoverRecipes } from "./recipes.js";
-import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning } from "./runtime/vllm.js";
+import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, getTrackedDeployments } from "./runtime/vllm.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_VERSION: string = JSON.parse(
@@ -43,6 +43,21 @@ function connect() {
         agentVersion: AGENT_VERSION,
       },
     }));
+
+    // Reconcile tracked deployments after restart
+    const tracked = getTrackedDeployments();
+    if (tracked.length > 0) {
+      console.log(`Reconciling ${tracked.length} tracked deployment(s)`);
+      const containerUp = isVllmContainerRunning();
+      for (const t of tracked) {
+        sendMsg("agent:deployment:status", {
+          deploymentId: t.deploymentId,
+          status: containerUp ? "running" : "failed",
+          port: t.port,
+          error: containerUp ? undefined : "Container not running after agent restart",
+        });
+      }
+    }
 
     // Discover and report available vLLM recipes
     const recipes = discoverRecipes();
