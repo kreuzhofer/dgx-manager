@@ -2,6 +2,7 @@ import { Router } from "express";
 import { prisma } from "../prisma.js";
 import { auditNode, provisionNode } from "../ssh/provisioner.js";
 import { deployAgent } from "../ssh/agent-deployer.js";
+import type { AgentHub } from "../ws/agent-hub.js";
 
 export const nodesRouter = Router();
 
@@ -116,6 +117,43 @@ nodesRouter.post("/:id/deploy-agent", async (req, res) => {
 
 // DELETE /api/nodes/:id
 nodesRouter.delete("/:id", async (req, res) => {
-  await prisma.node.delete({ where: { id: req.params.id } });
-  res.json({ deleted: true });
+  const node = await prisma.node.findUnique({
+    where: { id: req.params.id },
+    include: {
+      deployments: true,
+      finetuneJobs: { where: { status: { in: ["pending", "running"] } } },
+    },
+  });
+  if (!node) return res.status(404).json({ error: "Node not found" });
+
+  const agentHub: AgentHub = req.app.get("agentHub");
+
+  // Stop all active deployments
+  for (const deployment of node.deployments) {
+    if (["pending", "running", "starting", "restarting"].includes(deployment.status)) {
+      agentHub.sendToAgent(node.id, {
+        type: "cmd:undeploy",
+        payload: { deploymentId: deployment.id },
+      });
+    }
+  }
+
+  // Cancel running fine-tune jobs
+  for (const job of node.finetuneJobs) {
+    agentHub.sendToAgent(node.id, {
+      type: "cmd:finetune:cancel",
+      payload: { jobId: job.id },
+    });
+  }
+
+  // Clean up DB: delete related records then the node
+  await prisma.metricSnapshot.deleteMany({ where: { nodeId: node.id } });
+  await prisma.loadBalancerEndpoint.deleteMany({
+    where: { deployment: { nodeId: node.id } },
+  });
+  await prisma.deployment.deleteMany({ where: { nodeId: node.id } });
+  await prisma.fineTuneJob.deleteMany({ where: { nodeId: node.id } });
+  await prisma.node.delete({ where: { id: node.id } });
+
+  res.json({ deleted: true, stoppedDeployments: node.deployments.length });
 });
