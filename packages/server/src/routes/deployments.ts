@@ -13,16 +13,26 @@ deploymentsRouter.get("/", async (_req, res) => {
 });
 
 deploymentsRouter.post("/", async (req, res) => {
-  const { modelId, nodeId, config } = req.body;
-  if (!modelId || !nodeId) {
-    return res.status(400).json({ error: "modelId and nodeId required" });
+  const { nodeId, recipeFile, config } = req.body;
+  if (!nodeId || !recipeFile) {
+    return res.status(400).json({ error: "nodeId and recipeFile required" });
   }
 
-  const model = await prisma.model.findUnique({ where: { id: modelId } });
-  if (!model) return res.status(404).json({ error: "Model not found" });
+  // Ensure a model record exists for this recipe
+  const recipeName = recipeFile.replace(/^recipes\//, "").replace(/\.yaml$/, "");
+  let model = await prisma.model.findUnique({ where: { name: recipeName } });
+  if (!model) {
+    model = await prisma.model.create({
+      data: { name: recipeName, runtime: "vllm" },
+    });
+  }
 
   const deployment = await prisma.deployment.create({
-    data: { modelId, nodeId, config: config ? JSON.stringify(config) : null },
+    data: {
+      modelId: model.id,
+      nodeId,
+      config: JSON.stringify({ recipeFile, ...config }),
+    },
   });
 
   const agentHub: AgentHub = req.app.get("agentHub");
@@ -30,8 +40,7 @@ deploymentsRouter.post("/", async (req, res) => {
     type: "cmd:deploy",
     payload: {
       deploymentId: deployment.id,
-      modelName: model.name,
-      runtime: model.runtime,
+      recipeFile,
       config: config || {},
     },
   });

@@ -1,5 +1,5 @@
 import { Client } from "ssh2";
-import { readFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
@@ -7,6 +7,20 @@ export interface SshResult {
   code: number;
   stdout: string;
   stderr: string;
+}
+
+function findPrivateKey(): string {
+  const sshDir = join(homedir(), ".ssh");
+  const candidates = [
+    process.env.SSH_KEY_PATH,
+    join(sshDir, "id_ed25519_shared"),
+    join(sshDir, "id_ed25519"),
+    join(sshDir, "id_rsa"),
+  ].filter(Boolean) as string[];
+  for (const p of candidates) {
+    if (existsSync(p)) return p;
+  }
+  throw new Error("No SSH private key found");
 }
 
 export async function sshExec(
@@ -56,7 +70,7 @@ export async function sshExec(
         host,
         port: 22,
         username: process.env.SSH_USER || process.env.USER || "ubuntu",
-        privateKey: readFileSync(join(homedir(), ".ssh", "id_rsa")),
+        privateKey: readFileSync(findPrivateKey()),
       });
   });
 }

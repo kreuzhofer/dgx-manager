@@ -1,6 +1,16 @@
-import { Server as HttpServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { prisma } from "../prisma.js";
+
+export interface VllmRecipe {
+  file: string;
+  name: string;
+  description?: string;
+  model?: string;
+  container: string;
+  cluster_only?: boolean;
+  solo_only?: boolean;
+  defaults: Record<string, unknown>;
+}
 
 interface AgentConnection {
   ws: WebSocket;
@@ -10,15 +20,31 @@ interface AgentConnection {
 export class AgentHub {
   private wss: WebSocketServer;
   private agents = new Map<string, AgentConnection>();
+  private recipes: VllmRecipe[] = [];
   private onMetrics?: (nodeId: string, metrics: Record<string, unknown>) => void;
+  private onRecipes?: (recipes: VllmRecipe[]) => void;
 
-  constructor(server: HttpServer) {
-    this.wss = new WebSocketServer({ server, path: "/ws/agent" });
+  constructor() {
+    this.wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
     this.wss.on("connection", (ws) => this.handleConnection(ws));
+  }
+
+  handleUpgrade(request: import("http").IncomingMessage, socket: import("stream").Duplex, head: Buffer) {
+    this.wss.handleUpgrade(request, socket, head, (ws) => {
+      this.wss.emit("connection", ws, request);
+    });
   }
 
   setMetricsHandler(handler: (nodeId: string, metrics: Record<string, unknown>) => void) {
     this.onMetrics = handler;
+  }
+
+  setRecipesHandler(handler: (recipes: VllmRecipe[]) => void) {
+    this.onRecipes = handler;
+  }
+
+  getRecipes(): VllmRecipe[] {
+    return this.recipes;
   }
 
   private handleConnection(ws: WebSocket) {
@@ -42,6 +68,14 @@ export class AgentHub {
               },
             });
             console.log(`Agent registered: ${nodeId}`);
+            break;
+          }
+
+          case "agent:recipes": {
+            const incoming = msg.payload.recipes as VllmRecipe[];
+            this.recipes = incoming;
+            console.log(`Received ${incoming.length} vLLM recipes from agent ${nodeId}`);
+            this.onRecipes?.(incoming);
             break;
           }
 

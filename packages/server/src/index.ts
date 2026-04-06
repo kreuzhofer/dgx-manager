@@ -1,3 +1,4 @@
+import "./env.js";
 import express from "express";
 import cors from "cors";
 import { createServer } from "http";
@@ -8,6 +9,7 @@ import { modelsRouter } from "./routes/models.js";
 import { deploymentsRouter } from "./routes/deployments.js";
 import { finetuneRouter } from "./routes/finetune.js";
 import { loadbalancerRouter } from "./routes/loadbalancer.js";
+import { recipesRouter } from "./routes/recipes.js";
 
 const app = express();
 const server = createServer(app);
@@ -16,8 +18,19 @@ app.use(cors());
 app.use(express.json());
 
 // WebSocket hubs
-const agentHub = new AgentHub(server);
-const dashboardHub = new DashboardHub(server);
+const agentHub = new AgentHub();
+const dashboardHub = new DashboardHub();
+
+server.on("upgrade", (request, socket, head) => {
+  const { pathname } = new URL(request.url!, `http://${request.headers.host}`);
+  if (pathname === "/ws/agent") {
+    agentHub.handleUpgrade(request, socket, head);
+  } else if (pathname === "/ws/dashboard") {
+    dashboardHub.handleUpgrade(request, socket, head);
+  } else {
+    socket.destroy();
+  }
+});
 
 // Make hubs available to routes
 app.set("agentHub", agentHub);
@@ -29,6 +42,12 @@ app.use("/api/models", modelsRouter);
 app.use("/api/deployments", deploymentsRouter);
 app.use("/api/finetune", finetuneRouter);
 app.use("/api/lb", loadbalancerRouter);
+app.use("/api/recipes", recipesRouter);
+
+// Broadcast recipe updates to dashboard
+agentHub.setRecipesHandler((recipes) => {
+  dashboardHub.broadcast("update:recipes", recipes);
+});
 
 // Health check
 app.get("/api/health", (_req, res) => {
