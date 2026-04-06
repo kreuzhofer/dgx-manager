@@ -49,21 +49,34 @@ deploymentsRouter.post("/", async (req, res) => {
 });
 
 deploymentsRouter.delete("/:id", async (req, res) => {
-  const deployment = await prisma.deployment.findUnique({ where: { id: req.params.id } });
+  const deployment = await prisma.deployment.findUnique({
+    where: { id: req.params.id },
+    include: { lbEndpoints: true },
+  });
   if (!deployment) return res.status(404).json({ error: "Deployment not found" });
 
-  const agentHub: AgentHub = req.app.get("agentHub");
-  agentHub.sendToAgent(deployment.nodeId, {
-    type: "cmd:undeploy",
-    payload: { deploymentId: deployment.id },
-  });
+  const isActive = ["pending", "running", "starting", "restarting"].includes(deployment.status);
 
-  await prisma.deployment.update({
-    where: { id: req.params.id },
-    data: { status: "removing" },
-  });
-
-  res.json({ status: "removing" });
+  if (isActive) {
+    // Active deployment: send undeploy command, mark as removing
+    const agentHub: AgentHub = req.app.get("agentHub");
+    agentHub.sendToAgent(deployment.nodeId, {
+      type: "cmd:undeploy",
+      payload: { deploymentId: deployment.id },
+    });
+    await prisma.deployment.update({
+      where: { id: req.params.id },
+      data: { status: "removing" },
+    });
+    res.json({ status: "removing" });
+  } else {
+    // Stopped/failed: delete the record
+    await prisma.loadBalancerEndpoint.deleteMany({
+      where: { deploymentId: deployment.id },
+    });
+    await prisma.deployment.delete({ where: { id: req.params.id } });
+    res.json({ deleted: true });
+  }
 });
 
 deploymentsRouter.post("/:id/restart", async (req, res) => {
@@ -74,13 +87,15 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
   if (!deployment) return res.status(404).json({ error: "Deployment not found" });
 
   const agentHub: AgentHub = req.app.get("agentHub");
+  const config = deployment.config ? JSON.parse(deployment.config) : {};
   agentHub.sendToAgent(deployment.nodeId, {
     type: "cmd:deploy",
     payload: {
       deploymentId: deployment.id,
+      recipeFile: config.recipeFile,
       modelName: deployment.model.name,
       runtime: deployment.model.runtime,
-      config: deployment.config ? JSON.parse(deployment.config) : {},
+      config,
     },
   });
 

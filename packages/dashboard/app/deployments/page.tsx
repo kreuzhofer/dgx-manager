@@ -158,6 +158,12 @@ export default function DeploymentsPage() {
     );
   };
 
+  const deleteDeployment = async (id: string) => {
+    if (!confirm("Delete this deployment record?")) return;
+    await apiFetch(`/api/deployments/${id}`, { method: "DELETE" });
+    setDeployments((prev) => prev.filter((d) => d.id !== id));
+  };
+
   const selectedRecipeData = recipes.find((r) => r.file === selectedRecipe);
   const onlineNodes = nodes.filter((n) => n.status === "online");
 
@@ -337,12 +343,20 @@ export default function DeploymentsPage() {
                       </button>
                     )}
                     {(d.status === "stopped" || d.status === "failed") && (
-                      <button
-                        onClick={() => restartDeployment(d.id)}
-                        className="text-xs px-2 py-1 rounded bg-blue-900/50 hover:bg-blue-800 text-blue-300 transition-colors"
-                      >
-                        Restart
-                      </button>
+                      <>
+                        <button
+                          onClick={() => restartDeployment(d.id)}
+                          className="text-xs px-2 py-1 rounded bg-blue-900/50 hover:bg-blue-800 text-blue-300 transition-colors"
+                        >
+                          Restart
+                        </button>
+                        <button
+                          onClick={() => deleteDeployment(d.id)}
+                          className="text-xs px-2 py-1 rounded bg-red-900/50 hover:bg-red-800 text-red-300 transition-colors"
+                        >
+                          Delete
+                        </button>
+                      </>
                     )}
                   </div>
                 </div>
