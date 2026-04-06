@@ -27,7 +27,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <div className="flex items-center gap-1">
                 <NavLink href="/">Overview</NavLink>
                 <NavLink href="/nodes">Nodes</NavLink>
-                <NavLink href="/models">Models</NavLink>
+                <NavLink href="/deployments">Deployments</NavLink>
                 <NavLink href="/finetune">Fine-tune</NavLink>
                 <NavLink href="/loadbalancer">Load Balancer</NavLink>
               </div>

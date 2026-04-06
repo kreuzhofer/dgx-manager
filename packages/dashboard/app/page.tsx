@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
-import { useDashboardWs } from "@/lib/ws";
+import { useSSE, type SseEvent } from "@/lib/sse";
 import { NodeCard } from "@/components/node-card";
 
 interface NodeMetric {
@@ -22,46 +22,87 @@ interface Node {
   metrics: NodeMetric[];
 }
 
+interface DeploymentSummary {
+  total: number;
+  running: number;
+}
+
 export default function OverviewPage() {
   const [nodes, setNodes] = useState<Node[]>([]);
+  const [deployments, setDeployments] = useState<DeploymentSummary>({ total: 0, running: 0 });
+  const [recipeCount, setRecipeCount] = useState(0);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    apiFetch<Node[]>("/api/nodes")
-      .then(setNodes)
+    Promise.all([
+      apiFetch<Node[]>("/api/nodes"),
+      apiFetch<{ id: string; status: string }[]>("/api/deployments"),
+      apiFetch<unknown[]>("/api/recipes"),
+    ])
+      .then(([n, d, r]) => {
+        setNodes(n);
+        setDeployments({
+          total: d.length,
+          running: d.filter((x) => x.status === "running").length,
+        });
+        setRecipeCount(r.length);
+      })
       .catch(console.error)
       .finally(() => setLoading(false));
   }, []);
 
-  const handleWsMessage = useCallback((msg: { type: string; payload: unknown }) => {
-    if (msg.type === "update:metrics") {
-      const { nodeId, metrics } = msg.payload as { nodeId: string; metrics: NodeMetric };
+  const handleSSE = useCallback((event: SseEvent) => {
+    if (event.type === "node:metrics") {
+      const { nodeId, ...metrics } = event.payload as { nodeId: string } & NodeMetric;
       setNodes((prev) =>
         prev.map((n) =>
-          n.id === nodeId ? { ...n, metrics: [metrics], status: "online" } : n
+          n.id === nodeId ? { ...n, metrics: [metrics as NodeMetric], status: "online" } : n
         )
       );
     }
-    if (msg.type === "update:node") {
-      const node = msg.payload as Node;
-      setNodes((prev) => prev.map((n) => (n.id === node.id ? { ...n, ...node } : n)));
+    if (event.type === "node:status") {
+      const { nodeId, status } = event.payload as { nodeId: string; status: string };
+      setNodes((prev) => prev.map((n) => (n.id === nodeId ? { ...n, status } : n)));
     }
   }, []);
 
-  const { connected } = useDashboardWs(handleWsMessage);
+  const { connected } = useSSE(handleSSE);
 
-  if (loading) {
-    return <p className="text-gray-400">Loading nodes...</p>;
-  }
+  if (loading) return <p className="text-gray-400">Loading...</p>;
+
+  const onlineNodes = nodes.filter((n) => n.status === "online").length;
 
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">Cluster Overview</h1>
-        <span className={`text-xs px-2 py-1 rounded ${connected ? "bg-green-900 text-green-300" : "bg-red-900 text-red-300"}`}>
+        <span
+          className={`text-xs px-2 py-1 rounded ${
+            connected ? "bg-green-900 text-green-300" : "bg-red-900 text-red-300"
+          }`}
+        >
           {connected ? "Live" : "Disconnected"}
         </span>
       </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        <StatCard label="Nodes" value={nodes.length} sub={`${onlineNodes} online`} />
+        <StatCard label="Deployments" value={deployments.total} sub={`${deployments.running} running`} />
+        <StatCard label="Recipes" value={recipeCount} sub="available" />
+        <StatCard
+          label="GPU Utilization"
+          value={
+            nodes.length > 0
+              ? `${Math.round(
+                  nodes.reduce((s, n) => s + (n.metrics[0]?.gpuUtil || 0), 0) / Math.max(onlineNodes, 1)
+                )}%`
+              : "—"
+          }
+          sub="cluster avg"
+        />
+      </div>
+
       {nodes.length === 0 ? (
         <div className="text-gray-400 text-center py-16">
           <p className="text-lg">No nodes added yet.</p>
@@ -80,6 +121,16 @@ export default function OverviewPage() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function StatCard({ label, value, sub }: { label: string; value: string | number; sub: string }) {
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+      <p className="text-xs text-gray-500 uppercase tracking-wide">{label}</p>
+      <p className="text-2xl font-bold mt-1">{value}</p>
+      <p className="text-xs text-gray-500 mt-0.5">{sub}</p>
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { prisma } from "../prisma.js";
+import { broadcast as sseBroadcast } from "../sse.js";
 
 export interface VllmRecipe {
   file: string;
@@ -68,6 +69,7 @@ export class AgentHub {
               },
             });
             console.log(`Agent registered: ${nodeId}`);
+            sseBroadcast({ type: "node:status", payload: { nodeId, status: "online" } });
             break;
           }
 
@@ -96,6 +98,7 @@ export class AgentHub {
               data: { lastSeen: new Date() },
             });
             this.onMetrics?.(nodeId, msg.payload);
+            sseBroadcast({ type: "node:metrics", payload: { nodeId, ...msg.payload } });
             break;
           }
 
@@ -106,6 +109,13 @@ export class AgentHub {
               data: { status, port: port ?? undefined },
             });
             if (error) console.error(`Deployment ${deploymentId} error: ${error}`);
+            sseBroadcast({ type: "deployment:status", payload: { deploymentId, status, port, error } });
+            break;
+          }
+
+          case "agent:deployment:log": {
+            const { deploymentId, log } = msg.payload;
+            sseBroadcast({ type: "deployment:log", payload: { deploymentId, log } });
             break;
           }
 
@@ -145,6 +155,7 @@ export class AgentHub {
           data: { status: "offline" },
         }).catch(() => {});
         console.log(`Agent disconnected: ${nodeId}`);
+        sseBroadcast({ type: "node:status", payload: { nodeId, status: "offline" } });
       }
     });
   }
