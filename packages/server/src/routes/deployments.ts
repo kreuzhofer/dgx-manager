@@ -7,18 +7,48 @@ export const deploymentsRouter = Router();
 deploymentsRouter.get("/", async (_req, res) => {
   const deployments = await prisma.deployment.findMany({
     orderBy: { createdAt: "desc" },
-    include: { node: true, model: true },
+    include: {
+      node: true,
+      model: true,
+      clusterNodes: { include: { node: true } },
+    },
   });
   res.json(deployments);
 });
 
 deploymentsRouter.post("/", async (req, res) => {
-  const { nodeId, recipeFile, config } = req.body;
-  if (!nodeId || !recipeFile) {
-    return res.status(400).json({ error: "nodeId and recipeFile required" });
+  const { nodeId, nodeIds, recipeFile, config } = req.body;
+  if (!recipeFile) {
+    return res.status(400).json({ error: "recipeFile required" });
   }
 
-  // Ensure a model record exists for this recipe
+  const isCluster = Array.isArray(nodeIds) && nodeIds.length > 1;
+  const headNodeId = isCluster ? nodeIds[0] : nodeId;
+
+  if (!headNodeId) {
+    return res.status(400).json({ error: "nodeId or nodeIds required" });
+  }
+
+  // For cluster deployments, check no selected node has an active deployment
+  if (isCluster) {
+    const busy = await prisma.deployment.findMany({
+      where: {
+        status: { in: ["pending", "running", "starting", "building", "downloading", "launching", "loading", "restarting"] },
+        OR: [
+          { nodeId: { in: nodeIds } },
+          { clusterNodes: { some: { nodeId: { in: nodeIds } } } },
+        ],
+      },
+    });
+    if (busy.length > 0) {
+      return res.status(409).json({
+        error: "One or more selected nodes already have active deployments",
+        busyNodes: busy.map((d) => d.nodeId),
+      });
+    }
+  }
+
+  // Ensure a model record exists
   const recipeName = recipeFile.replace(/^recipes\//, "").replace(/\.yaml$/, "");
   let model = await prisma.model.findUnique({ where: { name: recipeName } });
   if (!model) {
@@ -27,39 +57,84 @@ deploymentsRouter.post("/", async (req, res) => {
     });
   }
 
+  // Create deployment
   const deployment = await prisma.deployment.create({
     data: {
       modelId: model.id,
-      nodeId,
+      nodeId: headNodeId,
+      clusterMode: isCluster,
       config: JSON.stringify({ recipeFile, ...config }),
     },
   });
 
+  // For cluster, create ClusterNode records and resolve IPs
+  let clusterNodeIps: string[] | undefined;
+  if (isCluster) {
+    const nodes = await prisma.node.findMany({
+      where: { id: { in: nodeIds } },
+    });
+    const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+
+    for (let i = 0; i < nodeIds.length; i++) {
+      const nid = nodeIds[i];
+      await prisma.clusterNode.create({
+        data: {
+          deploymentId: deployment.id,
+          nodeId: nid,
+          role: nid === headNodeId ? "head" : "worker",
+          status: "pending",
+        },
+      });
+    }
+
+    // Ordered: head first, then workers
+    clusterNodeIps = nodeIds.map((id: string) => nodeMap.get(id)?.ipAddress).filter(Boolean);
+  }
+
+  // Send deploy command to head agent
   const agentHub: AgentHub = req.app.get("agentHub");
-  agentHub.sendToAgent(nodeId, {
+  agentHub.sendToAgent(headNodeId, {
     type: "cmd:deploy",
     payload: {
       deploymentId: deployment.id,
       recipeFile,
       config: config || {},
+      clusterNodes: clusterNodeIps,
     },
   });
 
-  res.status(201).json(deployment);
+  // Return with cluster info
+  const result = await prisma.deployment.findUnique({
+    where: { id: deployment.id },
+    include: { node: true, model: true, clusterNodes: { include: { node: true } } },
+  });
+
+  res.status(201).json(result);
 });
 
 // DELETE /api/deployments/:id — stop deployment
 deploymentsRouter.delete("/:id", async (req, res) => {
-  const deployment = await prisma.deployment.findUnique({ where: { id: req.params.id } });
+  const deployment = await prisma.deployment.findUnique({
+    where: { id: req.params.id },
+    include: { clusterNodes: { include: { node: true } } },
+  });
   if (!deployment) return res.status(404).json({ error: "Deployment not found" });
 
   const agentHub: AgentHub = req.app.get("agentHub");
   const wantDelete = req.query.delete === "true";
 
-  // Send undeploy with deleteAfter flag
+  // For cluster deployments, pass cluster IPs to the head agent
+  const clusterNodeIps = deployment.clusterMode
+    ? deployment.clusterNodes.map((cn) => cn.node.ipAddress)
+    : undefined;
+
   agentHub.sendToAgent(deployment.nodeId, {
     type: "cmd:undeploy",
-    payload: { deploymentId: deployment.id, deleteAfter: wantDelete },
+    payload: {
+      deploymentId: deployment.id,
+      deleteAfter: wantDelete,
+      clusterNodes: clusterNodeIps,
+    },
   });
 
   await prisma.deployment.update({
@@ -67,26 +142,38 @@ deploymentsRouter.delete("/:id", async (req, res) => {
     data: { status: "removing" },
   });
 
+  // Update cluster node statuses
+  if (deployment.clusterMode) {
+    await prisma.clusterNode.updateMany({
+      where: { deploymentId: deployment.id },
+      data: { status: "stopping" },
+    });
+  }
+
   res.json({ status: "removing" });
 });
 
 deploymentsRouter.post("/:id/restart", async (req, res) => {
   const deployment = await prisma.deployment.findUnique({
     where: { id: req.params.id },
-    include: { model: true },
+    include: { model: true, clusterNodes: { include: { node: true } } },
   });
   if (!deployment) return res.status(404).json({ error: "Deployment not found" });
 
   const agentHub: AgentHub = req.app.get("agentHub");
   const config = deployment.config ? JSON.parse(deployment.config) : {};
+
+  const clusterNodeIps = deployment.clusterMode
+    ? deployment.clusterNodes.map((cn) => cn.node.ipAddress)
+    : undefined;
+
   agentHub.sendToAgent(deployment.nodeId, {
     type: "cmd:deploy",
     payload: {
       deploymentId: deployment.id,
       recipeFile: config.recipeFile,
-      modelName: deployment.model.name,
-      runtime: deployment.model.runtime,
       config,
+      clusterNodes: clusterNodeIps,
     },
   });
 

@@ -211,9 +211,11 @@ nodesRouter.delete("/:id", async (req, res) => {
 
   // Clean up DB: delete related records then the node
   await prisma.metricSnapshot.deleteMany({ where: { nodeId: node.id } });
+  await prisma.clusterNode.deleteMany({ where: { nodeId: node.id } });
   await prisma.loadBalancerEndpoint.deleteMany({
     where: { deployment: { nodeId: node.id } },
   });
+  await prisma.clusterNode.deleteMany({ where: { deployment: { nodeId: node.id } } });
   await prisma.deployment.deleteMany({ where: { nodeId: node.id } });
   await prisma.fineTuneJob.deleteMany({ where: { nodeId: node.id } });
   await prisma.node.delete({ where: { id: node.id } });

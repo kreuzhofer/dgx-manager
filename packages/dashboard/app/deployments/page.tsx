@@ -22,6 +22,13 @@ interface Node {
   status: string;
 }
 
+interface ClusterNodeInfo {
+  id: string;
+  role: string;
+  status: string;
+  node: { name: string; ipAddress: string };
+}
+
 interface Deployment {
   id: string;
   nodeId: string;
@@ -29,9 +36,11 @@ interface Deployment {
   status: string;
   port: number | null;
   config: string | null;
+  clusterMode: boolean;
   createdAt: string;
   node?: { name: string; ipAddress: string };
   model?: { name: string };
+  clusterNodes?: ClusterNodeInfo[];
 }
 
 const statusStyles: Record<string, string> = {
@@ -58,6 +67,7 @@ export default function DeploymentsPage() {
   // Deploy form state
   const [selectedRecipe, setSelectedRecipe] = useState<string>("");
   const [selectedNode, setSelectedNode] = useState<string>("");
+  const [selectedNodes, setSelectedNodes] = useState<string[]>([]);
   const [port, setPort] = useState("8000");
   const [deploying, setDeploying] = useState(false);
 
@@ -131,19 +141,29 @@ export default function DeploymentsPage() {
 
   const deploy = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedRecipe || !selectedNode) return;
+    const isClusterRecipe = selectedRecipeData?.cluster_only;
+    const hasNodes = isClusterRecipe ? selectedNodes.length >= 2 : !!selectedNode;
+    if (!selectedRecipe || !hasNodes) return;
     setDeploying(true);
     try {
+      const body = isClusterRecipe
+        ? {
+            nodeIds: selectedNodes,
+            recipeFile: selectedRecipe,
+            config: { port: parseInt(port) || 8000 },
+          }
+        : {
+            nodeId: selectedNode,
+            recipeFile: selectedRecipe,
+            config: { port: parseInt(port) || 8000 },
+          };
       const deployment = await apiFetch<Deployment>("/api/deployments", {
         method: "POST",
-        body: JSON.stringify({
-          nodeId: selectedNode,
-          recipeFile: selectedRecipe,
-          config: { port: parseInt(port) || 8000 },
-        }),
+        body: JSON.stringify(body),
       });
       setDeployments((prev) => [deployment, ...prev]);
       setSelectedRecipe("");
+      setSelectedNodes([]);
       setViewingLogs(deployment.id);
     } catch (err) {
       alert(String(err));
@@ -219,19 +239,48 @@ export default function DeploymentsPage() {
             </select>
           </div>
           <div>
-            <label className="block text-xs text-gray-400 mb-1">Node</label>
-            <select
-              value={selectedNode}
-              onChange={(e) => setSelectedNode(e.target.value)}
-              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
-            >
-              <option value="">Select a node...</option>
-              {onlineNodes.map((n) => (
-                <option key={n.id} value={n.id}>
-                  {n.name} ({n.ipAddress})
-                </option>
-              ))}
-            </select>
+            <label className="block text-xs text-gray-400 mb-1">
+              {selectedRecipeData?.cluster_only ? `Nodes (select ${selectedRecipeData?.defaults?.tensor_parallel || 2}+)` : "Node"}
+            </label>
+            {selectedRecipeData?.cluster_only ? (
+              <div className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm space-y-1 max-h-32 overflow-y-auto">
+                {onlineNodes.length === 0 && (
+                  <p className="text-gray-500 text-xs">No online nodes</p>
+                )}
+                {onlineNodes.map((n) => (
+                  <label key={n.id} className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={selectedNodes.includes(n.id)}
+                      onChange={(e) => {
+                        setSelectedNodes((prev) =>
+                          e.target.checked
+                            ? [...prev, n.id]
+                            : prev.filter((id) => id !== n.id)
+                        );
+                      }}
+                      className="rounded border-gray-600 bg-gray-700 text-green-500 focus:ring-green-500"
+                    />
+                    <span className="text-gray-300">
+                      {n.name} <span className="text-gray-500">({n.ipAddress})</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <select
+                value={selectedNode}
+                onChange={(e) => setSelectedNode(e.target.value)}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
+              >
+                <option value="">Select a node...</option>
+                {onlineNodes.map((n) => (
+                  <option key={n.id} value={n.id}>
+                    {n.name} ({n.ipAddress})
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1">Port</label>
@@ -268,7 +317,7 @@ export default function DeploymentsPage() {
         <div className="mt-4 flex justify-end">
           <button
             type="submit"
-            disabled={deploying || !selectedRecipe || !selectedNode}
+            disabled={deploying || !selectedRecipe || (selectedRecipeData?.cluster_only ? selectedNodes.length < 2 : !selectedNode)}
             className="bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-5 py-2 rounded text-sm font-medium transition-colors"
           >
             {deploying ? "Deploying..." : "Deploy"}
@@ -306,8 +355,16 @@ export default function DeploymentsPage() {
                         {d.model?.name || recipeName || d.modelId}
                       </h3>
                       <p className="text-xs text-gray-500 mt-0.5">
-                        {d.node?.name || d.nodeId}
-                        {d.node?.ipAddress && ` (${d.node.ipAddress})`}
+                        {d.clusterMode && d.clusterNodes ? (
+                          <span className="text-indigo-400">
+                            {d.clusterNodes.length} nodes
+                          </span>
+                        ) : (
+                          <>
+                            {d.node?.name || d.nodeId}
+                            {d.node?.ipAddress && ` (${d.node.ipAddress})`}
+                          </>
+                        )}
                         {d.port && (
                           <span className="ml-2 text-gray-400">
                             :{d.port}
@@ -376,6 +433,27 @@ export default function DeploymentsPage() {
                     )}
                   </div>
                 </div>
+
+                {/* Cluster nodes detail */}
+                {d.clusterMode && d.clusterNodes && d.clusterNodes.length > 0 && (
+                  <div className="mt-3 flex gap-2 flex-wrap">
+                    {d.clusterNodes.map((cn) => (
+                      <div
+                        key={cn.id}
+                        className={`text-xs px-2 py-1 rounded border ${
+                          cn.role === "head"
+                            ? "border-indigo-700 bg-indigo-900/30 text-indigo-300"
+                            : "border-gray-700 bg-gray-800/50 text-gray-400"
+                        }`}
+                      >
+                        <span className="font-medium">{cn.node.name}</span>
+                        <span className="ml-1 text-[10px] opacity-70">
+                          {cn.role === "head" ? "HEAD" : "worker"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 {/* Log viewer */}
                 {viewingLogs === d.id && (

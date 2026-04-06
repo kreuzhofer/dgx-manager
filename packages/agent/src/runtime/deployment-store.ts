@@ -7,6 +7,7 @@ export interface TrackedDeployment {
   recipeName: string;
   port: number;
   startedAt: string;
+  clusterNodes?: string[];
 }
 
 const STORE_PATH =

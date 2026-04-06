@@ -22,9 +22,10 @@ model Node {
   agentVersion    String?
   lastSeen        DateTime?
   createdAt       DateTime         @default(now())
-  deployments     Deployment[]
-  finetuneJobs    FineTuneJob[]
-  metrics         MetricSnapshot[]
+  deployments          Deployment[]
+  clusterMemberships   ClusterNode[]
+  finetuneJobs         FineTuneJob[]
+  metrics              MetricSnapshot[]
 }
 
 model Model {
@@ -37,17 +38,29 @@ model Model {
 }
 
 model Deployment {
-  id          String                 @id @default(cuid())
-  nodeId      String
-  modelId     String
-  status      String                 @default("pending")
-  port        Int?
-  config      String?
-  createdAt   DateTime               @default(now())
-  updatedAt   DateTime               @updatedAt
-  node        Node                   @relation(fields: [nodeId], references: [id])
-  model       Model                  @relation(fields: [modelId], references: [id])
-  lbEndpoints LoadBalancerEndpoint[]
+  id           String                 @id @default(cuid())
+  nodeId       String
+  modelId      String
+  status       String                 @default("pending")
+  port         Int?
+  config       String?
+  clusterMode  Boolean                @default(false)
+  createdAt    DateTime               @default(now())
+  updatedAt    DateTime               @updatedAt
+  node         Node                   @relation(fields: [nodeId], references: [id])
+  model        Model                  @relation(fields: [modelId], references: [id])
+  lbEndpoints  LoadBalancerEndpoint[]
+  clusterNodes ClusterNode[]
+}
+
+model ClusterNode {
+  id           String     @id @default(cuid())
+  deploymentId String
+  nodeId       String
+  role         String     @default("worker")
+  status       String     @default("pending")
+  deployment   Deployment @relation(fields: [deploymentId], references: [id])
+  node         Node       @relation(fields: [nodeId], references: [id])
 }
 
 model MetricSnapshot {

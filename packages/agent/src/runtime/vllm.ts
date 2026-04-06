@@ -32,7 +32,7 @@ const running = new Map<string, VllmInstance>();
 export function launchRecipe(
   deploymentId: string,
   recipeFile: string,
-  options?: { port?: number; gpuMem?: number; maxModelLen?: number },
+  options?: { port?: number; gpuMem?: number; maxModelLen?: number; clusterNodes?: string[] },
   onLog?: (line: string) => void,
   onExit?: (code: number | null) => void
 ): number {
@@ -49,7 +49,15 @@ export function launchRecipe(
     .replace(/^recipes\//, "")
     .replace(/\.yaml$/, "");
 
-  const args = [recipeName, "--solo", "--setup"];
+  const isCluster = options?.clusterNodes && options.clusterNodes.length > 1;
+  const args = [recipeName];
+
+  if (isCluster) {
+    args.push("-n", options!.clusterNodes!.join(","), "--setup");
+  } else {
+    args.push("--solo", "--setup");
+  }
+
   if (options?.port) args.push("--port", String(options.port));
   if (options?.gpuMem) args.push("--gpu-mem", String(options.gpuMem));
   if (options?.maxModelLen) args.push("--max-model-len", String(options.maxModelLen));
@@ -114,13 +122,14 @@ export function launchRecipe(
     recipeName,
     port,
     startedAt: new Date().toISOString(),
+    clusterNodes: isCluster ? options!.clusterNodes : undefined,
   });
 
   return port;
 }
 
-/** Stop a running vLLM instance. */
-export function stopRecipe(deploymentId: string): boolean {
+/** Stop a running vLLM instance. Supports cluster mode via clusterNodes. */
+export function stopRecipe(deploymentId: string, clusterNodes?: string[]): boolean {
   const instance = running.get(deploymentId);
   if (!instance) return false;
 
@@ -128,11 +137,20 @@ export function stopRecipe(deploymentId: string): boolean {
   // Kill log tail if running
   const tailProc = (instance as unknown as Record<string, unknown>).tailProcess as ChildProcess | undefined;
   if (tailProc) tailProc.kill();
+
+  const isCluster = clusterNodes && clusterNodes.length > 1;
   try {
-    execSync(
-      `${join(VLLM_REPO_PATH, "launch-cluster.sh")} --solo stop`,
-      { cwd: VLLM_REPO_PATH, timeout: 30_000, stdio: "inherit" }
-    );
+    if (isCluster) {
+      execSync(
+        `${join(VLLM_REPO_PATH, "launch-cluster.sh")} -n ${clusterNodes.join(",")} stop`,
+        { cwd: VLLM_REPO_PATH, timeout: 60_000, stdio: "inherit" }
+      );
+    } else {
+      execSync(
+        `${join(VLLM_REPO_PATH, "launch-cluster.sh")} --solo stop`,
+        { cwd: VLLM_REPO_PATH, timeout: 30_000, stdio: "inherit" }
+      );
+    }
   } catch {
     instance.process.kill("SIGTERM");
   }
@@ -165,18 +183,25 @@ export function isVllmContainerRunning(): boolean {
 }
 
 /** Force stop any vLLM containers and clear tracking. */
-export function forceStopVllm(): void {
+export function forceStopVllm(clusterNodes?: string[]): void {
+  const isCluster = clusterNodes && clusterNodes.length > 1;
   try {
-    execSync(
-      `${join(VLLM_REPO_PATH, "launch-cluster.sh")} --solo stop`,
-      { cwd: VLLM_REPO_PATH, timeout: 30_000, stdio: "pipe" }
-    );
+    if (isCluster) {
+      execSync(
+        `${join(VLLM_REPO_PATH, "launch-cluster.sh")} -n ${clusterNodes.join(",")} stop`,
+        { cwd: VLLM_REPO_PATH, timeout: 60_000, stdio: "pipe" }
+      );
+    } else {
+      execSync(
+        `${join(VLLM_REPO_PATH, "launch-cluster.sh")} --solo stop`,
+        { cwd: VLLM_REPO_PATH, timeout: 30_000, stdio: "pipe" }
+      );
+    }
   } catch {
     try {
       execSync("docker stop vllm_node", { timeout: 15_000, stdio: "pipe" });
     } catch { /* nothing running */ }
   }
-  // Clear all tracked deployments since we stopped everything
   clearDeployments();
 }
 

@@ -128,9 +128,18 @@ export class AgentHub {
             if (error) console.error(`Deployment ${deploymentId} error: ${error}`);
             sseBroadcast({ type: "deployment:status", payload: { deploymentId, status, port, error } });
 
+            // Update cluster node statuses when deployment changes
+            if (["stopped", "failed", "running"].includes(status)) {
+              await prisma.clusterNode.updateMany({
+                where: { deploymentId },
+                data: { status },
+              }).catch(() => {});
+            }
+
             // Auto-delete record after confirmed stop
             if (status === "stopped" && deleteAfter) {
               try {
+                await prisma.clusterNode.deleteMany({ where: { deploymentId } });
                 await prisma.loadBalancerEndpoint.deleteMany({ where: { deploymentId } });
                 await prisma.deployment.delete({ where: { id: deploymentId } });
                 sseBroadcast({ type: "deployment:deleted", payload: { deploymentId } });

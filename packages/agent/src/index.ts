@@ -148,9 +148,12 @@ function connect() {
 function detectPhase(line: string): string | null {
   const l = line.toLowerCase();
   if (l.includes("building") || l.includes("=== building")) return "building";
+  if (l.includes("copying") && l.includes("image to")) return "building";
   if (l.includes("downloading model") || l.includes("=== downloading")) return "downloading";
   if (l.includes("fetching") && l.includes("files")) return "downloading";
   if (l.includes("starting head node") || l.includes("applying mod")) return "launching";
+  if (l.includes("starting ray") || l.includes("ray worker")) return "launching";
+  if (l.includes("starting worker node")) return "launching";
   if (l.includes("loading safetensors") || l.includes("loading model")) return "loading";
   if (l.includes("application startup complete")) return "running";
   return null;
@@ -165,10 +168,11 @@ function sendMsg(type: string, payload: Record<string, unknown>) {
 function handleCommand(msg: { type: string; payload: Record<string, unknown> }) {
   switch (msg.type) {
     case "cmd:deploy": {
-      const { deploymentId, recipeFile, config } = msg.payload as {
+      const { deploymentId, recipeFile, config, clusterNodes } = msg.payload as {
         deploymentId: string;
         recipeFile?: string;
         config?: Record<string, unknown>;
+        clusterNodes?: string[];
       };
       if (!recipeFile) {
         sendMsg("agent:deployment:status", {
@@ -188,6 +192,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             port: (config?.port as number) ?? 8000,
             gpuMem: config?.gpuMem as number,
             maxModelLen: config?.maxModelLen as number,
+            clusterNodes,
           },
           (line) => {
             sendMsg("agent:deployment:log", { deploymentId, log: line });
@@ -245,14 +250,16 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
     }
 
     case "cmd:undeploy": {
-      const { deploymentId, deleteAfter } = msg.payload as { deploymentId: string; deleteAfter?: boolean };
+      const { deploymentId, deleteAfter, clusterNodes } = msg.payload as {
+        deploymentId: string; deleteAfter?: boolean; clusterNodes?: string[];
+      };
       sendMsg("agent:deployment:status", { deploymentId, status: "stopping" });
 
       // Stop asynchronously so we can report progress
       (async () => {
         try {
-          stopRecipe(deploymentId);
-          forceStopVllm();
+          stopRecipe(deploymentId, clusterNodes);
+          forceStopVllm(clusterNodes);
 
           // Wait for container to actually stop
           let retries = 10;
