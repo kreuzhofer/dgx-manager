@@ -145,6 +145,17 @@ function connect() {
   });
 }
 
+function detectPhase(line: string): string | null {
+  const l = line.toLowerCase();
+  if (l.includes("building") || l.includes("=== building")) return "building";
+  if (l.includes("downloading model") || l.includes("=== downloading")) return "downloading";
+  if (l.includes("fetching") && l.includes("files")) return "downloading";
+  if (l.includes("starting head node") || l.includes("applying mod")) return "launching";
+  if (l.includes("loading safetensors") || l.includes("loading model")) return "loading";
+  if (l.includes("application startup complete")) return "running";
+  return null;
+}
+
 function sendMsg(type: string, payload: Record<string, unknown>) {
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type, payload }));
@@ -169,6 +180,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
       }
       try {
         sendMsg("agent:deployment:status", { deploymentId, status: "starting" });
+        let lastPhase = "starting";
         const port = launchRecipe(
           deploymentId,
           recipeFile,
@@ -178,8 +190,18 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             maxModelLen: config?.maxModelLen as number,
           },
           (line) => {
-            // Stream logs back
             sendMsg("agent:deployment:log", { deploymentId, log: line });
+
+            // Detect deployment phase from log output
+            const phase = detectPhase(line);
+            if (phase && phase !== lastPhase) {
+              lastPhase = phase;
+              sendMsg("agent:deployment:status", {
+                deploymentId,
+                status: phase,
+                port: phase === "running" ? (config?.port as number) ?? 8000 : undefined,
+              });
+            }
           },
           (code) => {
             // run-recipe.sh exits after launching the docker container.
@@ -211,7 +233,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             }
           }
         );
-        sendMsg("agent:deployment:status", { deploymentId, status: "running", port });
+        // Status updates are driven by log phase detection, not sent here
       } catch (err) {
         sendMsg("agent:deployment:status", {
           deploymentId,

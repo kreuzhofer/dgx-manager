@@ -37,6 +37,10 @@ interface Deployment {
 const statusStyles: Record<string, string> = {
   pending: "bg-gray-700 text-gray-300",
   starting: "bg-blue-900 text-blue-300",
+  building: "bg-purple-900 text-purple-300",
+  downloading: "bg-cyan-900 text-cyan-300",
+  launching: "bg-blue-900 text-blue-300",
+  loading: "bg-yellow-900 text-yellow-300",
   running: "bg-green-900 text-green-300",
   stopping: "bg-yellow-900 text-yellow-300",
   stopped: "bg-gray-800 text-gray-400",
@@ -281,7 +285,7 @@ export default function DeploymentsPage() {
             const recipeName = config.recipeFile
               ?.replace(/^recipes\//, "")
               .replace(/\.yaml$/, "");
-            const isActive = ["running", "starting", "pending", "restarting"].includes(d.status);
+            const isActive = ["running", "starting", "pending", "restarting", "building", "downloading", "launching", "loading"].includes(d.status);
 
             return (
               <div

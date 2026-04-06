@@ -78,9 +78,31 @@ export function launchRecipe(
   });
 
   child.on("exit", (code) => {
-    console.log(`[vllm:${recipeName}] exited with code ${code}`);
-    running.delete(deploymentId);
+    console.log(`[vllm:${recipeName}] run-recipe exited with code ${code}`);
+    // Don't remove from running map — the docker container may still be alive.
+    // The onExit handler will check container status.
     onExit?.(code);
+
+    // If container launched successfully, tail docker logs for loading progress
+    if (isVllmContainerRunning()) {
+      const tail = spawn("docker", ["logs", "-f", "vllm_node"], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const forwardLog = (data: Buffer) => {
+        const line = data.toString();
+        onLog?.(line);
+      };
+      tail.stdout?.on("data", forwardLog);
+      tail.stderr?.on("data", forwardLog);
+      tail.on("exit", () => {
+        console.log(`[vllm:${recipeName}] docker log tail ended`);
+      });
+      // Store the tail process so we can kill it on undeploy
+      const inst = running.get(deploymentId);
+      if (inst) {
+        (inst as unknown as Record<string, unknown>).tailProcess = tail;
+      }
+    }
   });
 
   running.set(deploymentId, { process: child, recipeName, port });
@@ -103,6 +125,9 @@ export function stopRecipe(deploymentId: string): boolean {
   if (!instance) return false;
 
   console.log(`Stopping vLLM recipe: ${instance.recipeName}`);
+  // Kill log tail if running
+  const tailProc = (instance as unknown as Record<string, unknown>).tailProcess as ChildProcess | undefined;
+  if (tailProc) tailProc.kill();
   try {
     execSync(
       `${join(VLLM_REPO_PATH, "launch-cluster.sh")} --solo stop`,
