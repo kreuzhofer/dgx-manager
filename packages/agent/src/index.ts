@@ -182,11 +182,33 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             sendMsg("agent:deployment:log", { deploymentId, log: line });
           },
           (code) => {
-            sendMsg("agent:deployment:status", {
-              deploymentId,
-              status: code === 0 ? "stopped" : "failed",
-              error: code !== 0 ? `Process exited with code ${code}` : undefined,
-            });
+            // run-recipe.sh exits after launching the docker container.
+            // Code 0 = container launched successfully (still running).
+            // Code != 0 = setup/launch failed.
+            if (code === 0) {
+              // Container should be running — verify and keep status as running
+              if (isVllmContainerRunning()) {
+                console.log(`[deploy] run-recipe.sh exited 0, container still running`);
+              } else {
+                sendMsg("agent:deployment:status", {
+                  deploymentId,
+                  status: "failed",
+                  error: "Container not running after launch script exited",
+                });
+              }
+            } else {
+              // Check if container started despite script error (e.g. download warning)
+              if (isVllmContainerRunning()) {
+                console.log(`[deploy] run-recipe.sh exited ${code}, but container is running`);
+                sendMsg("agent:deployment:status", { deploymentId, status: "running", port });
+              } else {
+                sendMsg("agent:deployment:status", {
+                  deploymentId,
+                  status: "failed",
+                  error: `Launch failed with exit code ${code}`,
+                });
+              }
+            }
           }
         );
         sendMsg("agent:deployment:status", { deploymentId, status: "running", port });

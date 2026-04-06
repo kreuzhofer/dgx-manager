@@ -11,6 +11,7 @@ After=network.target
 
 [Service]
 Type=simple
+User=%SSH_USER%
 ExecStart=/usr/bin/node /opt/dgx-agent/dist/index.js
 Restart=always
 RestartSec=5
@@ -18,6 +19,8 @@ Environment=MANAGER_URL=ws://%MANAGER_HOST%:%MANAGER_PORT%/ws/agent
 Environment=NODE_ID=%NODE_ID%
 Environment=HF_HOME=/mnt/tank/models
 Environment=VLLM_REPO_PATH=/mnt/tank/src/github/spark-vllm-docker
+Environment=HOME=/home/%SSH_USER%
+Environment=PATH=/home/%SSH_USER%/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 [Install]
 WantedBy=multi-user.target`;
@@ -34,9 +37,11 @@ export async function deployAgent(
     sseBroadcast({ type: "node:provision", payload: { nodeId, step, status, detail } });
   };
 
+  const sshUser = process.env.SSH_USER || process.env.USER || "ubuntu";
+
   // Create agent directory
   emit("Create directory", "running");
-  const mkdir = await sshExec(host, "sudo mkdir -p /opt/dgx-agent");
+  const mkdir = await sshExec(host, `sudo mkdir -p /opt/dgx-agent && sudo chown -R ${sshUser}:${sshUser} /opt/dgx-agent`);
   logs.push(mkdir.code === 0 ? "Created /opt/dgx-agent" : `mkdir failed: ${mkdir.stderr}`);
   emit("Create directory", mkdir.code === 0 ? "done" : "failed", logs[logs.length - 1]);
 
@@ -60,9 +65,10 @@ export async function deployAgent(
   // Create systemd service file
   emit("Service file", "running");
   const serviceContent = AGENT_SERVICE
-    .replace("%MANAGER_HOST%", managerHost)
-    .replace("%MANAGER_PORT%", String(managerPort))
-    .replace("%NODE_ID%", nodeId);
+    .replace(/%MANAGER_HOST%/g, managerHost)
+    .replace(/%MANAGER_PORT%/g, String(managerPort))
+    .replace(/%NODE_ID%/g, nodeId)
+    .replace(/%SSH_USER%/g, sshUser);
 
   const writeService = await sshExec(
     host,
