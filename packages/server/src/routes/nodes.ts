@@ -162,9 +162,17 @@ nodesRouter.post("/:id/deploy-agent", async (req, res) => {
   const managerPort = Number(process.env.PORT || 4000);
 
   const log = await deployAgent(node.ipAddress, node.id, managerHost, managerPort);
+
+  // Re-audit to refresh prereq status after deploy
+  const report = await auditNode(node.ipAddress, node.id);
   await prisma.node.update({
     where: { id: node.id },
-    data: { provisionStatus: "agent-deployed" },
+    data: {
+      provisionStatus: "agent-deployed",
+      provisionLog: JSON.stringify(report),
+      dockerAvailable: report.checks.find((c) => c.name === "Docker")?.status === "green",
+      ollamaInstalled: report.checks.find((c) => c.name === "Ollama")?.status === "green",
+    },
   });
 
   res.json({ status: "agent-deployed", log });
