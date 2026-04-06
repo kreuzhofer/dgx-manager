@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useSSE, type SseEvent } from "@/lib/sse";
 import { NodeCard } from "@/components/node-card";
@@ -12,6 +12,15 @@ interface NodeMetric {
   temperature: number | null;
 }
 
+interface MetricSample {
+  timestamp: number;
+  gpuUtil: number;
+  vramUsed: number;
+  temperature: number | null;
+  tps: number | null;
+  activeRequests: number | null;
+}
+
 interface Node {
   id: string;
   name: string;
@@ -19,6 +28,7 @@ interface Node {
   status: string;
   gpuModel: string | null;
   vramTotal: number | null;
+  agentVersion?: string | null;
   metrics: NodeMetric[];
 }
 
@@ -32,6 +42,9 @@ export default function OverviewPage() {
   const [deployments, setDeployments] = useState<DeploymentSummary>({ total: 0, running: 0 });
   const [recipeCount, setRecipeCount] = useState(0);
   const [loading, setLoading] = useState(true);
+
+  // Map of nodeId -> metrics callback from NodeCard
+  const metricsHandlers = useRef<Record<string, (sample: MetricSample) => void>>({});
 
   useEffect(() => {
     Promise.all([
@@ -53,11 +66,22 @@ export default function OverviewPage() {
 
   const handleSSE = useCallback((event: SseEvent) => {
     if (event.type === "node:metrics") {
-      const { nodeId, ...metrics } = event.payload as { nodeId: string } & NodeMetric;
+      const payload = event.payload as MetricSample & { nodeId: string; temp?: number };
+      // Forward to the right NodeCard
+      const handler = metricsHandlers.current[payload.nodeId];
+      if (handler) {
+        handler({
+          timestamp: payload.timestamp,
+          gpuUtil: payload.gpuUtil,
+          vramUsed: payload.vramUsed,
+          temperature: payload.temp ?? payload.temperature ?? null,
+          tps: payload.tps ?? null,
+          activeRequests: payload.activeRequests ?? null,
+        });
+      }
+      // Update node status to online
       setNodes((prev) =>
-        prev.map((n) =>
-          n.id === nodeId ? { ...n, metrics: [metrics as NodeMetric], status: "online" } : n
-        )
+        prev.map((n) => (n.id === payload.nodeId ? { ...n, status: "online" } : n))
       );
     }
     if (event.type === "node:status") {
@@ -93,9 +117,9 @@ export default function OverviewPage() {
         <StatCard
           label="GPU Utilization"
           value={
-            nodes.length > 0
+            onlineNodes > 0
               ? `${Math.round(
-                  nodes.reduce((s, n) => s + (n.metrics[0]?.gpuUtil || 0), 0) / Math.max(onlineNodes, 1)
+                  nodes.reduce((s, n) => s + (n.metrics[0]?.gpuUtil || 0), 0) / onlineNodes
                 )}%`
               : "—"
           }
@@ -117,7 +141,13 @@ export default function OverviewPage() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {nodes.map((node) => (
-            <NodeCard key={node.id} node={node} />
+            <NodeCard
+              key={node.id}
+              node={node}
+              onMetrics={(handler) => {
+                metricsHandlers.current[node.id] = handler;
+              }}
+            />
           ))}
         </div>
       )}

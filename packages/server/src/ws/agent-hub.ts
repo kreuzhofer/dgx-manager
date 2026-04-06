@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { prisma } from "../prisma.js";
 import { broadcast as sseBroadcast } from "../sse.js";
+import { metricsBuffer } from "../metrics-buffer.js";
 
 export interface VllmRecipe {
   file: string;
@@ -99,8 +100,17 @@ export class AgentHub {
               where: { id: nodeId },
               data: { lastSeen: new Date() },
             });
+            const now = Date.now();
+            metricsBuffer.push(nodeId, {
+              timestamp: now,
+              gpuUtil: msg.payload.gpuUtil,
+              vramUsed: msg.payload.vramUsed,
+              temperature: msg.payload.temp ?? null,
+              tps: msg.payload.tps ?? null,
+              activeRequests: msg.payload.activeRequests ?? null,
+            });
             this.onMetrics?.(nodeId, msg.payload);
-            sseBroadcast({ type: "node:metrics", payload: { nodeId, ...msg.payload } });
+            sseBroadcast({ type: "node:metrics", payload: { nodeId, timestamp: now, ...msg.payload } });
             break;
           }
 

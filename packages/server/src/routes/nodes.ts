@@ -6,6 +6,7 @@ import { prisma } from "../prisma.js";
 import { auditNode, provisionNode } from "../ssh/provisioner.js";
 import { deployAgent } from "../ssh/agent-deployer.js";
 import { broadcast as sseBroadcast } from "../sse.js";
+import { metricsBuffer } from "../metrics-buffer.js";
 import type { AgentHub } from "../ws/agent-hub.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -39,6 +40,11 @@ nodesRouter.get("/", async (_req, res) => {
 // GET /api/nodes/agent-version
 nodesRouter.get("/agent-version", (_req, res) => {
   res.json({ version: getExpectedAgentVersion() });
+});
+
+// GET /api/nodes/:id/metrics/history
+nodesRouter.get("/:id/metrics/history", (req, res) => {
+  res.json(metricsBuffer.getHistory(req.params.id));
 });
 
 // GET /api/nodes/:id
@@ -203,6 +209,7 @@ nodesRouter.delete("/:id", async (req, res) => {
   await prisma.deployment.deleteMany({ where: { nodeId: node.id } });
   await prisma.fineTuneJob.deleteMany({ where: { nodeId: node.id } });
   await prisma.node.delete({ where: { id: node.id } });
+  metricsBuffer.remove(node.id);
 
   res.json({ deleted: true, stoppedDeployments: node.deployments.length });
 });
