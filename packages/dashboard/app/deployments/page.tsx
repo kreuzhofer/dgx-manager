@@ -67,6 +67,7 @@ export default function DeploymentsPage() {
   // Deploy form state
   const [selectedRecipe, setSelectedRecipe] = useState<string>("");
   const [idleNodes, setIdleNodes] = useState<Node[]>([]);
+  const [selectedNode, setSelectedNode] = useState<string>("");
   const [port, setPort] = useState("8000");
   const [maxModelLen, setMaxModelLen] = useState("");
   const [tensorParallel, setTensorParallel] = useState("");
@@ -159,7 +160,7 @@ export default function DeploymentsPage() {
 
       const body = isClusterRecipe
         ? { nodeIds: "auto", recipeFile: selectedRecipe, config: configOverrides }
-        : { nodeId: "auto", recipeFile: selectedRecipe, config: configOverrides };
+        : { nodeId: selectedNode || "auto", recipeFile: selectedRecipe, config: configOverrides };
 
       const deployment = await apiFetch<Deployment>("/api/deployments", {
         method: "POST",
@@ -212,10 +213,14 @@ export default function DeploymentsPage() {
       setPipelineParallel(String(recipe.defaults.pipeline_parallel ?? ""));
       setGpuMem(String(recipe.defaults.gpu_memory_utilization ?? ""));
     }
+    // Auto-select first idle node for solo recipes
+    if (!recipe?.cluster_only && idleNodes.length > 0) {
+      setSelectedNode(idleNodes[0].id);
+    }
   };
 
   // Compute auto-selected nodes
-  const canDeploy = isClusterRecipe ? idleNodes.length >= 2 : idleNodes.length >= 1;
+  const canDeploy = isClusterRecipe ? idleNodes.length >= 2 : !!selectedNode || idleNodes.length >= 1;
 
   if (loading) return <p className="text-gray-400">Loading...</p>;
 
@@ -259,24 +264,38 @@ export default function DeploymentsPage() {
             </select>
           </div>
           <div className="md:col-span-2">
-            <label className="block text-xs text-gray-400 mb-1">Target Nodes</label>
-            <div className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm">
-              {idleNodes.length === 0 ? (
-                <span className="text-red-400">No idle nodes available</span>
-              ) : isClusterRecipe ? (
-                <span className="text-gray-300">
-                  <span className="text-green-400 font-medium">{idleNodes.length} nodes</span>
-                  {" — "}
-                  {idleNodes.map((n) => n.name).join(", ")}
-                  <span className="text-gray-500 ml-1">(auto, launch-cluster.sh selects based on TP/PP)</span>
-                </span>
-              ) : (
-                <span className="text-gray-300">
-                  <span className="text-green-400 font-medium">{idleNodes[0]?.name}</span>
-                  <span className="text-gray-500 ml-1">({idleNodes[0]?.ipAddress})</span>
-                </span>
-              )}
-            </div>
+            <label className="block text-xs text-gray-400 mb-1">
+              {isClusterRecipe ? "Target Nodes" : "Node"}
+            </label>
+            {isClusterRecipe ? (
+              <div className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm">
+                {idleNodes.length === 0 ? (
+                  <span className="text-red-400">No idle nodes available</span>
+                ) : (
+                  <span className="text-gray-300">
+                    <span className="text-green-400 font-medium">{idleNodes.length} nodes</span>
+                    {" — "}
+                    {idleNodes.map((n) => n.name).join(", ")}
+                    <span className="text-gray-500 ml-1">(auto)</span>
+                  </span>
+                )}
+              </div>
+            ) : (
+              <select
+                value={selectedNode}
+                onChange={(e) => setSelectedNode(e.target.value)}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
+              >
+                {idleNodes.length === 0 && (
+                  <option value="">No idle nodes available</option>
+                )}
+                {idleNodes.map((n) => (
+                  <option key={n.id} value={n.id}>
+                    {n.name} ({n.ipAddress})
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
         </div>
 
