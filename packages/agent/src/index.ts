@@ -193,6 +193,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             gpuMem: config?.gpuMem as number,
             maxModelLen: config?.maxModelLen as number,
             tensorParallel: config?.tensorParallel as number,
+            pipelineParallel: config?.pipelineParallel as number,
             clusterNodes,
           },
           (line) => {

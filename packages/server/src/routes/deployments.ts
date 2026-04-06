@@ -17,9 +17,37 @@ deploymentsRouter.get("/", async (_req, res) => {
 });
 
 deploymentsRouter.post("/", async (req, res) => {
-  const { nodeId, nodeIds, recipeFile, config } = req.body;
+  let { nodeId, nodeIds, recipeFile, config } = req.body;
   if (!recipeFile) {
     return res.status(400).json({ error: "recipeFile required" });
+  }
+
+  const activeStatuses = ["pending", "running", "starting", "building", "downloading", "launching", "loading", "restarting"];
+
+  // Auto-resolve idle nodes
+  if (nodeId === "auto" || nodeIds === "auto") {
+    const idleNodes = await prisma.node.findMany({
+      where: {
+        status: "online",
+        AND: [
+          { deployments: { none: { status: { in: activeStatuses } } } },
+          { clusterMemberships: { none: { deployment: { status: { in: activeStatuses } } } } },
+        ],
+      },
+      orderBy: { createdAt: "asc" },
+    });
+
+    if (idleNodes.length === 0) {
+      return res.status(409).json({ error: "No idle nodes available" });
+    }
+
+    if (nodeIds === "auto") {
+      // Cluster: use all idle nodes
+      nodeIds = idleNodes.map((n) => n.id);
+    } else {
+      // Solo: use first idle node
+      nodeId = idleNodes[0].id;
+    }
   }
 
   const isCluster = Array.isArray(nodeIds) && nodeIds.length > 1;
@@ -29,11 +57,11 @@ deploymentsRouter.post("/", async (req, res) => {
     return res.status(400).json({ error: "nodeId or nodeIds required" });
   }
 
-  // For cluster deployments, check no selected node has an active deployment
+  // For cluster deployments, verify no selected node is busy
   if (isCluster) {
     const busy = await prisma.deployment.findMany({
       where: {
-        status: { in: ["pending", "running", "starting", "building", "downloading", "launching", "loading", "restarting"] },
+        status: { in: activeStatuses },
         OR: [
           { nodeId: { in: nodeIds } },
           { clusterNodes: { some: { nodeId: { in: nodeIds } } } },

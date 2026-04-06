@@ -37,6 +37,22 @@ nodesRouter.get("/", async (_req, res) => {
   res.json(nodes);
 });
 
+// GET /api/nodes/idle — online nodes with no active deployments
+nodesRouter.get("/idle", async (_req, res) => {
+  const activeStatuses = ["pending", "running", "starting", "building", "downloading", "launching", "loading", "restarting"];
+  const nodes = await prisma.node.findMany({
+    where: {
+      status: "online",
+      AND: [
+        { deployments: { none: { status: { in: activeStatuses } } } },
+        { clusterMemberships: { none: { deployment: { status: { in: activeStatuses } } } } },
+      ],
+    },
+    orderBy: { createdAt: "asc" },
+  });
+  res.json(nodes);
+});
+
 // GET /api/nodes/agent-version
 nodesRouter.get("/agent-version", (_req, res) => {
   res.json({ version: getExpectedAgentVersion() });

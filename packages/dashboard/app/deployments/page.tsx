@@ -66,11 +66,11 @@ export default function DeploymentsPage() {
 
   // Deploy form state
   const [selectedRecipe, setSelectedRecipe] = useState<string>("");
-  const [selectedNode, setSelectedNode] = useState<string>("");
-  const [selectedNodes, setSelectedNodes] = useState<string[]>([]);
+  const [idleNodes, setIdleNodes] = useState<Node[]>([]);
   const [port, setPort] = useState("8000");
   const [maxModelLen, setMaxModelLen] = useState("");
   const [tensorParallel, setTensorParallel] = useState("");
+  const [pipelineParallel, setPipelineParallel] = useState("");
   const [gpuMem, setGpuMem] = useState("");
   const [deploying, setDeploying] = useState(false);
 
@@ -84,11 +84,13 @@ export default function DeploymentsPage() {
       apiFetch<Recipe[]>("/api/recipes"),
       apiFetch<Node[]>("/api/nodes"),
       apiFetch<Deployment[]>("/api/deployments"),
+      apiFetch<Node[]>("/api/nodes/idle"),
     ])
-      .then(([r, n, d]) => {
+      .then(([r, n, d, idle]) => {
         setRecipes(r);
         setNodes(n);
         setDeployments(d);
+        setIdleNodes(idle);
       })
       .catch(console.error)
       .finally(() => setLoading(false));
@@ -144,9 +146,7 @@ export default function DeploymentsPage() {
 
   const deploy = async (e: React.FormEvent) => {
     e.preventDefault();
-    const isClusterRecipe = selectedRecipeData?.cluster_only;
-    const hasNodes = isClusterRecipe ? selectedNodes.length >= 2 : !!selectedNode;
-    if (!selectedRecipe || !hasNodes) return;
+    if (!selectedRecipe || !canDeploy) return;
     setDeploying(true);
     try {
       const configOverrides: Record<string, unknown> = {
@@ -154,27 +154,21 @@ export default function DeploymentsPage() {
       };
       if (maxModelLen) configOverrides.maxModelLen = parseInt(maxModelLen);
       if (tensorParallel) configOverrides.tensorParallel = parseInt(tensorParallel);
+      if (pipelineParallel) configOverrides.pipelineParallel = parseInt(pipelineParallel);
       if (gpuMem) configOverrides.gpuMem = parseFloat(gpuMem);
 
       const body = isClusterRecipe
-        ? {
-            nodeIds: selectedNodes,
-            recipeFile: selectedRecipe,
-            config: configOverrides,
-          }
-        : {
-            nodeId: selectedNode,
-            recipeFile: selectedRecipe,
-            config: configOverrides,
-          };
+        ? { nodeIds: "auto", recipeFile: selectedRecipe, config: configOverrides }
+        : { nodeId: "auto", recipeFile: selectedRecipe, config: configOverrides };
+
       const deployment = await apiFetch<Deployment>("/api/deployments", {
         method: "POST",
         body: JSON.stringify(body),
       });
       setDeployments((prev) => [deployment, ...prev]);
       setSelectedRecipe("");
-      setSelectedNodes([]);
       setViewingLogs(deployment.id);
+      loadData(); // Refresh idle nodes
     } catch (err) {
       alert(String(err));
     } finally {
@@ -205,7 +199,7 @@ export default function DeploymentsPage() {
   };
 
   const selectedRecipeData = recipes.find((r) => r.file === selectedRecipe);
-  const onlineNodes = nodes.filter((n) => n.status === "online");
+  const isClusterRecipe = selectedRecipeData?.cluster_only;
 
   // Pre-fill config when recipe changes
   const onRecipeChange = (file: string) => {
@@ -215,9 +209,13 @@ export default function DeploymentsPage() {
       setPort(String(recipe.defaults.port ?? 8000));
       setMaxModelLen(String(recipe.defaults.max_model_len ?? ""));
       setTensorParallel(String(recipe.defaults.tensor_parallel ?? ""));
+      setPipelineParallel(String(recipe.defaults.pipeline_parallel ?? ""));
       setGpuMem(String(recipe.defaults.gpu_memory_utilization ?? ""));
     }
   };
+
+  // Compute auto-selected nodes
+  const canDeploy = isClusterRecipe ? idleNodes.length >= 2 : idleNodes.length >= 1;
 
   if (loading) return <p className="text-gray-400">Loading...</p>;
 
@@ -260,49 +258,25 @@ export default function DeploymentsPage() {
               ))}
             </select>
           </div>
-          <div>
-            <label className="block text-xs text-gray-400 mb-1">
-              {selectedRecipeData?.cluster_only ? `Nodes (select ${selectedRecipeData?.defaults?.tensor_parallel || 2}+)` : "Node"}
-            </label>
-            {selectedRecipeData?.cluster_only ? (
-              <div className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm space-y-1 max-h-32 overflow-y-auto">
-                {onlineNodes.length === 0 && (
-                  <p className="text-gray-500 text-xs">No online nodes</p>
-                )}
-                {onlineNodes.map((n) => (
-                  <label key={n.id} className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={selectedNodes.includes(n.id)}
-                      onChange={(e) => {
-                        setSelectedNodes((prev) =>
-                          e.target.checked
-                            ? [...prev, n.id]
-                            : prev.filter((id) => id !== n.id)
-                        );
-                      }}
-                      className="rounded border-gray-600 bg-gray-700 text-green-500 focus:ring-green-500"
-                    />
-                    <span className="text-gray-300">
-                      {n.name} <span className="text-gray-500">({n.ipAddress})</span>
-                    </span>
-                  </label>
-                ))}
-              </div>
-            ) : (
-              <select
-                value={selectedNode}
-                onChange={(e) => setSelectedNode(e.target.value)}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
-              >
-                <option value="">Select a node...</option>
-                {onlineNodes.map((n) => (
-                  <option key={n.id} value={n.id}>
-                    {n.name} ({n.ipAddress})
-                  </option>
-                ))}
-              </select>
-            )}
+          <div className="md:col-span-2">
+            <label className="block text-xs text-gray-400 mb-1">Target Nodes</label>
+            <div className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm">
+              {idleNodes.length === 0 ? (
+                <span className="text-red-400">No idle nodes available</span>
+              ) : isClusterRecipe ? (
+                <span className="text-gray-300">
+                  <span className="text-green-400 font-medium">{idleNodes.length} nodes</span>
+                  {" — "}
+                  {idleNodes.map((n) => n.name).join(", ")}
+                  <span className="text-gray-500 ml-1">(auto, launch-cluster.sh selects based on TP/PP)</span>
+                </span>
+              ) : (
+                <span className="text-gray-300">
+                  <span className="text-green-400 font-medium">{idleNodes[0]?.name}</span>
+                  <span className="text-gray-500 ml-1">({idleNodes[0]?.ipAddress})</span>
+                </span>
+              )}
+            </div>
           </div>
         </div>
 
@@ -316,7 +290,7 @@ export default function DeploymentsPage() {
                   <span className="ml-2 text-gray-500">({selectedRecipeData.model})</span>
                 )}
               </p>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                 <div>
                   <label className="block text-[10px] text-gray-500 mb-0.5">Port</label>
                   <input
@@ -333,6 +307,16 @@ export default function DeploymentsPage() {
                     value={tensorParallel}
                     onChange={(e) => setTensorParallel(e.target.value)}
                     placeholder={String(selectedRecipeData.defaults.tensor_parallel ?? "")}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-green-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-gray-500 mb-0.5">Pipeline Parallel</label>
+                  <input
+                    type="number"
+                    value={pipelineParallel}
+                    onChange={(e) => setPipelineParallel(e.target.value)}
+                    placeholder={String(selectedRecipeData.defaults.pipeline_parallel ?? "")}
                     className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-green-500"
                   />
                 </div>
@@ -367,7 +351,7 @@ export default function DeploymentsPage() {
         <div className="mt-4 flex justify-end">
           <button
             type="submit"
-            disabled={deploying || !selectedRecipe || (selectedRecipeData?.cluster_only ? selectedNodes.length < 2 : !selectedNode)}
+            disabled={deploying || !selectedRecipe || !canDeploy}
             className="bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-5 py-2 rounded text-sm font-medium transition-colors"
           >
             {deploying ? "Deploying..." : "Deploy"}
