@@ -4,7 +4,7 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
 import { discoverRecipes } from "./recipes.js";
-import { launchRecipe, stopRecipe, checkDeployments } from "./runtime/vllm.js";
+import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning } from "./runtime/vllm.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_VERSION: string = JSON.parse(
@@ -188,6 +188,8 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
     case "cmd:undeploy": {
       const { deploymentId } = msg.payload as { deploymentId: string };
       stopRecipe(deploymentId);
+      // Always try to stop any vLLM containers (handles orphaned containers after agent restart)
+      forceStopVllm();
       sendMsg("agent:deployment:status", { deploymentId, status: "stopped" });
       break;
     }

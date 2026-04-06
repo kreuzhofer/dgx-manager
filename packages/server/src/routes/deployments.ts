@@ -57,13 +57,15 @@ deploymentsRouter.delete("/:id", async (req, res) => {
 
   const isActive = ["pending", "running", "starting", "restarting"].includes(deployment.status);
 
+  const agentHub: AgentHub = req.app.get("agentHub");
+
+  // Always send undeploy to clean up any orphaned containers
+  agentHub.sendToAgent(deployment.nodeId, {
+    type: "cmd:undeploy",
+    payload: { deploymentId: deployment.id },
+  });
+
   if (isActive) {
-    // Active deployment: send undeploy command, mark as removing
-    const agentHub: AgentHub = req.app.get("agentHub");
-    agentHub.sendToAgent(deployment.nodeId, {
-      type: "cmd:undeploy",
-      payload: { deploymentId: deployment.id },
-    });
     await prisma.deployment.update({
       where: { id: req.params.id },
       data: { status: "removing" },

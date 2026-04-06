@@ -115,6 +115,33 @@ export function getDeploymentIds(): string[] {
   return Array.from(running.keys());
 }
 
+/** Check if any vLLM docker container is running (regardless of tracking). */
+export function isVllmContainerRunning(): boolean {
+  try {
+    const out = execSync("docker ps --filter name=vllm_node --format '{{.Status}}'", {
+      timeout: 5000, encoding: "utf-8",
+    }).trim();
+    return out.includes("Up");
+  } catch {
+    return false;
+  }
+}
+
+/** Force stop any vLLM containers. */
+export function forceStopVllm(): void {
+  try {
+    execSync(
+      `${join(VLLM_REPO_PATH, "launch-cluster.sh")} --solo stop`,
+      { cwd: VLLM_REPO_PATH, timeout: 30_000, stdio: "pipe" }
+    );
+  } catch {
+    // Fallback: docker stop directly
+    try {
+      execSync("docker stop vllm_node", { timeout: 15_000, stdio: "pipe" });
+    } catch { /* nothing running */ }
+  }
+}
+
 /**
  * Health check all running deployments.
  * Checks docker container status and scrapes vLLM metrics endpoint.
