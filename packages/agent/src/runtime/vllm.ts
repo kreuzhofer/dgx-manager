@@ -64,12 +64,17 @@ export function launchRecipe(
 
   console.log(`Launching recipe: ${runRecipe} ${args.join(" ")}`);
 
+  // For cluster mode, set LOCAL_IP so launch-cluster.sh finds the head node
+  const extraEnv: Record<string, string> = {
+    HF_HOME: process.env.HF_HOME || "/mnt/tank/models",
+  };
+  if (isCluster && options!.clusterNodes![0]) {
+    extraEnv.LOCAL_IP = options!.clusterNodes![0];
+  }
+
   const child = spawn(runRecipe, args, {
     cwd: VLLM_REPO_PATH,
-    env: {
-      ...process.env,
-      HF_HOME: process.env.HF_HOME || "/mnt/tank/models",
-    },
+    env: { ...process.env, ...extraEnv },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
