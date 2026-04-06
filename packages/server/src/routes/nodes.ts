@@ -1,9 +1,27 @@
 import { Router } from "express";
+import { readFileSync } from "fs";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
 import { prisma } from "../prisma.js";
 import { auditNode, provisionNode } from "../ssh/provisioner.js";
 import { deployAgent } from "../ssh/agent-deployer.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import type { AgentHub } from "../ws/agent-hub.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+function getExpectedAgentVersion(): string {
+  const candidates = [
+    join(__dirname, "../../../agent/package.json"),
+    "/mnt/tank/src/github/dgx-manager/packages/agent/package.json",
+  ];
+  for (const p of candidates) {
+    try {
+      return JSON.parse(readFileSync(p, "utf-8")).version;
+    } catch { /* try next */ }
+  }
+  return "unknown";
+}
 
 export const nodesRouter = Router();
 
@@ -16,6 +34,11 @@ nodesRouter.get("/", async (_req, res) => {
     },
   });
   res.json(nodes);
+});
+
+// GET /api/nodes/agent-version
+nodesRouter.get("/agent-version", (_req, res) => {
+  res.json({ version: getExpectedAgentVersion() });
 });
 
 // GET /api/nodes/:id

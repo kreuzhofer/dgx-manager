@@ -19,6 +19,7 @@ model Node {
   vramTotal       Int?
   dockerAvailable Boolean          @default(false)
   ollamaInstalled Boolean          @default(false)
+  agentVersion    String?
   lastSeen        DateTime?
   createdAt       DateTime         @default(now())
   deployments     Deployment[]

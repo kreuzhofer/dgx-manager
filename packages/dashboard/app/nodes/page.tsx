@@ -25,6 +25,7 @@ interface Node {
   provisionStatus: string;
   provisionLog: string | null;
   gpuModel: string | null;
+  agentVersion: string | null;
   dockerAvailable: boolean;
   ollamaInstalled: boolean;
   createdAt: string;
@@ -58,15 +59,50 @@ const provisionBadge: Record<string, string> = {
 
 export default function NodesPage() {
   const [nodes, setNodes] = useState<Node[]>([]);
+  const [expectedVersion, setExpectedVersion] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [ipAddress, setIpAddress] = useState("");
   const [adding, setAdding] = useState(false);
+  const [upgrading, setUpgrading] = useState<Record<string, boolean>>({});
 
   // Real-time provision steps per node
   const [liveSteps, setLiveSteps] = useState<Record<string, ProvisionStep[]>>({});
 
-  const loadNodes = () =>
+  const [activeDeployments, setActiveDeployments] = useState<Record<string, number>>({});
+
+  const loadNodes = () => {
     apiFetch<Node[]>("/api/nodes").then(setNodes).catch(console.error);
+    apiFetch<{ version: string }>("/api/nodes/agent-version")
+      .then((d) => setExpectedVersion(d.version))
+      .catch(console.error);
+    apiFetch<{ nodeId: string; status: string }[]>("/api/deployments")
+      .then((deps) => {
+        const counts: Record<string, number> = {};
+        for (const d of deps) {
+          if (["pending", "running", "starting", "restarting"].includes(d.status)) {
+            counts[d.nodeId] = (counts[d.nodeId] || 0) + 1;
+          }
+        }
+        setActiveDeployments(counts);
+      })
+      .catch(console.error);
+  };
+
+  const nodeIsBusy = (node: Node) => (activeDeployments[node.id] || 0) > 0;
+
+  const isOutdated = (node: Node) =>
+    node.agentVersion && expectedVersion && node.agentVersion !== expectedVersion;
+
+  const upgradeAgent = async (nodeId: string) => {
+    setUpgrading((prev) => ({ ...prev, [nodeId]: true }));
+    try {
+      await apiFetch(`/api/nodes/${nodeId}/deploy-agent`, { method: "POST" });
+    } catch (err) {
+      alert(String(err));
+    } finally {
+      setUpgrading((prev) => ({ ...prev, [nodeId]: false }));
+    }
+  };
 
   useEffect(() => {
     loadNodes();
@@ -123,8 +159,16 @@ export default function NodesPage() {
       }
     }
     if (event.type === "node:status") {
-      const { nodeId, status } = event.payload as { nodeId: string; status: string };
-      setNodes((prev) => prev.map((n) => (n.id === nodeId ? { ...n, status } : n)));
+      const { nodeId, status, agentVersion } = event.payload as {
+        nodeId: string; status: string; agentVersion?: string;
+      };
+      setNodes((prev) =>
+        prev.map((n) =>
+          n.id === nodeId
+            ? { ...n, status, ...(agentVersion ? { agentVersion } : {}) }
+            : n
+        )
+      );
     }
   }, []);
 
@@ -249,6 +293,20 @@ export default function NodesPage() {
                         online
                       </span>
                     )}
+                    {node.agentVersion && (
+                      <span
+                        className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
+                          isOutdated(node)
+                            ? "bg-orange-900/60 text-orange-300 border border-orange-800"
+                            : "text-gray-500"
+                        }`}
+                      >
+                        v{node.agentVersion}
+                        {isOutdated(node) && (
+                          <span className="text-orange-400"> → v{expectedVersion}</span>
+                        )}
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-gray-500 mt-0.5">
                     {node.ipAddress}
@@ -258,6 +316,16 @@ export default function NodesPage() {
                   </p>
                 </div>
                 <div className="flex gap-2">
+                  {isOutdated(node) && node.status === "online" && (
+                    <button
+                      onClick={() => upgradeAgent(node.id)}
+                      disabled={upgrading[node.id] || nodeIsBusy(node)}
+                      title={nodeIsBusy(node) ? "Stop active deployments before upgrading" : "Upgrade agent to latest version"}
+                      className="bg-orange-600 hover:bg-orange-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-3 py-1 rounded text-xs font-medium transition-colors"
+                    >
+                      {upgrading[node.id] ? "Upgrading..." : nodeIsBusy(node) ? "Busy" : "Upgrade Agent"}
+                    </button>
+                  )}
                   {report &&
                     report.checks.some((c) => c.status === "yellow") &&
                     !isProvisioning && (

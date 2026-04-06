@@ -59,17 +59,19 @@ export class AgentHub {
           case "agent:register": {
             nodeId = msg.payload.nodeId;
             this.agents.set(nodeId!, { ws, nodeId: nodeId! });
+            const agentVersion = msg.payload.agentVersion || null;
             await prisma.node.update({
               where: { id: nodeId! },
               data: {
                 status: "online",
                 gpuModel: msg.payload.gpuModel,
                 vramTotal: msg.payload.vramTotal,
+                agentVersion,
                 lastSeen: new Date(),
               },
             });
-            console.log(`Agent registered: ${nodeId}`);
-            sseBroadcast({ type: "node:status", payload: { nodeId, status: "online" } });
+            console.log(`Agent registered: ${nodeId} (v${agentVersion || "unknown"})`);
+            sseBroadcast({ type: "node:status", payload: { nodeId, status: "online", agentVersion } });
             break;
           }
 
