@@ -115,13 +115,28 @@ export class AgentHub {
           }
 
           case "agent:deployment:status": {
-            const { deploymentId, status, port, error } = msg.payload;
-            await prisma.deployment.update({
-              where: { id: deploymentId },
-              data: { status, port: port ?? undefined },
-            });
+            const { deploymentId, status, port, error, deleteAfter } = msg.payload;
+            try {
+              await prisma.deployment.update({
+                where: { id: deploymentId },
+                data: { status, port: port ?? undefined },
+              });
+            } catch {
+              // Deployment may already be deleted
+              break;
+            }
             if (error) console.error(`Deployment ${deploymentId} error: ${error}`);
             sseBroadcast({ type: "deployment:status", payload: { deploymentId, status, port, error } });
+
+            // Auto-delete record after confirmed stop
+            if (status === "stopped" && deleteAfter) {
+              try {
+                await prisma.loadBalancerEndpoint.deleteMany({ where: { deploymentId } });
+                await prisma.deployment.delete({ where: { id: deploymentId } });
+                sseBroadcast({ type: "deployment:deleted", payload: { deploymentId } });
+                console.log(`Deployment ${deploymentId} deleted after stop`);
+              } catch { /* already deleted */ }
+            }
             break;
           }
 

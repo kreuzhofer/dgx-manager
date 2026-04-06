@@ -245,11 +245,43 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
     }
 
     case "cmd:undeploy": {
-      const { deploymentId } = msg.payload as { deploymentId: string };
-      stopRecipe(deploymentId);
-      // Always try to stop any vLLM containers (handles orphaned containers after agent restart)
-      forceStopVllm();
-      sendMsg("agent:deployment:status", { deploymentId, status: "stopped" });
+      const { deploymentId, deleteAfter } = msg.payload as { deploymentId: string; deleteAfter?: boolean };
+      sendMsg("agent:deployment:status", { deploymentId, status: "stopping" });
+
+      // Stop asynchronously so we can report progress
+      (async () => {
+        try {
+          stopRecipe(deploymentId);
+          forceStopVllm();
+
+          // Wait for container to actually stop
+          let retries = 10;
+          while (retries > 0 && isVllmContainerRunning()) {
+            await new Promise((r) => setTimeout(r, 2000));
+            retries--;
+          }
+
+          if (isVllmContainerRunning()) {
+            sendMsg("agent:deployment:status", {
+              deploymentId,
+              status: "failed",
+              error: "Container did not stop within timeout",
+            });
+          } else {
+            sendMsg("agent:deployment:status", {
+              deploymentId,
+              status: "stopped",
+              deleteAfter: deleteAfter || false,
+            });
+          }
+        } catch (err) {
+          sendMsg("agent:deployment:status", {
+            deploymentId,
+            status: "failed",
+            error: `Stop failed: ${err}`,
+          });
+        }
+      })();
       break;
     }
 

@@ -110,6 +110,10 @@ export default function DeploymentsPage() {
         [deploymentId]: (prev[deploymentId] || "") + log,
       }));
     }
+    if (event.type === "deployment:deleted") {
+      const { deploymentId } = event.payload as { deploymentId: string };
+      setDeployments((prev) => prev.filter((d) => d.id !== deploymentId));
+    }
     if (event.type === "node:status") {
       const { nodeId, status } = event.payload as { nodeId: string; status: string };
       setNodes((prev) => prev.map((n) => n.id === nodeId ? { ...n, status } : n));
@@ -151,7 +155,7 @@ export default function DeploymentsPage() {
   const stopDeployment = async (id: string) => {
     await apiFetch(`/api/deployments/${id}`, { method: "DELETE" });
     setDeployments((prev) =>
-      prev.map((d) => (d.id === id ? { ...d, status: "removing" } : d))
+      prev.map((d) => (d.id === id ? { ...d, status: "stopping" } : d))
     );
   };
 
@@ -163,9 +167,11 @@ export default function DeploymentsPage() {
   };
 
   const deleteDeployment = async (id: string) => {
-    if (!confirm("Delete this deployment record?")) return;
-    await apiFetch(`/api/deployments/${id}`, { method: "DELETE" });
-    setDeployments((prev) => prev.filter((d) => d.id !== id));
+    if (!confirm("Stop and delete this deployment?")) return;
+    await apiFetch(`/api/deployments/${id}?delete=true`, { method: "DELETE" });
+    setDeployments((prev) =>
+      prev.map((d) => (d.id === id ? { ...d, status: "stopping" } : d))
+    );
   };
 
   const selectedRecipeData = recipes.find((r) => r.file === selectedRecipe);
@@ -286,6 +292,7 @@ export default function DeploymentsPage() {
               ?.replace(/^recipes\//, "")
               .replace(/\.yaml$/, "");
             const isActive = ["running", "starting", "pending", "restarting", "building", "downloading", "launching", "loading"].includes(d.status);
+            const isStopping = ["stopping", "removing"].includes(d.status);
 
             return (
               <div
@@ -338,7 +345,12 @@ export default function DeploymentsPage() {
                         API
                       </a>
                     )}
-                    {isActive && (
+                    {isStopping && (
+                      <span className="text-xs px-2 py-1 rounded bg-yellow-900/30 text-yellow-400 animate-pulse">
+                        Stopping...
+                      </span>
+                    )}
+                    {isActive && !isStopping && (
                       <button
                         onClick={() => stopDeployment(d.id)}
                         className="text-xs px-2 py-1 rounded bg-red-900/50 hover:bg-red-800 text-red-300 transition-colors"

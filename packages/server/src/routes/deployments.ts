@@ -48,37 +48,26 @@ deploymentsRouter.post("/", async (req, res) => {
   res.status(201).json(deployment);
 });
 
+// DELETE /api/deployments/:id — stop deployment
 deploymentsRouter.delete("/:id", async (req, res) => {
-  const deployment = await prisma.deployment.findUnique({
-    where: { id: req.params.id },
-    include: { lbEndpoints: true },
-  });
+  const deployment = await prisma.deployment.findUnique({ where: { id: req.params.id } });
   if (!deployment) return res.status(404).json({ error: "Deployment not found" });
 
-  const isActive = ["pending", "running", "starting", "restarting"].includes(deployment.status);
-
   const agentHub: AgentHub = req.app.get("agentHub");
+  const wantDelete = req.query.delete === "true";
 
-  // Always send undeploy to clean up any orphaned containers
+  // Send undeploy with deleteAfter flag
   agentHub.sendToAgent(deployment.nodeId, {
     type: "cmd:undeploy",
-    payload: { deploymentId: deployment.id },
+    payload: { deploymentId: deployment.id, deleteAfter: wantDelete },
   });
 
-  if (isActive) {
-    await prisma.deployment.update({
-      where: { id: req.params.id },
-      data: { status: "removing" },
-    });
-    res.json({ status: "removing" });
-  } else {
-    // Stopped/failed: delete the record
-    await prisma.loadBalancerEndpoint.deleteMany({
-      where: { deploymentId: deployment.id },
-    });
-    await prisma.deployment.delete({ where: { id: req.params.id } });
-    res.json({ deleted: true });
-  }
+  await prisma.deployment.update({
+    where: { id: req.params.id },
+    data: { status: "removing" },
+  });
+
+  res.json({ status: "removing" });
 });
 
 deploymentsRouter.post("/:id/restart", async (req, res) => {
