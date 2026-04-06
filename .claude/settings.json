@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if echo \"$CLAUDE_FILE_PATH\" | grep -q 'packages/agent/src/'; then cd /home/daniel/src/github/dgx-manager && ./scripts/bump-agent-version.sh; fi"
+          }
+        ]
+      }
+    ]
+  }
+}
