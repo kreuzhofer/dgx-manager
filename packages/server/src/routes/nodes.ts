@@ -152,7 +152,7 @@ nodesRouter.post("/:id/deploy-agent", async (req, res) => {
   const node = await prisma.node.findUnique({ where: { id: req.params.id } });
   if (!node) return res.status(404).json({ error: "Node not found" });
 
-  const managerHost = process.env.MANAGER_HOST || "0.0.0.0";
+  const managerHost = process.env.MANAGER_ADVERTISE_HOST || process.env.MANAGER_HOST || "192.168.44.36";
   const managerPort = Number(process.env.PORT || 4000);
 
   const log = await deployAgent(node.ipAddress, node.id, managerHost, managerPort);
