@@ -93,6 +93,16 @@ Copy `.env.example` to set up. Key vars:
 - `NEXT_PUBLIC_API_URL` / `NEXT_PUBLIC_WS_URL` — Dashboard connects to server
 - `MANAGER_URL` / `NODE_ID` — Agent connects to server
 
+## Agent Version Bumping — MANDATORY
+
+**Every time you edit ANY file under `packages/agent/src/`, you MUST bump the agent version** by running:
+```bash
+./scripts/bump-agent-version.sh
+```
+This increments the patch version in `packages/agent/package.json` (e.g. 0.5.0 → 0.5.1). The dashboard uses this version to detect outdated agents and offer upgrades. Forgetting to bump means agents won't know they need updating.
+
+Do this BEFORE committing. If you edited multiple agent files in one session, bump once at the end.
+
 ## Conventions
 
 - TypeScript strict mode, ES modules throughout
