@@ -24,9 +24,10 @@ interface Node {
 
 interface ClusterNodeInfo {
   id: string;
+  nodeId: string;
   role: string;
   status: string;
-  node: { name: string; ipAddress: string };
+  node: { id?: string; name: string; ipAddress: string };
 }
 
 interface Deployment {
@@ -174,7 +175,12 @@ export default function DeploymentsPage() {
       setDeployments((prev) => [deployment, ...prev]);
       setSelectedRecipe("");
       setViewingLogs(deployment.id);
-      loadData(); // Refresh idle nodes
+      // Immediately remove consumed nodes from idle list
+      const usedIds = new Set<string>([deployment.nodeId]);
+      for (const cn of deployment.clusterNodes || []) {
+        usedIds.add(cn.nodeId);
+      }
+      setIdleNodes((prev) => prev.filter((n) => !usedIds.has(n.id)));
     } catch (err) {
       alert(String(err));
     } finally {
