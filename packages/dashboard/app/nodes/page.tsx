@@ -172,7 +172,7 @@ export default function NodesPage() {
     }
   }, []);
 
-  const { connected } = useSSE(handleSSE);
+  const { connected } = useSSE(handleSSE, loadNodes);
 
   const addNode = async (e: React.FormEvent) => {
     e.preventDefault();

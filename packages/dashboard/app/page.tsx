@@ -46,7 +46,7 @@ export default function OverviewPage() {
   // Map of nodeId -> metrics callback from NodeCard
   const metricsHandlers = useRef<Record<string, (sample: MetricSample) => void>>({});
 
-  useEffect(() => {
+  const loadData = useCallback(() => {
     Promise.all([
       apiFetch<Node[]>("/api/nodes"),
       apiFetch<{ id: string; status: string }[]>("/api/deployments"),
@@ -63,6 +63,8 @@ export default function OverviewPage() {
       .catch(console.error)
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => { loadData(); }, [loadData]);
 
   const handleSSE = useCallback((event: SseEvent) => {
     if (event.type === "node:metrics") {
@@ -90,7 +92,7 @@ export default function OverviewPage() {
     }
   }, []);
 
-  const { connected } = useSSE(handleSSE);
+  const { connected } = useSSE(handleSSE, loadData);
 
   if (loading) return <p className="text-gray-400">Loading...</p>;
 

@@ -143,7 +143,7 @@ export default function DeploymentsPage() {
     }
   }, []);
 
-  const { connected } = useSSE(handleSSE);
+  const { connected } = useSSE(handleSSE, loadData);
 
   // Auto-scroll logs
   useEffect(() => {
