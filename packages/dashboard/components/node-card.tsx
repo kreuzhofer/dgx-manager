@@ -4,6 +4,12 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
 import { Sparkline } from "./sparkline";
 
+interface NetInterfaceSample {
+  name: string;
+  rxBytesPerSec: number;
+  txBytesPerSec: number;
+}
+
 interface MetricSample {
   timestamp: number;
   gpuUtil: number;
@@ -11,6 +17,7 @@ interface MetricSample {
   temperature: number | null;
   tps: number | null;
   activeRequests: number | null;
+  netInterfaces?: NetInterfaceSample[];
 }
 
 interface Node {
@@ -85,6 +92,20 @@ export function NodeCard({
     ? history.map((s) => s.activeRequests ?? 0)
     : [];
 
+  // Collect unique network interface names from history
+  const ifaceNames = new Set<string>();
+  for (const s of history) {
+    for (const ni of s.netInterfaces || []) ifaceNames.add(ni.name);
+  }
+  // Build per-interface throughput arrays (combined rx+tx in Mbps)
+  const netData = Array.from(ifaceNames).map((name) => ({
+    name,
+    data: history.map((s) => {
+      const ni = s.netInterfaces?.find((n) => n.name === name);
+      return ni ? (ni.rxBytesPerSec + ni.txBytesPerSec) * 8 / 1_000_000 : 0; // Mbps
+    }),
+  }));
+
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors">
       {/* Header */}
@@ -146,6 +167,16 @@ export function NodeCard({
               label="Requests"
             />
           )}
+          {netData.map((iface) => (
+            <Sparkline
+              key={iface.name}
+              data={iface.data}
+              max={Math.max(...iface.data, 100)}
+              color="#8b5cf6"
+              label={iface.name}
+              currentValue={`${iface.data.length > 0 ? iface.data[iface.data.length - 1].toFixed(0) : 0} Mbps`}
+            />
+          ))}
         </div>
       ) : (
         <p className="text-xs text-gray-500 italic">No metrics yet</p>

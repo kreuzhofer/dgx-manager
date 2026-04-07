@@ -108,6 +108,7 @@ export class AgentHub {
               temperature: msg.payload.temp ?? null,
               tps: msg.payload.tps ?? null,
               activeRequests: msg.payload.activeRequests ?? null,
+              netInterfaces: msg.payload.netInterfaces ?? undefined,
             });
             this.onMetrics?.(nodeId, msg.payload);
             sseBroadcast({ type: "node:metrics", payload: { nodeId, timestamp: now, ...msg.payload } });

@@ -98,6 +98,7 @@ function connect() {
           tps: null,
           activeRequests,
           temp: m.temperature,
+          netInterfaces: m.netInterfaces,
         },
       }));
     }, METRICS_INTERVAL);

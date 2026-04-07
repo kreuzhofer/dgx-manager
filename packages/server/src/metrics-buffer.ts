@@ -1,3 +1,9 @@
+export interface NetInterfaceSample {
+  name: string;
+  rxBytesPerSec: number;
+  txBytesPerSec: number;
+}
+
 export interface MetricSample {
   timestamp: number;
   gpuUtil: number;
@@ -5,6 +11,7 @@ export interface MetricSample {
   temperature: number | null;
   tps: number | null;
   activeRequests: number | null;
+  netInterfaces?: NetInterfaceSample[];
 }
 
 const MAX_SAMPLES = 720; // 1 hour at 5s intervals
