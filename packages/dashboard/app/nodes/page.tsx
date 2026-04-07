@@ -316,6 +316,15 @@ export default function NodesPage() {
                   </p>
                 </div>
                 <div className="flex gap-2">
+                  {node.status !== "online" && report && !isProvisioning && (
+                    <button
+                      onClick={() => upgradeAgent(node.id)}
+                      disabled={upgrading[node.id]}
+                      className="bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white px-3 py-1 rounded text-xs font-medium transition-colors"
+                    >
+                      {upgrading[node.id] ? "Deploying..." : "Deploy Agent"}
+                    </button>
+                  )}
                   {isOutdated(node) && node.status === "online" && (
                     <button
                       onClick={() => upgradeAgent(node.id)}
