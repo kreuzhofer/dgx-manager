@@ -65,10 +65,10 @@ function connect() {
         }
       }
     } else if (isVllmContainerRunning()) {
-      // Orphaned container: no tracked deployments but a container is running.
-      // This happens after DB reset or agent redeploy with fresh config.
-      console.log("Found orphaned vLLM container with no tracked deployment — stopping it");
-      forceStopVllm();
+      // Container running but no tracked deployment — likely a Ray worker
+      // started by another node's head agent. Do NOT stop it automatically
+      // as it may be part of an active cluster deployment.
+      console.log("Found vLLM container with no local tracking — may be a cluster worker, leaving it running");
     }
 
     // Discover and report available vLLM recipes
