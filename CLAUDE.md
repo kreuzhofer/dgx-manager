@@ -31,11 +31,10 @@ The server has REST routes at `/api/*` and an inference proxy at `/lb/` for roun
 # Start (set your machine's IP and SSH user)
 MANAGER_ADVERTISE_HOST=192.168.44.36 SSH_USER=daniel docker compose up -d
 
-# Rebuild after code changes
-MANAGER_ADVERTISE_HOST=192.168.44.36 SSH_USER=daniel docker compose build
-MANAGER_ADVERTISE_HOST=192.168.44.36 SSH_USER=daniel docker compose up -d
+# Rebuild after code changes (non-disruptive — won't kill active deployments)
+MANAGER_ADVERTISE_HOST=192.168.44.36 SSH_USER=daniel docker compose up -d --build
 
-# Stop
+# Stop (WARNING: removes docker network, may disrupt active Ray clusters)
 docker compose down
 
 # Logs
