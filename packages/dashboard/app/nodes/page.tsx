@@ -335,6 +335,16 @@ export default function NodesPage() {
                       {upgrading[node.id] ? "Upgrading..." : nodeIsBusy(node) ? "Busy" : "Upgrade Agent"}
                     </button>
                   )}
+                  {!isOutdated(node) && node.status === "online" && (
+                    <button
+                      onClick={() => upgradeAgent(node.id)}
+                      disabled={upgrading[node.id]}
+                      title="Redeploy agent (update config, env vars)"
+                      className="bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 text-gray-300 px-3 py-1 rounded text-xs font-medium transition-colors"
+                    >
+                      {upgrading[node.id] ? "Redeploying..." : "Redeploy"}
+                    </button>
+                  )}
                   {report &&
                     report.checks.some((c) => c.status === "yellow") &&
                     !isProvisioning && (
