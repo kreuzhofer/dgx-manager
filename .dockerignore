@@ -1,0 +1,11 @@
+node_modules
+.next
+**/dist
+.git
+.env
+.env.local
+*.db
+*.db-journal
+**/generated/prisma
+dev.db
+packages/server/dev.db

@@ -66,7 +66,7 @@ export default function OverviewPage() {
 
   const handleSSE = useCallback((event: SseEvent) => {
     if (event.type === "node:metrics") {
-      const payload = event.payload as MetricSample & { nodeId: string; temp?: number };
+      const payload = event.payload as unknown as MetricSample & { nodeId: string; temp?: number };
       // Forward to the right NodeCard
       const handler = metricsHandlers.current[payload.nodeId];
       if (handler) {
