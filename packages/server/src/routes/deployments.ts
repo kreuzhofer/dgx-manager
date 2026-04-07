@@ -42,8 +42,12 @@ deploymentsRouter.post("/", async (req, res) => {
     }
 
     if (nodeIds === "auto") {
-      // Cluster: use all idle nodes
-      nodeIds = idleNodes.map((n) => n.id);
+      // Cluster: use as many nodes as TP*PP requires, or all idle if unknown
+      const tp = config?.tensorParallel as number || 0;
+      const pp = config?.pipelineParallel as number || 0;
+      const needed = Math.max(tp, 1) * Math.max(pp, 1);
+      const count = needed > 1 ? Math.min(needed, idleNodes.length) : idleNodes.length;
+      nodeIds = idleNodes.slice(0, count).map((n) => n.id);
     } else {
       // Solo: use first idle node
       nodeId = idleNodes[0].id;
