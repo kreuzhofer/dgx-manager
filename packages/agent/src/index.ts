@@ -57,6 +57,11 @@ function connect() {
           error: containerUp ? undefined : "Container not running after agent restart",
         });
       }
+    } else if (isVllmContainerRunning()) {
+      // Orphaned container: no tracked deployments but a container is running.
+      // This happens after DB reset or agent redeploy with fresh config.
+      console.log("Found orphaned vLLM container with no tracked deployment — stopping it");
+      forceStopVllm();
     }
 
     // Discover and report available vLLM recipes
