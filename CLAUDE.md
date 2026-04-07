@@ -23,10 +23,35 @@ Dashboard <--WS /ws/dashboard--> Server <--WS /ws/agent--> Agent (on DGX node)
 
 The server has REST routes at `/api/*` and an inference proxy at `/lb/` for round-robin routing to deployments.
 
-## Common Commands
+## Running the App
+
+**Always use Docker Compose to run the app:**
 
 ```bash
-npm run dev              # Run server + dashboard in parallel
+# Start (set your machine's IP and SSH user)
+MANAGER_ADVERTISE_HOST=192.168.44.36 SSH_USER=daniel docker compose up -d
+
+# Rebuild after code changes
+MANAGER_ADVERTISE_HOST=192.168.44.36 SSH_USER=daniel docker compose build
+MANAGER_ADVERTISE_HOST=192.168.44.36 SSH_USER=daniel docker compose up -d
+
+# Stop
+docker compose down
+
+# Logs
+docker compose logs server -f
+docker compose logs dashboard -f
+```
+
+- Server runs on port 4000, dashboard on port 3000
+- SQLite DB persists in a Docker volume (`dgx-data`)
+- SSH keys mounted from host `~/.ssh` for node management
+- `NEXT_PUBLIC_*` vars are baked into the dashboard at build time via build args
+
+## Development Commands
+
+```bash
+npm run dev              # Run server + dashboard locally (dev mode, no Docker)
 npm run dev:server       # Server only (tsx watch, port 4000)
 npm run dev:dashboard    # Dashboard only (next dev, port 3000)
 npm run build            # Build all packages (tsc + next build)

@@ -42,12 +42,25 @@ deploymentsRouter.post("/", async (req, res) => {
     }
 
     if (nodeIds === "auto") {
-      // Cluster: use as many nodes as TP*PP requires, or all idle if unknown
-      const tp = config?.tensorParallel as number || 0;
-      const pp = config?.pipelineParallel as number || 0;
-      const needed = Math.max(tp, 1) * Math.max(pp, 1);
-      const count = needed > 1 ? Math.min(needed, idleNodes.length) : idleNodes.length;
-      nodeIds = idleNodes.slice(0, count).map((n) => n.id);
+      // Determine required node count:
+      // 1. User config overrides take priority
+      // 2. Fall back to recipe defaults
+      // 3. Fall back to all idle nodes
+      const agentHub: AgentHub = req.app.get("agentHub");
+      const recipe = agentHub.getRecipes().find((r) => r.file === recipeFile);
+      const recipeDefaults = recipe?.defaults || {};
+
+      const tp = (config?.tensorParallel as number) || (recipeDefaults.tensor_parallel as number) || 1;
+      const pp = (config?.pipelineParallel as number) || (recipeDefaults.pipeline_parallel as number) || 1;
+      const needed = tp * pp;
+
+      if (needed > idleNodes.length) {
+        return res.status(409).json({
+          error: `Recipe requires ${needed} nodes (TP=${tp} × PP=${pp}) but only ${idleNodes.length} idle`,
+        });
+      }
+
+      nodeIds = idleNodes.slice(0, needed).map((n) => n.id);
     } else {
       // Solo: use first idle node
       nodeId = idleNodes[0].id;

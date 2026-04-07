@@ -158,7 +158,7 @@ export default function DeploymentsPage() {
       if (pipelineParallel) configOverrides.pipelineParallel = parseInt(pipelineParallel);
       if (gpuMem) configOverrides.gpuMem = parseFloat(gpuMem);
 
-      const body = isClusterRecipe
+      const body = needsCluster
         ? { nodeIds: "auto", recipeFile: selectedRecipe, config: configOverrides }
         : { nodeId: selectedNode || "auto", recipeFile: selectedRecipe, config: configOverrides };
 
@@ -220,7 +220,12 @@ export default function DeploymentsPage() {
   };
 
   // Compute auto-selected nodes
-  const canDeploy = isClusterRecipe ? idleNodes.length >= 2 : !!selectedNode || idleNodes.length >= 1;
+  // Compute required nodes from config overrides or recipe defaults
+  const effectiveTP = parseInt(tensorParallel) || (selectedRecipeData?.defaults?.tensor_parallel as number) || 1;
+  const effectivePP = parseInt(pipelineParallel) || (selectedRecipeData?.defaults?.pipeline_parallel as number) || 1;
+  const requiredNodes = effectiveTP * effectivePP;
+  const needsCluster = requiredNodes > 1;
+  const canDeploy = needsCluster ? idleNodes.length >= requiredNodes : !!selectedNode || idleNodes.length >= 1;
 
   if (loading) return <p className="text-gray-400">Loading...</p>;
 
@@ -271,18 +276,20 @@ export default function DeploymentsPage() {
           </div>
           <div className="md:col-span-2">
             <label className="block text-xs text-gray-400 mb-1">
-              {isClusterRecipe ? "Target Nodes" : "Node"}
+              {needsCluster ? `Target Nodes (${requiredNodes} needed)` : "Node"}
             </label>
-            {isClusterRecipe ? (
+            {needsCluster ? (
               <div className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm">
-                {idleNodes.length === 0 ? (
-                  <span className="text-red-400">No idle nodes available</span>
+                {idleNodes.length < requiredNodes ? (
+                  <span className="text-red-400">
+                    Need {requiredNodes} nodes but only {idleNodes.length} idle
+                  </span>
                 ) : (
                   <span className="text-gray-300">
-                    <span className="text-green-400 font-medium">{idleNodes.length} nodes</span>
-                    {" — "}
-                    {idleNodes.map((n) => n.name).join(", ")}
-                    <span className="text-gray-500 ml-1">(auto)</span>
+                    <span className="text-green-400 font-medium">
+                      {idleNodes.slice(0, requiredNodes).map((n) => n.name).join(", ")}
+                    </span>
+                    <span className="text-gray-500 ml-1">({requiredNodes} of {idleNodes.length} idle)</span>
                   </span>
                 )}
               </div>
