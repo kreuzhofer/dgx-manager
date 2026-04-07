@@ -11,6 +11,7 @@ services:
       - MANAGER_HOST=0.0.0.0
       - MANAGER_ADVERTISE_HOST=${MANAGER_ADVERTISE_HOST:-192.168.44.36}
       - SSH_USER=${SSH_USER:-daniel}
+      - HF_TOKEN=${HF_TOKEN:-}
     volumes:
       - dgx-data:/app/data
       - ${HOME}/.ssh:/root/.ssh:ro
