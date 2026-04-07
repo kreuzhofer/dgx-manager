@@ -4,7 +4,7 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
 import { discoverRecipes } from "./recipes.js";
-import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, getTrackedDeployments } from "./runtime/vllm.js";
+import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, isStopping, getTrackedDeployments } from "./runtime/vllm.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_VERSION: string = JSON.parse(
@@ -216,6 +216,11 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             }
           },
           (code) => {
+            // If we're being undeployed, don't report — the undeploy handler owns status
+            if (isStopping(deploymentId)) {
+              console.log(`[deploy] run-recipe.sh exited ${code} during undeploy, ignoring`);
+              return;
+            }
             // run-recipe.sh exits after launching the docker container.
             // Code 0 = container launched successfully (still running).
             // Code != 0 = setup/launch failed.

@@ -23,6 +23,7 @@ interface VllmInstance {
   process: ChildProcess;
   recipeName: string;
   port: number;
+  stopping?: boolean;
 }
 
 const running = new Map<string, VllmInstance>();
@@ -156,6 +157,7 @@ export function stopRecipe(deploymentId: string, clusterNodes?: string[]): boole
   if (!instance) return false;
 
   console.log(`Stopping vLLM recipe: ${instance.recipeName}`);
+  instance.stopping = true;
   // Kill log tail if running
   const tailProc = (instance as unknown as Record<string, unknown>).tailProcess as ChildProcess | undefined;
   if (tailProc) tailProc.kill();
@@ -188,6 +190,11 @@ export function stopRecipe(deploymentId: string, clusterNodes?: string[]): boole
 /** Check if a deployment's process is tracked. */
 export function isRunning(deploymentId: string): boolean {
   return running.has(deploymentId);
+}
+
+/** Check if a deployment is being stopped (suppress onExit status reports). */
+export function isStopping(deploymentId: string): boolean {
+  return running.get(deploymentId)?.stopping === true;
 }
 
 /** Get all tracked deployment IDs. */
