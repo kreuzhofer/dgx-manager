@@ -21,6 +21,12 @@ interface MetricSample {
   rdmaInterfaces?: NetInterfaceSample[];
 }
 
+interface NodeDeployment {
+  modelName: string;
+  runtime: string;
+  status: string;
+}
+
 interface Node {
   id: string;
   name: string;
@@ -42,9 +48,11 @@ const statusColors: Record<string, string> = {
 
 export function NodeCard({
   node,
+  deployment,
   onMetrics,
 }: {
   node: Node;
+  deployment?: NodeDeployment;
   onMetrics?: (handler: (sample: MetricSample) => void) => void;
 }) {
   const [history, setHistory] = useState<MetricSample[]>([]);
@@ -92,6 +100,9 @@ export function NodeCard({
   const reqData = history.filter((s) => s.activeRequests !== null).length > 0
     ? history.map((s) => s.activeRequests ?? 0)
     : [];
+  const tpsData = history.filter((s) => s.tps !== null).length > 0
+    ? history.map((s) => s.tps ?? 0)
+    : [];
 
   // Collect unique network interface names from history
   const ifaceNames = new Set<string>();
@@ -132,6 +143,22 @@ export function NodeCard({
               <span className="ml-2 text-gray-400">{node.gpuModel}</span>
             )}
           </p>
+          <div className="mt-1">
+            {deployment ? (
+              <span className="inline-flex items-center gap-1.5">
+                <span className={`text-[9px] px-1.5 py-0.5 rounded font-medium ${
+                  deployment.runtime === "ollama"
+                    ? "bg-cyan-900/60 text-cyan-300"
+                    : "bg-green-900/60 text-green-300"
+                }`}>
+                  {deployment.runtime === "ollama" ? "Ollama" : "vLLM"}
+                </span>
+                <span className="text-[10px] text-gray-400">{deployment.modelName}</span>
+              </span>
+            ) : (
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-500">idle</span>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <div className={`w-2 h-2 rounded-full ${statusColor}`} />
@@ -179,6 +206,15 @@ export function NodeCard({
               max={100}
               color="#ef4444"
               label="Requests"
+            />
+          )}
+          {tpsData.length > 0 && (
+            <Sparkline
+              data={tpsData}
+              max={Math.max(...tpsData, 10)}
+              color="#eab308"
+              label="TPS"
+              unit=" t/s"
             />
           )}
           {netData.map((iface) => (

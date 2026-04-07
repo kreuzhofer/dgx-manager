@@ -40,6 +40,15 @@ interface Node {
   metrics: NodeMetric[];
 }
 
+interface DeploymentInfo {
+  id: string;
+  nodeId: string;
+  status: string;
+  config: string | null;
+  model?: { name: string; runtime: string };
+  clusterNodes?: { nodeId: string }[];
+}
+
 interface DeploymentSummary {
   total: number;
   running: number;
@@ -48,6 +57,7 @@ interface DeploymentSummary {
 export default function OverviewPage() {
   const [nodes, setNodes] = useState<Node[]>([]);
   const [deployments, setDeployments] = useState<DeploymentSummary>({ total: 0, running: 0 });
+  const [deploymentList, setDeploymentList] = useState<DeploymentInfo[]>([]);
   const [recipeCount, setRecipeCount] = useState(0);
   const [loading, setLoading] = useState(true);
 
@@ -57,11 +67,12 @@ export default function OverviewPage() {
   const loadData = useCallback(() => {
     Promise.all([
       apiFetch<Node[]>("/api/nodes"),
-      apiFetch<{ id: string; status: string }[]>("/api/deployments"),
+      apiFetch<DeploymentInfo[]>("/api/deployments"),
       apiFetch<unknown[]>("/api/recipes"),
     ])
       .then(([n, d, r]) => {
         setNodes(n);
+        setDeploymentList(d);
         setDeployments({
           total: d.length,
           running: d.filter((x) => x.status === "running").length,
@@ -152,15 +163,27 @@ export default function OverviewPage() {
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {nodes.map((node) => (
+          {nodes.map((node) => {
+            const dep = deploymentList.find((d) =>
+              ["running", "starting", "loading", "downloading", "building", "launching"].includes(d.status) &&
+              (d.nodeId === node.id || d.clusterNodes?.some((cn) => cn.nodeId === node.id))
+            );
+            const depConfig = dep?.config ? JSON.parse(dep.config) : {};
+            return (
             <NodeCard
               key={node.id}
               node={node}
+              deployment={dep ? {
+                modelName: dep.model?.name || "unknown",
+                runtime: depConfig.runtime || dep.model?.runtime || "vllm",
+                status: dep.status,
+              } : undefined}
               onMetrics={(handler) => {
                 metricsHandlers.current[node.id] = handler;
               }}
             />
-          ))}
+          );
+          })}
         </div>
       )}
     </div>
