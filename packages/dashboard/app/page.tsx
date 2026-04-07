@@ -12,6 +12,12 @@ interface NodeMetric {
   temperature: number | null;
 }
 
+interface NetInterfaceSample {
+  name: string;
+  rxBytesPerSec: number;
+  txBytesPerSec: number;
+}
+
 interface MetricSample {
   timestamp: number;
   gpuUtil: number;
@@ -19,6 +25,8 @@ interface MetricSample {
   temperature: number | null;
   tps: number | null;
   activeRequests: number | null;
+  netInterfaces?: NetInterfaceSample[];
+  rdmaInterfaces?: NetInterfaceSample[];
 }
 
 interface Node {
@@ -79,6 +87,8 @@ export default function OverviewPage() {
           temperature: payload.temp ?? payload.temperature ?? null,
           tps: payload.tps ?? null,
           activeRequests: payload.activeRequests ?? null,
+          netInterfaces: payload.netInterfaces as MetricSample["netInterfaces"],
+          rdmaInterfaces: payload.rdmaInterfaces as MetricSample["rdmaInterfaces"],
         });
       }
       // Update node status to online
