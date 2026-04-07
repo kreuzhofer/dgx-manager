@@ -14,6 +14,7 @@ NFS_TARGET="/mnt/tank/src/github/dgx-manager/packages/agent"
 echo "Syncing to NFS ($NFS_TARGET)..."
 rsync -a packages/agent/dist/ "$NFS_TARGET/dist/"
 cp packages/agent/package.json "$NFS_TARGET/package.json"
+cp packages/agent/src/ollama-models.json "$NFS_TARGET/ollama-models.json" 2>/dev/null || true
 
 VERSION=$(node -e "console.log(require('./packages/agent/package.json').version)")
 echo "Agent v$VERSION built and synced."

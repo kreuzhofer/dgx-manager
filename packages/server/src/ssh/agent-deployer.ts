@@ -53,6 +53,7 @@ export async function deployAgent(
     host,
     `sudo rsync -a --delete ${NFS_AGENT_PATH}/dist/ /opt/dgx-agent/dist/ && ` +
     `sudo cp ${NFS_AGENT_PATH}/package.json /opt/dgx-agent/package.json && ` +
+    `sudo cp ${NFS_AGENT_PATH}/ollama-models.json /opt/dgx-agent/ollama-models.json 2>/dev/null; ` +
     `sudo cp -r ${NFS_AGENT_PATH}/node_modules/ /opt/dgx-agent/node_modules/`,
     { timeout: 60_000 }
   );
