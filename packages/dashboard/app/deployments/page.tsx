@@ -119,8 +119,9 @@ export default function DeploymentsPage() {
           [deploymentId]: (prev[deploymentId] || "") + `\n[ERROR] ${error}`,
         }));
       }
-      // Refresh idle nodes on any terminal or starting state change
-      if (["stopped", "failed", "starting", "running"].includes(status)) {
+      // Refresh idle nodes only on terminal state changes
+      // (starting/running are handled by optimistic update in deploy())
+      if (["stopped", "failed"].includes(status)) {
         apiFetch<Node[]>("/api/nodes/idle").then(setIdleNodes).catch(() => {});
       }
     }

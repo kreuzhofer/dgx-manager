@@ -66,17 +66,17 @@ export function launchRecipe(
   if (options?.tensorParallel) args.push("--tp", String(options.tensorParallel));
   if (options?.pipelineParallel) args.push("--", "-pp", String(options.pipelineParallel));
 
-  // For cluster mode, sync Docker image to all workers before launching
+  // For cluster mode, ensure workers have a recent enough Docker image.
+  // run-recipe.sh --setup skips copying if the image name exists on the worker,
+  // even if it's outdated. We check creation dates and copy if stale.
   if (isCluster) {
     const workerIps = options!.clusterNodes!.slice(1);
-    // Read container name from recipe file
     let containerName = "vllm-node";
     try {
       const recipeContent = readFileSync(join(VLLM_REPO_PATH, recipeFile), "utf-8");
       const containerMatch = recipeContent.match(/^container:\s*(.+)$/m);
       if (containerMatch) containerName = containerMatch[1].trim();
     } catch { /* use default */ }
-    onLog?.(`Checking ${containerName} image on ${workerIps.length} worker(s)...\n`);
     syncContainerImage(containerName, workerIps, onLog);
   }
 
@@ -250,8 +250,8 @@ export function getTrackedDeployments(): TrackedDeployment[] {
 }
 
 /**
- * Ensure all cluster worker nodes have the same Docker image as the head.
- * Copies the image via build-and-copy.sh if mismatched.
+ * Ensure cluster worker nodes have a Docker image at least as recent as the head's.
+ * Compares creation timestamps — only copies if worker image is older.
  */
 export function syncContainerImage(
   containerName: string,
@@ -260,32 +260,41 @@ export function syncContainerImage(
 ): void {
   if (workerIps.length === 0) return;
 
-  let localId: string;
+  let localCreated: string;
   try {
-    localId = execSync(`docker images ${containerName}:latest --format '{{.ID}}'`, {
-      timeout: 5000, encoding: "utf-8",
-    }).trim();
+    localCreated = execSync(
+      `docker images ${containerName}:latest --format '{{.CreatedAt}}'`,
+      { timeout: 5000, encoding: "utf-8" }
+    ).trim();
   } catch {
-    onLog?.(`Warning: cannot read local image ID for ${containerName}\n`);
-    return;
-  }
-
-  if (!localId) {
     onLog?.(`Image ${containerName} not found locally, --setup will build it\n`);
     return;
   }
 
+  if (!localCreated) {
+    onLog?.(`Image ${containerName} not found locally\n`);
+    return;
+  }
+
+  const localTime = new Date(localCreated).getTime();
   const staleWorkers: string[] = [];
+
   for (const ip of workerIps) {
     try {
-      const remoteId = execSync(
-        `ssh -o BatchMode=yes -o ConnectTimeout=5 ${SSH_USER}@${ip} "docker images ${containerName}:latest --format '{{.ID}}'"`,
+      const remoteCreated = execSync(
+        `ssh -o BatchMode=yes -o ConnectTimeout=5 ${SSH_USER}@${ip} "docker images ${containerName}:latest --format '{{.CreatedAt}}'"`,
         { timeout: 10_000, encoding: "utf-8" }
       ).trim();
 
-      if (remoteId !== localId) {
-        onLog?.(`Image mismatch on ${ip}: local=${localId.slice(0, 12)} remote=${remoteId.slice(0, 12) || "missing"}\n`);
+      if (!remoteCreated) {
+        onLog?.(`Image missing on ${ip}, will copy\n`);
         staleWorkers.push(ip);
+      } else {
+        const remoteTime = new Date(remoteCreated).getTime();
+        if (remoteTime < localTime) {
+          onLog?.(`Image on ${ip} is older (${remoteCreated} < ${localCreated}), will copy\n`);
+          staleWorkers.push(ip);
+        }
       }
     } catch {
       onLog?.(`Cannot check image on ${ip}, will copy\n`);
@@ -294,11 +303,11 @@ export function syncContainerImage(
   }
 
   if (staleWorkers.length === 0) {
-    onLog?.(`All workers have matching ${containerName} image (${localId.slice(0, 12)})\n`);
+    onLog?.(`All workers have up-to-date ${containerName} image\n`);
     return;
   }
 
-  onLog?.(`Syncing ${containerName} image to ${staleWorkers.length} worker(s)...\n`);
+  onLog?.(`Syncing ${containerName} to ${staleWorkers.length} worker(s)...\n`);
   try {
     const copyTargets = staleWorkers.join(",");
     execSync(
