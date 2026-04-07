@@ -97,6 +97,7 @@ export default function DeploymentsPage() {
         setNodes(n);
         setDeployments(d);
         setIdleNodes(idle);
+        if (idle.length > 0 && !selectedNode) setSelectedNode(idle[0].id);
         setOllamaModels(om);
       })
       .catch(console.error)
@@ -373,14 +374,18 @@ export default function DeploymentsPage() {
                 onChange={(e) => setSelectedNode(e.target.value)}
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
               >
-                {idleNodes.length === 0 && (
+                {idleNodes.length === 0 ? (
                   <option value="">No idle nodes available</option>
+                ) : (
+                  <>
+                    {!selectedNode && <option value="">Select a node...</option>}
+                    {idleNodes.map((n) => (
+                      <option key={n.id} value={n.id}>
+                        {n.name} ({n.ipAddress})
+                      </option>
+                    ))}
+                  </>
                 )}
-                {idleNodes.map((n) => (
-                  <option key={n.id} value={n.id}>
-                    {n.name} ({n.ipAddress})
-                  </option>
-                ))}
               </select>
             )}
           </div>
