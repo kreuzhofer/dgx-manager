@@ -158,6 +158,10 @@ export function stopRecipe(deploymentId: string, clusterNodes?: string[]): boole
 
   console.log(`Stopping vLLM recipe: ${instance.recipeName}`);
   instance.stopping = true;
+
+  // Kill the run-recipe.sh process FIRST to prevent it from relaunching
+  try { instance.process.kill("SIGTERM"); } catch { /* already dead */ }
+
   // Kill log tail if running
   const tailProc = (instance as unknown as Record<string, unknown>).tailProcess as ChildProcess | undefined;
   if (tailProc) tailProc.kill();
