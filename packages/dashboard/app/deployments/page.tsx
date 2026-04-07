@@ -254,13 +254,19 @@ export default function DeploymentsPage() {
               className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
             >
               <option value="">Select a recipe...</option>
-              {recipes.map((r) => (
-                <option key={r.file} value={r.file}>
-                  {r.name}
-                  {r.cluster_only ? " (cluster)" : ""}
-                  {r.solo_only ? " (solo)" : ""}
-                </option>
-              ))}
+              {recipes.map((r) => {
+                const tp = r.defaults?.tensor_parallel as number | undefined;
+                const pp = r.defaults?.pipeline_parallel as number | undefined;
+                const suffix = [
+                  pp ? `PP=${pp}` : tp && tp > 1 ? `TP=${tp}` : null,
+                  r.solo_only ? "solo" : null,
+                ].filter(Boolean).join(", ");
+                return (
+                  <option key={r.file} value={r.file}>
+                    {r.name}{suffix ? ` [${suffix}]` : ""}
+                  </option>
+                );
+              })}
             </select>
           </div>
           <div className="md:col-span-2">
