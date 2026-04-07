@@ -113,9 +113,22 @@ export async function deployModel(
   activeAbortControllers.set(deploymentId, abortController);
 
   try {
-    // Verify Ollama service is reachable
+    // Verify Ollama service is reachable, try to start it if not
     if (!await isOllamaRunning()) {
-      throw new Error("Ollama service is not running on this node (port 11434 unreachable)");
+      onLog?.("Ollama service not running, attempting to start...\n");
+      try {
+        const { execSync } = await import("child_process");
+        execSync("sudo systemctl start ollama", { timeout: 10_000 });
+        // Wait for it to come up
+        for (let i = 0; i < 5; i++) {
+          await new Promise((r) => setTimeout(r, 2000));
+          if (await isOllamaRunning()) break;
+        }
+      } catch { /* ignore */ }
+      if (!await isOllamaRunning()) {
+        throw new Error("Ollama service is not running and could not be started (port 11434 unreachable)");
+      }
+      onLog?.("Ollama service started.\n");
     }
 
     // Pull model (streams progress, skips if cached)
