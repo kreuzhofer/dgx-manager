@@ -8,5 +8,8 @@
   { "name": "deepseek-r1:32b", "size": "20GB", "description": "DeepSeek R1 32B" },
   { "name": "mistral:7b", "size": "4.1GB", "description": "Mistral 7B" },
   { "name": "codellama:70b", "size": "39GB", "description": "Code Llama 70B" },
-  { "name": "phi4:14b", "size": "9.1GB", "description": "Microsoft Phi-4 14B" }
+  { "name": "phi4:14b", "size": "9.1GB", "description": "Microsoft Phi-4 14B" },
+  { "name": "qwen3-vl:30b", "size": "18GB", "description": "Qwen 3 VL 30B (vision-language)" },
+  { "name": "qwen3-vl:32b", "size": "20GB", "description": "Qwen 3 VL 32B (vision-language)" },
+  { "name": "qwen3-vl:8b", "size": "5.2GB", "description": "Qwen 3 VL 8B (vision-language)" }
 ]
