@@ -88,11 +88,11 @@ export async function auditNode(host: string, nodeId?: string): Promise<Provisio
     },
     {
       name: "Ollama",
-      cmd: "ollama --version 2>&1 | grep -oP 'client version is \\K[0-9.]+'  || ollama --version 2>/dev/null",
+      cmd: "curl -sf --max-time 2 http://localhost:11434/api/tags > /dev/null 2>&1 && ollama --version 2>&1 | grep -oP 'client version is \\K[0-9.]+' || echo ''",
       eval: (r) => ({
         name: "Ollama",
         status: r.code === 0 && r.stdout.trim() ? "green" : "yellow",
-        detail: r.code === 0 && r.stdout.trim() ? `v${r.stdout.trim()}` : "Not installed — can auto-install",
+        detail: r.code === 0 && r.stdout.trim() ? `v${r.stdout.trim()} (running)` : "Not running — install or start service",
       }),
     },
     {
@@ -158,7 +158,15 @@ export async function provisionNode(host: string, checks: PrereqCheck[], nodeId?
         r = await sshExec(host, "curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs", { timeout: 120_000 });
         break;
       case "Ollama":
-        r = await sshExec(host, "curl -fsSL https://ollama.ai/install.sh | sh", { timeout: 120_000 });
+        r = await sshExec(host, [
+          "curl -fsSL https://ollama.ai/install.sh | sh",
+          // Ensure systemd service exists with OLLAMA_MODELS on NFS
+          "sudo mkdir -p /etc/systemd/system/ollama.service.d",
+          `echo -e '[Service]\\nEnvironment=OLLAMA_MODELS=/mnt/tank/models/ollama\\nEnvironment=HOME=/home/${process.env.SSH_USER || "ubuntu"}' | sudo tee /etc/systemd/system/ollama.service.d/override.conf`,
+          "sudo systemctl daemon-reload",
+          "sudo systemctl enable ollama",
+          "sudo systemctl restart ollama",
+        ].join(" && "), { timeout: 120_000 });
         break;
       default:
         continue;

@@ -113,6 +113,11 @@ export async function deployModel(
   activeAbortControllers.set(deploymentId, abortController);
 
   try {
+    // Verify Ollama service is reachable
+    if (!await isOllamaRunning()) {
+      throw new Error("Ollama service is not running on this node (port 11434 unreachable)");
+    }
+
     // Pull model (streams progress, skips if cached)
     onStatus?.("downloading");
     onLog?.(`Pulling ${modelName}...\n`);
