@@ -7,6 +7,12 @@ export interface NetInterface {
   txBytesPerSec: number;
 }
 
+export interface RdmaInterface {
+  name: string;
+  rxBytesPerSec: number;
+  txBytesPerSec: number;
+}
+
 export interface GpuMetrics {
   gpuModel: string;
   vramTotal: number;
@@ -14,6 +20,7 @@ export interface GpuMetrics {
   vramUsed: number;
   temperature: number | null;
   netInterfaces: NetInterface[];
+  rdmaInterfaces: RdmaInterface[];
 }
 
 export async function collectMetrics(): Promise<GpuMetrics> {
@@ -44,6 +51,7 @@ export async function collectMetrics(): Promise<GpuMetrics> {
       vramUsed,
       temperature: parts[4] && parts[4] !== "[N/A]" ? parseFloat(parts[4]) : null,
       netInterfaces: collectNetworkMetrics(),
+      rdmaInterfaces: collectRdmaMetrics(),
     };
   } catch {
     return {
@@ -53,6 +61,7 @@ export async function collectMetrics(): Promise<GpuMetrics> {
       vramUsed: 0,
       temperature: null,
       netInterfaces: collectNetworkMetrics(),
+      rdmaInterfaces: collectRdmaMetrics(),
     };
   }
 }
@@ -106,6 +115,44 @@ function collectNetworkMetrics(): NetInterface[] {
       // Interface disappeared or unreadable
     }
   }
+
+  return results;
+}
+
+// --- RDMA/InfiniBand monitoring ---
+
+const prevRdmaBytes = new Map<string, { rx: number; tx: number; time: number }>();
+
+/** Read RDMA port counters from InfiniBand sysfs. */
+function collectRdmaMetrics(): RdmaInterface[] {
+  const now = Date.now();
+  const results: RdmaInterface[] = [];
+  const ibDir = "/sys/class/infiniband";
+
+  try {
+    for (const dev of readdirSync(ibDir)) {
+      const counterDir = `${ibDir}/${dev}/ports/1/counters`;
+      try {
+        // IB counters are in units of 4 bytes (32-bit words), multiply by 4 for bytes
+        const rx = parseInt(readFileSync(`${counterDir}/port_rcv_data`, "utf-8").trim()) * 4;
+        const tx = parseInt(readFileSync(`${counterDir}/port_xmit_data`, "utf-8").trim()) * 4;
+        const prev = prevRdmaBytes.get(dev);
+
+        if (prev) {
+          const elapsed = (now - prev.time) / 1000;
+          if (elapsed > 0) {
+            results.push({
+              name: dev,
+              rxBytesPerSec: Math.round((rx - prev.rx) / elapsed),
+              txBytesPerSec: Math.round((tx - prev.tx) / elapsed),
+            });
+          }
+        }
+
+        prevRdmaBytes.set(dev, { rx, tx, time: now });
+      } catch { /* port not readable */ }
+    }
+  } catch { /* no IB devices */ }
 
   return results;
 }

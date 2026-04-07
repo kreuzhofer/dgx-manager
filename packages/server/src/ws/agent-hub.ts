@@ -109,6 +109,7 @@ export class AgentHub {
               tps: msg.payload.tps ?? null,
               activeRequests: msg.payload.activeRequests ?? null,
               netInterfaces: msg.payload.netInterfaces ?? undefined,
+              rdmaInterfaces: msg.payload.rdmaInterfaces ?? undefined,
             });
             this.onMetrics?.(nodeId, msg.payload);
             sseBroadcast({ type: "node:metrics", payload: { nodeId, timestamp: now, ...msg.payload } });

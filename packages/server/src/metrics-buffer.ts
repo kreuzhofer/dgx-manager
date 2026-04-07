@@ -12,6 +12,7 @@ export interface MetricSample {
   tps: number | null;
   activeRequests: number | null;
   netInterfaces?: NetInterfaceSample[];
+  rdmaInterfaces?: NetInterfaceSample[];
 }
 
 const MAX_SAMPLES = 720; // 1 hour at 5s intervals

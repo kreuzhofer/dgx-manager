@@ -18,6 +18,7 @@ interface MetricSample {
   tps: number | null;
   activeRequests: number | null;
   netInterfaces?: NetInterfaceSample[];
+  rdmaInterfaces?: NetInterfaceSample[];
 }
 
 interface Node {
@@ -106,6 +107,19 @@ export function NodeCard({
     }),
   }));
 
+  // RDMA/InfiniBand interfaces
+  const rdmaNames = new Set<string>();
+  for (const s of history) {
+    for (const ri of s.rdmaInterfaces || []) rdmaNames.add(ri.name);
+  }
+  const rdmaData = Array.from(rdmaNames).map((name) => ({
+    name,
+    data: history.map((s) => {
+      const ri = s.rdmaInterfaces?.find((n) => n.name === name);
+      return ri ? (ri.rxBytesPerSec + ri.txBytesPerSec) * 8 / 1_000_000 : 0; // Mbps
+    }),
+  }));
+
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors">
       {/* Header */}
@@ -169,12 +183,22 @@ export function NodeCard({
           )}
           {netData.map((iface) => (
             <Sparkline
-              key={iface.name}
+              key={`net-${iface.name}`}
               data={iface.data}
               max={Math.max(...iface.data, 100)}
               color="#8b5cf6"
               label={iface.name}
               currentValue={`${iface.data.length > 0 ? iface.data[iface.data.length - 1].toFixed(0) : 0} Mbps`}
+            />
+          ))}
+          {rdmaData.map((iface) => (
+            <Sparkline
+              key={`rdma-${iface.name}`}
+              data={iface.data}
+              max={Math.max(...iface.data, 1000)}
+              color="#06b6d4"
+              label={`${iface.name} (RDMA)`}
+              currentValue={`${iface.data.length > 0 ? (iface.data[iface.data.length - 1] > 1000 ? (iface.data[iface.data.length - 1] / 1000).toFixed(1) + " Gbps" : iface.data[iface.data.length - 1].toFixed(0) + " Mbps") : "0 Mbps"}`}
             />
           ))}
         </div>

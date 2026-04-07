@@ -105,6 +105,7 @@ function connect() {
           activeRequests,
           temp: m.temperature,
           netInterfaces: m.netInterfaces,
+          rdmaInterfaces: m.rdmaInterfaces,
         },
       }));
     }, METRICS_INTERVAL);
