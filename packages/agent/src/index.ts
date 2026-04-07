@@ -74,6 +74,7 @@ function connect() {
     }
 
     // Start metrics loop — includes vLLM stats when available
+    // Only start if not already running (survives reconnects)
     if (metricsTimer) clearInterval(metricsTimer);
     metricsTimer = setInterval(async () => {
       if (ws?.readyState !== WebSocket.OPEN) return;
@@ -138,8 +139,9 @@ function connect() {
 
   ws.on("close", () => {
     console.log(`Disconnected. Reconnecting in ${reconnectDelay}ms...`);
-    if (metricsTimer) clearInterval(metricsTimer);
-    if (healthTimer) clearInterval(healthTimer);
+    // Keep metrics and health timers running — they check ws.readyState
+    // before sending and will resume reporting once reconnected.
+    // Do NOT clear timers here — that stops deployment monitoring.
     setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX);
   });
