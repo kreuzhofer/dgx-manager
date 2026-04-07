@@ -29,7 +29,7 @@ export const nodesRouter = Router();
 // GET /api/nodes
 nodesRouter.get("/", async (_req, res) => {
   const nodes = await prisma.node.findMany({
-    orderBy: { createdAt: "desc" },
+    orderBy: { name: "asc" },
     include: {
       metrics: { orderBy: { timestamp: "desc" }, take: 1 },
     },
