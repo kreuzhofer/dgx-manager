@@ -20,8 +20,9 @@ export interface OllamaStatus {
   vramUsed: number | null;
 }
 
-// Track active Ollama deployments
+// Track active Ollama deployments and their abort controllers
 const activeDeployments = new Map<string, string>(); // deploymentId → modelName
+const activeAbortControllers = new Map<string, AbortController>(); // deploymentId → AbortController
 
 /** Load curated model list. */
 export function getOllamaModels(): OllamaModel[] {
@@ -49,12 +50,15 @@ async function ollamaFetch(path: string, options?: {
   return res.json();
 }
 
-/** Pull a model with streaming progress. */
+/** Pull a model with streaming progress. Abortable via signal. */
 async function pullModel(
   modelName: string,
-  onLog?: (line: string) => void
+  onLog?: (line: string) => void,
+  signal?: AbortSignal
 ): Promise<void> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new Error("Aborted")); return; }
+
     const url = new URL(`${OLLAMA_API}/api/pull`);
 
     const req = http.request(url, {
@@ -87,7 +91,11 @@ async function pullModel(
       res.on("error", reject);
     });
 
-    req.on("error", reject);
+    req.on("error", (err) => {
+      if (signal?.aborted) resolve(); // Treat abort as success (clean stop)
+      else reject(err);
+    });
+    signal?.addEventListener("abort", () => req.destroy());
     req.write(JSON.stringify({ name: modelName, stream: true }));
     req.end();
   });
@@ -101,12 +109,15 @@ export async function deployModel(
   onStatus?: (status: string, error?: string) => void
 ): Promise<number> {
   activeDeployments.set(deploymentId, modelName);
+  const abortController = new AbortController();
+  activeAbortControllers.set(deploymentId, abortController);
 
   try {
     // Pull model (streams progress, skips if cached)
     onStatus?.("downloading");
     onLog?.(`Pulling ${modelName}...\n`);
-    await pullModel(modelName, onLog);
+    await pullModel(modelName, onLog, abortController.signal);
+    if (abortController.signal.aborted) return OLLAMA_PORT;
     onLog?.(`Pull complete.\n`);
 
     // Load model into GPU memory by sending an empty chat
@@ -135,13 +146,20 @@ export async function deployModel(
   }
 }
 
-/** Unload a model from GPU memory. */
+/** Stop an Ollama deployment: abort any in-progress pull, unload model from GPU. */
 export async function stopModel(deploymentId: string): Promise<void> {
+  // Abort in-progress pull if any
+  const controller = activeAbortControllers.get(deploymentId);
+  if (controller) {
+    controller.abort();
+    activeAbortControllers.delete(deploymentId);
+  }
+
   const modelName = activeDeployments.get(deploymentId);
   if (!modelName) return;
 
   try {
-    // Set keep_alive to 0 to immediately unload
+    // Set keep_alive to 0 to immediately unload from GPU
     await ollamaFetch("/api/generate", {
       method: "POST",
       body: { model: modelName, prompt: "", keep_alive: 0 },
