@@ -90,8 +90,16 @@ export default function NodesPage() {
 
   const nodeIsBusy = (node: Node) => (activeDeployments[node.id] || 0) > 0;
 
-  const isOutdated = (node: Node) =>
-    node.agentVersion && expectedVersion && node.agentVersion !== expectedVersion;
+  const isOutdated = (node: Node) => {
+    if (!node.agentVersion || !expectedVersion) return false;
+    const agent = node.agentVersion.split(".").map(Number);
+    const expected = expectedVersion.split(".").map(Number);
+    for (let i = 0; i < 3; i++) {
+      if ((agent[i] || 0) < (expected[i] || 0)) return true;
+      if ((agent[i] || 0) > (expected[i] || 0)) return false;
+    }
+    return false; // equal = not outdated
+  };
 
   const upgradeAgent = async (nodeId: string) => {
     setUpgrading((prev) => ({ ...prev, [nodeId]: true }));

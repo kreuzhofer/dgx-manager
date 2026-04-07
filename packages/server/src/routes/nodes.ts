@@ -12,16 +12,13 @@ import type { AgentHub } from "../ws/agent-hub.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function getExpectedAgentVersion(): string {
-  const candidates = [
-    join(__dirname, "../../../agent/package.json"),
-    "/mnt/tank/src/github/dgx-manager/packages/agent/package.json",
-  ];
-  for (const p of candidates) {
-    try {
-      return JSON.parse(readFileSync(p, "utf-8")).version;
-    } catch { /* try next */ }
+  // Baked into the server container at build time — this is the minimum
+  // acceptable agent version. Agents reporting >= this are fine.
+  try {
+    return JSON.parse(readFileSync(join(__dirname, "../../../agent/package.json"), "utf-8")).version;
+  } catch {
+    return "unknown";
   }
-  return "unknown";
 }
 
 export const nodesRouter = Router();
