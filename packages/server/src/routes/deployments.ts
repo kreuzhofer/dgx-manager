@@ -239,11 +239,14 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
     ? deployment.clusterNodes.map((cn) => cn.node.ipAddress)
     : undefined;
 
+  const isOllamaRestart = config.runtime === "ollama";
   agentHub.sendToAgent(deployment.nodeId, {
     type: "cmd:deploy",
     payload: {
       deploymentId: deployment.id,
-      recipeFile: config.recipeFile,
+      runtime: isOllamaRestart ? "ollama" : "vllm",
+      modelName: isOllamaRestart ? config.modelName : undefined,
+      recipeFile: isOllamaRestart ? undefined : config.recipeFile,
       config,
       clusterNodes: clusterNodeIps,
     },
