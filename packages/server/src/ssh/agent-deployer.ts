@@ -19,7 +19,6 @@ Environment=MANAGER_URL=ws://%MANAGER_HOST%:%MANAGER_PORT%/ws/agent
 Environment=NODE_ID=%NODE_ID%
 Environment=HF_HOME=/mnt/tank/models
 Environment=HF_TOKEN=%HF_TOKEN%
-Environment=OLLAMA_MODELS=/mnt/tank/models/ollama
 Environment=VLLM_REPO_PATH=/mnt/tank/src/github/spark-vllm-docker
 Environment=HOME=/home/%SSH_USER%
 Environment=PATH=/home/%SSH_USER%/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
