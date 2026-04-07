@@ -88,7 +88,7 @@ export async function auditNode(host: string, nodeId?: string): Promise<Provisio
     },
     {
       name: "Ollama",
-      cmd: "curl -sf --max-time 2 http://localhost:11434/api/tags > /dev/null 2>&1 && ollama --version 2>&1 | grep -oP 'client version is \\K[0-9.]+' || echo ''",
+      cmd: "curl -sf --max-time 2 http://localhost:11434/api/tags > /dev/null 2>&1 && ollama --version 2>&1 | grep -oP 'version is \\K[0-9.]+' || echo ''",
       eval: (r) => ({
         name: "Ollama",
         status: r.code === 0 && r.stdout.trim() ? "green" : "yellow",
