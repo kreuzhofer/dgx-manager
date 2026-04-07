@@ -90,7 +90,9 @@ export function launchRecipe(
     extraEnv.LOCAL_IP = options!.clusterNodes![0];
   }
 
-  const child = spawn(runRecipe, args, {
+  // Wrap in shell that ignores SIGPIPE so broken pipes from agent restart
+  // don't kill run-recipe.sh
+  const child = spawn("bash", ["-c", `trap '' PIPE; exec "${runRecipe}" ${args.map(a => `"${a}"`).join(" ")}`], {
     cwd: VLLM_REPO_PATH,
     env: { ...process.env, ...extraEnv },
     stdio: ["ignore", "pipe", "pipe"],
@@ -192,6 +194,25 @@ export function stopRecipe(deploymentId: string, clusterNodes?: string[]): boole
   running.delete(deploymentId);
   removeDeployment(deploymentId);
   return true;
+}
+
+/**
+ * Reattach to docker logs for a running container.
+ * Used after agent restart to resume log streaming to the manager.
+ */
+export function reattachLogs(
+  deploymentId: string,
+  onLog?: (line: string) => void
+): void {
+  if (!isVllmContainerRunning()) return;
+  console.log(`[vllm] Reattaching to docker logs for deployment ${deploymentId}`);
+  const tail = spawn("docker", ["logs", "-f", "--since", "5s", "vllm_node"], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const forwardLog = (data: Buffer) => onLog?.(data.toString());
+  tail.stdout?.on("data", forwardLog);
+  tail.stderr?.on("data", forwardLog);
+  tail.on("exit", () => console.log(`[vllm] Docker log tail ended for ${deploymentId}`));
 }
 
 /** Check if a deployment's process is tracked. */

@@ -4,7 +4,7 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
 import { discoverRecipes } from "./recipes.js";
-import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, isStopping, getTrackedDeployments } from "./runtime/vllm.js";
+import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, isStopping, getTrackedDeployments, reattachLogs } from "./runtime/vllm.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_VERSION: string = JSON.parse(
@@ -56,6 +56,12 @@ function connect() {
           port: t.port,
           error: containerUp ? undefined : "Container not running after agent restart",
         });
+        // Reattach to docker logs for live streaming
+        if (containerUp) {
+          reattachLogs(t.deploymentId, (line) => {
+            sendMsg("agent:deployment:log", { deploymentId: t.deploymentId, log: line });
+          });
+        }
       }
     } else if (isVllmContainerRunning()) {
       // Orphaned container: no tracked deployments but a container is running.
