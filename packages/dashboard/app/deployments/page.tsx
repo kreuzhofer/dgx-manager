@@ -118,6 +118,10 @@ export default function DeploymentsPage() {
           [deploymentId]: (prev[deploymentId] || "") + `\n[ERROR] ${error}`,
         }));
       }
+      // Refresh idle nodes on any terminal or starting state change
+      if (["stopped", "failed", "starting", "running"].includes(status)) {
+        apiFetch<Node[]>("/api/nodes/idle").then(setIdleNodes).catch(() => {});
+      }
     }
     if (event.type === "deployment:log") {
       const { deploymentId, log } = event.payload as { deploymentId: string; log: string };
@@ -129,6 +133,7 @@ export default function DeploymentsPage() {
     if (event.type === "deployment:deleted") {
       const { deploymentId } = event.payload as { deploymentId: string };
       setDeployments((prev) => prev.filter((d) => d.id !== deploymentId));
+      apiFetch<Node[]>("/api/nodes/idle").then(setIdleNodes).catch(() => {});
     }
     if (event.type === "node:status") {
       const { nodeId, status } = event.payload as { nodeId: string; status: string };
