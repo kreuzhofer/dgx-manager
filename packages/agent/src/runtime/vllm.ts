@@ -94,6 +94,7 @@ export function launchRecipe(
     cwd: VLLM_REPO_PATH,
     env: { ...process.env, ...extraEnv },
     stdio: ["ignore", "pipe", "pipe"],
+    detached: true, // Own process group — survives agent restart
   });
 
   child.stdout?.on("data", (data: Buffer) => {
@@ -159,8 +160,10 @@ export function stopRecipe(deploymentId: string, clusterNodes?: string[]): boole
   console.log(`Stopping vLLM recipe: ${instance.recipeName}`);
   instance.stopping = true;
 
-  // Kill the run-recipe.sh process FIRST to prevent it from relaunching
-  try { instance.process.kill("SIGTERM"); } catch { /* already dead */ }
+  // Kill the run-recipe.sh process group FIRST to prevent it from relaunching
+  try {
+    if (instance.process.pid) process.kill(-instance.process.pid, "SIGTERM");
+  } catch { /* already dead */ }
 
   // Kill log tail if running
   const tailProc = (instance as unknown as Record<string, unknown>).tailProcess as ChildProcess | undefined;
