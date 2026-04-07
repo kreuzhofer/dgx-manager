@@ -18,6 +18,7 @@ RestartSec=5
 Environment=MANAGER_URL=ws://%MANAGER_HOST%:%MANAGER_PORT%/ws/agent
 Environment=NODE_ID=%NODE_ID%
 Environment=HF_HOME=/mnt/tank/models
+Environment=HF_TOKEN=%HF_TOKEN%
 Environment=VLLM_REPO_PATH=/mnt/tank/src/github/spark-vllm-docker
 Environment=HOME=/home/%SSH_USER%
 Environment=PATH=/home/%SSH_USER%/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -68,7 +69,8 @@ export async function deployAgent(
     .replace(/%MANAGER_HOST%/g, managerHost)
     .replace(/%MANAGER_PORT%/g, String(managerPort))
     .replace(/%NODE_ID%/g, nodeId)
-    .replace(/%SSH_USER%/g, sshUser);
+    .replace(/%SSH_USER%/g, sshUser)
+    .replace(/%HF_TOKEN%/g, process.env.HF_TOKEN || "");
 
   const writeService = await sshExec(
     host,
