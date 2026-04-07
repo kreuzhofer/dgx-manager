@@ -26,7 +26,7 @@ const activeDeployments = new Map<string, string>(); // deploymentId → modelNa
 /** Load curated model list. */
 export function getOllamaModels(): OllamaModel[] {
   try {
-    return JSON.parse(readFileSync(join(__dirname, "../ollama-models.json"), "utf-8"));
+    return JSON.parse(readFileSync(join(__dirname, "../../ollama-models.json"), "utf-8"));
   } catch {
     return [];
   }
