@@ -1,10 +1,11 @@
 import { execSync, spawn, ChildProcess } from "child_process";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { saveDeployment, removeDeployment, loadDeployments, clearDeployments, type TrackedDeployment } from "./deployment-store.js";
 
 const VLLM_REPO_PATH =
   process.env.VLLM_REPO_PATH || "/mnt/tank/src/github/spark-vllm-docker";
+const SSH_USER = process.env.SSH_USER || process.env.USER || "daniel";
 
 export interface VllmStatus {
   deploymentId: string;
@@ -63,6 +64,20 @@ export function launchRecipe(
   if (options?.maxModelLen) args.push("--max-model-len", String(options.maxModelLen));
   if (options?.tensorParallel) args.push("--tp", String(options.tensorParallel));
   if (options?.pipelineParallel) args.push("--", "-pp", String(options.pipelineParallel));
+
+  // For cluster mode, sync Docker image to all workers before launching
+  if (isCluster) {
+    const workerIps = options!.clusterNodes!.slice(1);
+    // Read container name from recipe file
+    let containerName = "vllm-node";
+    try {
+      const recipeContent = readFileSync(join(VLLM_REPO_PATH, recipeFile), "utf-8");
+      const containerMatch = recipeContent.match(/^container:\s*(.+)$/m);
+      if (containerMatch) containerName = containerMatch[1].trim();
+    } catch { /* use default */ }
+    onLog?.(`Checking ${containerName} image on ${workerIps.length} worker(s)...\n`);
+    syncContainerImage(containerName, workerIps, onLog);
+  }
 
   console.log(`Launching recipe: ${runRecipe} ${args.join(" ")}`);
 
@@ -221,6 +236,68 @@ export function forceStopVllm(clusterNodes?: string[]): void {
 /** Get deployments from persistent store (survives agent restarts). */
 export function getTrackedDeployments(): TrackedDeployment[] {
   return loadDeployments();
+}
+
+/**
+ * Ensure all cluster worker nodes have the same Docker image as the head.
+ * Copies the image via build-and-copy.sh if mismatched.
+ */
+export function syncContainerImage(
+  containerName: string,
+  workerIps: string[],
+  onLog?: (line: string) => void
+): void {
+  if (workerIps.length === 0) return;
+
+  let localId: string;
+  try {
+    localId = execSync(`docker images ${containerName}:latest --format '{{.ID}}'`, {
+      timeout: 5000, encoding: "utf-8",
+    }).trim();
+  } catch {
+    onLog?.(`Warning: cannot read local image ID for ${containerName}\n`);
+    return;
+  }
+
+  if (!localId) {
+    onLog?.(`Image ${containerName} not found locally, --setup will build it\n`);
+    return;
+  }
+
+  const staleWorkers: string[] = [];
+  for (const ip of workerIps) {
+    try {
+      const remoteId = execSync(
+        `ssh -o BatchMode=yes -o ConnectTimeout=5 ${SSH_USER}@${ip} "docker images ${containerName}:latest --format '{{.ID}}'"`,
+        { timeout: 10_000, encoding: "utf-8" }
+      ).trim();
+
+      if (remoteId !== localId) {
+        onLog?.(`Image mismatch on ${ip}: local=${localId.slice(0, 12)} remote=${remoteId.slice(0, 12) || "missing"}\n`);
+        staleWorkers.push(ip);
+      }
+    } catch {
+      onLog?.(`Cannot check image on ${ip}, will copy\n`);
+      staleWorkers.push(ip);
+    }
+  }
+
+  if (staleWorkers.length === 0) {
+    onLog?.(`All workers have matching ${containerName} image (${localId.slice(0, 12)})\n`);
+    return;
+  }
+
+  onLog?.(`Syncing ${containerName} image to ${staleWorkers.length} worker(s)...\n`);
+  try {
+    const copyTargets = staleWorkers.join(",");
+    execSync(
+      `${join(VLLM_REPO_PATH, "build-and-copy.sh")} -t ${containerName} -c ${copyTargets} --copy-parallel`,
+      { cwd: VLLM_REPO_PATH, timeout: 600_000, stdio: "pipe" }
+    );
+    onLog?.(`Image synced to ${staleWorkers.join(", ")}\n`);
+  } catch (err) {
+    onLog?.(`Warning: image sync failed: ${err}\n`);
+  }
 }
 
 /**
