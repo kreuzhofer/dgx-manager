@@ -98,11 +98,13 @@ function connect() {
 
       // Enrich with vLLM deployment metrics
       let activeRequests: number | null = null;
+      let tps: number | null = null;
       try {
         const statuses = await checkDeployments();
-        const running = statuses.filter((s) => s.containerRunning);
-        if (running.length > 0) {
-          activeRequests = running.reduce((sum, s) => sum + (s.requestsRunning ?? 0) + (s.requestsWaiting ?? 0), 0);
+        const active = statuses.filter((s) => s.containerRunning);
+        if (active.length > 0) {
+          activeRequests = active.reduce((sum, s) => sum + (s.requestsRunning ?? 0) + (s.requestsWaiting ?? 0), 0);
+          tps = active.reduce((sum, s) => sum + (s.tps ?? 0), 0) || null;
         }
       } catch { /* ignore */ }
 
@@ -111,7 +113,7 @@ function connect() {
         payload: {
           gpuUtil: m.gpuUtil,
           vramUsed: m.vramUsed,
-          tps: null,
+          tps,
           activeRequests,
           temp: m.temperature,
           netInterfaces: m.netInterfaces,

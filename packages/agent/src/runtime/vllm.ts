@@ -16,8 +16,12 @@ export interface VllmStatus {
   requestsRunning: number | null;
   requestsWaiting: number | null;
   kvCacheUsage: number | null;
+  tps: number | null;
   error?: string;
 }
+
+// Track previous token counter for TPS calculation
+let prevTokenCount: { total: number; time: number } | null = null;
 
 interface VllmInstance {
   process: ChildProcess;
@@ -373,6 +377,7 @@ export async function checkDeployments(): Promise<VllmStatus[]> {
       requestsRunning: null,
       requestsWaiting: null,
       kvCacheUsage: null,
+      tps: null,
     };
 
     // Check docker container
@@ -398,6 +403,19 @@ export async function checkDeployments(): Promise<VllmStatus[]> {
         status.requestsRunning = parsePrometheusGauge(metrics, "vllm:num_requests_running");
         status.requestsWaiting = parsePrometheusGauge(metrics, "vllm:num_requests_waiting");
         status.kvCacheUsage = parsePrometheusGauge(metrics, "vllm:kv_cache_usage_perc");
+
+        // Compute TPS from generation_tokens counter delta
+        const genTokens = parsePrometheusCounter(metrics, "vllm:generation_tokens_total");
+        if (genTokens !== null) {
+          const now = Date.now();
+          if (prevTokenCount) {
+            const elapsed = (now - prevTokenCount.time) / 1000;
+            if (elapsed > 0) {
+              status.tps = Math.round((genTokens - prevTokenCount.total) / elapsed * 10) / 10;
+            }
+          }
+          prevTokenCount = { total: genTokens, time: now };
+        }
       } catch {
         // Metrics endpoint not ready yet
       }
@@ -426,6 +444,13 @@ export async function checkDeployments(): Promise<VllmStatus[]> {
 }
 
 function parsePrometheusGauge(text: string, name: string): number | null {
+  const regex = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[{\\s].*?\\s+([\\d.eE+-]+)$`, "m");
+  const match = text.match(regex);
+  return match ? parseFloat(match[1]) : null;
+}
+
+function parsePrometheusCounter(text: string, name: string): number | null {
+  // Counters may have labels like {engine="0",model_name="..."}
   const regex = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[{\\s].*?\\s+([\\d.eE+-]+)$`, "m");
   const match = text.match(regex);
   return match ? parseFloat(match[1]) : null;
