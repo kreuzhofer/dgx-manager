@@ -88,11 +88,11 @@ export async function auditNode(host: string, nodeId?: string): Promise<Provisio
     },
     {
       name: "Ollama",
-      cmd: "ollama --version 2>/dev/null",
+      cmd: "ollama --version 2>&1 | grep -oP 'client version is \\K[0-9.]+'  || ollama --version 2>/dev/null",
       eval: (r) => ({
         name: "Ollama",
-        status: r.code === 0 ? "green" : "yellow",
-        detail: r.code === 0 ? r.stdout : "Not installed — can auto-install",
+        status: r.code === 0 && r.stdout.trim() ? "green" : "yellow",
+        detail: r.code === 0 && r.stdout.trim() ? `v${r.stdout.trim()}` : "Not installed — can auto-install",
       }),
     },
     {
