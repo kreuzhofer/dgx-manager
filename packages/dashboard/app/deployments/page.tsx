@@ -175,6 +175,12 @@ export default function DeploymentsPage() {
       });
       setDeployments((prev) => [deployment, ...prev]);
       setSelectedRecipe("");
+      setTensorParallel("");
+      setPipelineParallel("");
+      setMaxModelLen("");
+      setGpuMem("");
+      setPort("8000");
+      setSelectedNode("");
       setViewingLogs(deployment.id);
       // Immediately remove consumed nodes from idle list
       const usedIds = new Set<string>([deployment.nodeId]);
