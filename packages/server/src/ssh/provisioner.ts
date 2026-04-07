@@ -166,7 +166,7 @@ export async function provisionNode(host: string, checks: PrereqCheck[], nodeId?
           "sudo systemctl daemon-reload",
           "sudo systemctl enable ollama",
           "sudo systemctl restart ollama",
-        ].join(" && "), { timeout: 120_000 });
+        ].join(" && "), { timeout: 300_000 });
         break;
       default:
         continue;
