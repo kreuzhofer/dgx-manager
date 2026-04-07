@@ -491,7 +491,14 @@ export default function DeploymentsPage() {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <div>
-                      <h3 className="font-semibold">
+                      <h3 className="font-semibold flex items-center gap-2">
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                          config.runtime === "ollama"
+                            ? "bg-cyan-900/60 text-cyan-300"
+                            : "bg-green-900/60 text-green-300"
+                        }`}>
+                          {config.runtime === "ollama" ? "Ollama" : "vLLM"}
+                        </span>
                         {d.model?.name || recipeName || d.modelId}
                       </h3>
                       <p className="text-xs text-gray-500 mt-0.5">
