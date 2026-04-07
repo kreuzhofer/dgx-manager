@@ -66,7 +66,10 @@ export default function DeploymentsPage() {
   const [loading, setLoading] = useState(true);
 
   // Deploy form state
+  const [runtimeMode, setRuntimeMode] = useState<"vllm" | "ollama">("vllm");
   const [selectedRecipe, setSelectedRecipe] = useState<string>("");
+  const [ollamaModels, setOllamaModels] = useState<{ name: string; size: string; description: string }[]>([]);
+  const [selectedOllamaModel, setSelectedOllamaModel] = useState<string>("");
   const [idleNodes, setIdleNodes] = useState<Node[]>([]);
   const [selectedNode, setSelectedNode] = useState<string>("");
   const [port, setPort] = useState("8000");
@@ -87,12 +90,14 @@ export default function DeploymentsPage() {
       apiFetch<Node[]>("/api/nodes"),
       apiFetch<Deployment[]>("/api/deployments"),
       apiFetch<Node[]>("/api/nodes/idle"),
+      apiFetch<{ name: string; size: string; description: string }[]>("/api/recipes/ollama-models"),
     ])
-      .then(([r, n, d, idle]) => {
+      .then(([r, n, d, idle, om]) => {
         setRecipes(r);
         setNodes(n);
         setDeployments(d);
         setIdleNodes(idle);
+        setOllamaModels(om);
       })
       .catch(console.error)
       .finally(() => setLoading(false));
@@ -154,20 +159,32 @@ export default function DeploymentsPage() {
 
   const deploy = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedRecipe || !canDeploy) return;
     setDeploying(true);
     try {
-      const configOverrides: Record<string, unknown> = {
-        port: parseInt(port) || 8000,
-      };
-      if (maxModelLen) configOverrides.maxModelLen = parseInt(maxModelLen);
-      if (tensorParallel) configOverrides.tensorParallel = parseInt(tensorParallel);
-      if (pipelineParallel) configOverrides.pipelineParallel = parseInt(pipelineParallel);
-      if (gpuMem) configOverrides.gpuMem = parseFloat(gpuMem);
+      let body: Record<string, unknown>;
 
-      const body = needsCluster
-        ? { nodeIds: "auto", recipeFile: selectedRecipe, config: configOverrides }
-        : { nodeId: selectedNode || "auto", recipeFile: selectedRecipe, config: configOverrides };
+      if (runtimeMode === "ollama") {
+        if (!selectedOllamaModel || !selectedNode) return;
+        body = {
+          runtime: "ollama",
+          modelName: selectedOllamaModel,
+          nodeId: selectedNode,
+          config: {},
+        };
+      } else {
+        if (!selectedRecipe || !canDeploy) return;
+        const configOverrides: Record<string, unknown> = {
+          port: parseInt(port) || 8000,
+        };
+        if (maxModelLen) configOverrides.maxModelLen = parseInt(maxModelLen);
+        if (tensorParallel) configOverrides.tensorParallel = parseInt(tensorParallel);
+        if (pipelineParallel) configOverrides.pipelineParallel = parseInt(pipelineParallel);
+        if (gpuMem) configOverrides.gpuMem = parseFloat(gpuMem);
+
+        body = needsCluster
+          ? { nodeIds: "auto", recipeFile: selectedRecipe, config: configOverrides }
+          : { nodeId: selectedNode || "auto", recipeFile: selectedRecipe, config: configOverrides };
+      }
 
       const deployment = await apiFetch<Deployment>("/api/deployments", {
         method: "POST",
@@ -175,6 +192,7 @@ export default function DeploymentsPage() {
       });
       setDeployments((prev) => [deployment, ...prev]);
       setSelectedRecipe("");
+      setSelectedOllamaModel("");
       setTensorParallel("");
       setPipelineParallel("");
       setMaxModelLen("");
@@ -265,38 +283,76 @@ export default function DeploymentsPage() {
         onSubmit={deploy}
         className="bg-gray-900 border border-gray-800 rounded-lg p-5 mb-6"
       >
-        <h2 className="text-sm font-semibold text-gray-300 mb-4 uppercase tracking-wide">
-          New Deployment
-        </h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wide">
+            New Deployment
+          </h2>
+          <div className="flex bg-gray-800 rounded p-0.5">
+            <button
+              type="button"
+              onClick={() => { setRuntimeMode("vllm"); setSelectedOllamaModel(""); }}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${runtimeMode === "vllm" ? "bg-green-600 text-white" : "text-gray-400 hover:text-white"}`}
+            >
+              vLLM
+            </button>
+            <button
+              type="button"
+              onClick={() => { setRuntimeMode("ollama"); setSelectedRecipe(""); }}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${runtimeMode === "ollama" ? "bg-green-600 text-white" : "text-gray-400 hover:text-white"}`}
+            >
+              Ollama
+            </button>
+          </div>
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
           <div className="md:col-span-2">
-            <label className="block text-xs text-gray-400 mb-1">Recipe</label>
-            <select
-              value={selectedRecipe}
-              onChange={(e) => onRecipeChange(e.target.value)}
-              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
-            >
-              <option value="">Select a recipe...</option>
-              {recipes.map((r) => {
-                const tp = r.defaults?.tensor_parallel as number | undefined;
-                const pp = r.defaults?.pipeline_parallel as number | undefined;
-                const suffix = [
-                  pp ? `PP=${pp}` : tp && tp > 1 ? `TP=${tp}` : null,
-                  r.solo_only ? "solo" : null,
-                ].filter(Boolean).join(", ");
-                return (
-                  <option key={r.file} value={r.file}>
-                    {r.name}{suffix ? ` [${suffix}]` : ""}
-                  </option>
-                );
-              })}
-            </select>
+            {runtimeMode === "vllm" ? (
+              <>
+                <label className="block text-xs text-gray-400 mb-1">Recipe</label>
+                <select
+                  value={selectedRecipe}
+                  onChange={(e) => onRecipeChange(e.target.value)}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
+                >
+                  <option value="">Select a recipe...</option>
+                  {recipes.map((r) => {
+                    const tp = r.defaults?.tensor_parallel as number | undefined;
+                    const pp = r.defaults?.pipeline_parallel as number | undefined;
+                    const suffix = [
+                      pp ? `PP=${pp}` : tp && tp > 1 ? `TP=${tp}` : null,
+                      r.solo_only ? "solo" : null,
+                    ].filter(Boolean).join(", ");
+                    return (
+                      <option key={r.file} value={r.file}>
+                        {r.name}{suffix ? ` [${suffix}]` : ""}
+                      </option>
+                    );
+                  })}
+                </select>
+              </>
+            ) : (
+              <>
+                <label className="block text-xs text-gray-400 mb-1">Model</label>
+                <select
+                  value={selectedOllamaModel}
+                  onChange={(e) => setSelectedOllamaModel(e.target.value)}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
+                >
+                  <option value="">Select a model...</option>
+                  {ollamaModels.map((m) => (
+                    <option key={m.name} value={m.name}>
+                      {m.name} ({m.size}) — {m.description}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
           </div>
           <div className="md:col-span-2">
             <label className="block text-xs text-gray-400 mb-1">
-              {needsCluster ? `Target Nodes (${requiredNodes} needed)` : "Node"}
+              {runtimeMode === "ollama" ? "Node" : needsCluster ? `Target Nodes (${requiredNodes} needed)` : "Node"}
             </label>
-            {needsCluster ? (
+            {runtimeMode === "vllm" && needsCluster ? (
               <div className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm">
                 {idleNodes.length < requiredNodes ? (
                   <span className="text-red-400">
@@ -401,7 +457,7 @@ export default function DeploymentsPage() {
         <div className="mt-4 flex justify-end">
           <button
             type="submit"
-            disabled={deploying || !selectedRecipe || !canDeploy}
+            disabled={deploying || (runtimeMode === "vllm" ? (!selectedRecipe || !canDeploy) : (!selectedOllamaModel || !selectedNode))}
             className="bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-5 py-2 rounded text-sm font-medium transition-colors"
           >
             {deploying ? "Deploying..." : "Deploy"}

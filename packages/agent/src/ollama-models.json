@@ -1,0 +1,12 @@
+[
+  { "name": "llama3.1:70b", "size": "40GB", "description": "Meta Llama 3.1 70B" },
+  { "name": "llama3.1:8b", "size": "4.7GB", "description": "Meta Llama 3.1 8B" },
+  { "name": "qwen3:32b", "size": "20GB", "description": "Qwen 3 32B" },
+  { "name": "qwen3:8b", "size": "5.2GB", "description": "Qwen 3 8B" },
+  { "name": "gemma3:27b", "size": "17GB", "description": "Google Gemma 3 27B" },
+  { "name": "deepseek-r1:70b", "size": "43GB", "description": "DeepSeek R1 70B" },
+  { "name": "deepseek-r1:32b", "size": "20GB", "description": "DeepSeek R1 32B" },
+  { "name": "mistral:7b", "size": "4.1GB", "description": "Mistral 7B" },
+  { "name": "codellama:70b", "size": "39GB", "description": "Code Llama 70B" },
+  { "name": "phi4:14b", "size": "9.1GB", "description": "Microsoft Phi-4 14B" }
+]

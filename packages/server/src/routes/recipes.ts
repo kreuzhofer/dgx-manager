@@ -7,3 +7,8 @@ recipesRouter.get("/", (req, res) => {
   const agentHub: AgentHub = req.app.get("agentHub");
   res.json(agentHub.getRecipes());
 });
+
+recipesRouter.get("/ollama-models", (req, res) => {
+  const agentHub: AgentHub = req.app.get("agentHub");
+  res.json(agentHub.getOllamaModels());
+});

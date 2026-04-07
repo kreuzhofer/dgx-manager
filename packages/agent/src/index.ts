@@ -5,6 +5,7 @@ import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
 import { discoverRecipes } from "./recipes.js";
 import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, isStopping, getTrackedDeployments, reattachLogs } from "./runtime/vllm.js";
+import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth, getOllamaModels } from "./runtime/ollama.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_VERSION: string = JSON.parse(
@@ -76,6 +77,15 @@ function connect() {
       ws!.send(JSON.stringify({
         type: "agent:recipes",
         payload: { recipes },
+      }));
+    }
+
+    // Report available Ollama models
+    const ollamaModels = getOllamaModels();
+    if (ollamaModels.length > 0) {
+      ws!.send(JSON.stringify({
+        type: "agent:ollama-models",
+        payload: { models: ollamaModels },
       }));
     }
 
@@ -183,12 +193,41 @@ function sendMsg(type: string, payload: Record<string, unknown>) {
 function handleCommand(msg: { type: string; payload: Record<string, unknown> }) {
   switch (msg.type) {
     case "cmd:deploy": {
-      const { deploymentId, recipeFile, config, clusterNodes } = msg.payload as {
+      const { deploymentId, recipeFile, config, clusterNodes, runtime, modelName } = msg.payload as {
         deploymentId: string;
         recipeFile?: string;
         config?: Record<string, unknown>;
         clusterNodes?: string[];
+        runtime?: string;
+        modelName?: string;
       };
+
+      // Ollama deployment
+      if (runtime === "ollama" && modelName) {
+        sendMsg("agent:deployment:status", { deploymentId, status: "starting" });
+        ollamaDeployModel(
+          deploymentId,
+          modelName,
+          (line) => sendMsg("agent:deployment:log", { deploymentId, log: line }),
+          (status, error) => {
+            sendMsg("agent:deployment:status", {
+              deploymentId,
+              status,
+              port: status === "running" ? 11434 : undefined,
+              error,
+            });
+          }
+        ).catch((err) => {
+          sendMsg("agent:deployment:status", {
+            deploymentId,
+            status: "failed",
+            error: String(err),
+          });
+        });
+        break;
+      }
+
+      // vLLM deployment
       if (!recipeFile) {
         sendMsg("agent:deployment:status", {
           deploymentId,
@@ -272,14 +311,24 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
     }
 
     case "cmd:undeploy": {
-      const { deploymentId, deleteAfter, clusterNodes } = msg.payload as {
-        deploymentId: string; deleteAfter?: boolean; clusterNodes?: string[];
+      const { deploymentId, deleteAfter, clusterNodes, runtime } = msg.payload as {
+        deploymentId: string; deleteAfter?: boolean; clusterNodes?: string[]; runtime?: string;
       };
       sendMsg("agent:deployment:status", { deploymentId, status: "stopping" });
 
       // Stop asynchronously so we can report progress
       (async () => {
         try {
+          if (runtime === "ollama") {
+            await ollamaStopModel(deploymentId);
+            sendMsg("agent:deployment:status", {
+              deploymentId,
+              status: "stopped",
+              deleteAfter: deleteAfter || false,
+            });
+            return;
+          }
+
           stopRecipe(deploymentId, clusterNodes);
           forceStopVllm(clusterNodes);
 

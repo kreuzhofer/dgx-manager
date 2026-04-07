@@ -3,6 +3,12 @@ import { prisma } from "../prisma.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import { metricsBuffer } from "../metrics-buffer.js";
 
+export interface OllamaModelInfo {
+  name: string;
+  size: string;
+  description: string;
+}
+
 export interface VllmRecipe {
   file: string;
   name: string;
@@ -23,6 +29,7 @@ export class AgentHub {
   private wss: WebSocketServer;
   private agents = new Map<string, AgentConnection>();
   private recipes: VllmRecipe[] = [];
+  private ollamaModels: OllamaModelInfo[] = [];
   private onMetrics?: (nodeId: string, metrics: Record<string, unknown>) => void;
   private onRecipes?: (recipes: VllmRecipe[]) => void;
 
@@ -47,6 +54,10 @@ export class AgentHub {
 
   getRecipes(): VllmRecipe[] {
     return this.recipes;
+  }
+
+  getOllamaModels(): OllamaModelInfo[] {
+    return this.ollamaModels;
   }
 
   private handleConnection(ws: WebSocket) {
@@ -81,6 +92,12 @@ export class AgentHub {
             this.recipes = incoming;
             console.log(`Received ${incoming.length} vLLM recipes from agent ${nodeId}`);
             this.onRecipes?.(incoming);
+            break;
+          }
+
+          case "agent:ollama-models": {
+            this.ollamaModels = msg.payload.models as OllamaModelInfo[];
+            console.log(`Received ${this.ollamaModels.length} Ollama models from agent ${nodeId}`);
             break;
           }
 

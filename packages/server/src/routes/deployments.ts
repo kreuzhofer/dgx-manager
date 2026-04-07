@@ -17,9 +17,14 @@ deploymentsRouter.get("/", async (_req, res) => {
 });
 
 deploymentsRouter.post("/", async (req, res) => {
-  let { nodeId, nodeIds, recipeFile, config } = req.body;
-  if (!recipeFile) {
-    return res.status(400).json({ error: "recipeFile required" });
+  let { nodeId, nodeIds, recipeFile, config, runtime, modelName } = req.body;
+  const isOllama = runtime === "ollama";
+
+  if (!isOllama && !recipeFile) {
+    return res.status(400).json({ error: "recipeFile required for vLLM deployments" });
+  }
+  if (isOllama && !modelName) {
+    return res.status(400).json({ error: "modelName required for Ollama deployments" });
   }
 
   const activeStatuses = ["pending", "running", "starting", "building", "downloading", "launching", "loading", "restarting"];
@@ -93,12 +98,28 @@ deploymentsRouter.post("/", async (req, res) => {
     }
   }
 
+  // Check solo node isn't busy
+  if (!isCluster) {
+    const busy = await prisma.deployment.findFirst({
+      where: {
+        status: { in: activeStatuses },
+        OR: [
+          { nodeId: headNodeId },
+          { clusterNodes: { some: { nodeId: headNodeId } } },
+        ],
+      },
+    });
+    if (busy) {
+      return res.status(409).json({ error: "Node already has an active deployment" });
+    }
+  }
+
   // Ensure a model record exists
-  const recipeName = recipeFile.replace(/^recipes\//, "").replace(/\.yaml$/, "");
-  let model = await prisma.model.findUnique({ where: { name: recipeName } });
+  const modelKey = isOllama ? modelName : recipeFile.replace(/^recipes\//, "").replace(/\.yaml$/, "");
+  let model = await prisma.model.findUnique({ where: { name: modelKey } });
   if (!model) {
     model = await prisma.model.create({
-      data: { name: recipeName, runtime: "vllm" },
+      data: { name: modelKey, runtime: isOllama ? "ollama" : "vllm" },
     });
   }
 
@@ -108,7 +129,9 @@ deploymentsRouter.post("/", async (req, res) => {
       modelId: model.id,
       nodeId: headNodeId,
       clusterMode: isCluster,
-      config: JSON.stringify({ recipeFile, ...config }),
+      config: JSON.stringify(isOllama
+        ? { runtime: "ollama", modelName, ...config }
+        : { recipeFile, ...config }),
     },
   });
 
@@ -142,7 +165,9 @@ deploymentsRouter.post("/", async (req, res) => {
     type: "cmd:deploy",
     payload: {
       deploymentId: deployment.id,
-      recipeFile,
+      runtime: isOllama ? "ollama" : "vllm",
+      modelName: isOllama ? modelName : undefined,
+      recipeFile: isOllama ? undefined : recipeFile,
       config: config || {},
       clusterNodes: clusterNodeIps,
     },
@@ -173,12 +198,14 @@ deploymentsRouter.delete("/:id", async (req, res) => {
     ? deployment.clusterNodes.map((cn) => cn.node.ipAddress)
     : undefined;
 
+  const deployConfig = deployment.config ? JSON.parse(deployment.config) : {};
   agentHub.sendToAgent(deployment.nodeId, {
     type: "cmd:undeploy",
     payload: {
       deploymentId: deployment.id,
       deleteAfter: wantDelete,
       clusterNodes: clusterNodeIps,
+      runtime: deployConfig.runtime || "vllm",
     },
   });
 
