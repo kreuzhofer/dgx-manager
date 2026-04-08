@@ -176,7 +176,7 @@ export async function deployModel(
 }
 
 /** Stop an Ollama deployment: abort any in-progress pull, unload model from GPU. */
-export async function stopModel(deploymentId: string): Promise<void> {
+export async function stopModel(deploymentId: string, modelNameOverride?: string): Promise<void> {
   // Abort in-progress pull if any
   const controller = activeAbortControllers.get(deploymentId);
   if (controller) {
@@ -184,7 +184,7 @@ export async function stopModel(deploymentId: string): Promise<void> {
     activeAbortControllers.delete(deploymentId);
   }
 
-  const modelName = activeDeployments.get(deploymentId);
+  const modelName = activeDeployments.get(deploymentId) || modelNameOverride;
   if (!modelName) return;
 
   try {

@@ -385,8 +385,8 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
     }
 
     case "cmd:undeploy": {
-      const { deploymentId, deleteAfter, clusterNodes, runtime } = msg.payload as {
-        deploymentId: string; deleteAfter?: boolean; clusterNodes?: string[]; runtime?: string;
+      const { deploymentId, deleteAfter, clusterNodes, runtime, modelName: undeployModelName } = msg.payload as {
+        deploymentId: string; deleteAfter?: boolean; clusterNodes?: string[]; runtime?: string; modelName?: string;
       };
       sendMsg("agent:deployment:status", { deploymentId, status: "stopping" });
 
@@ -394,7 +394,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
       (async () => {
         try {
           if (runtime === "ollama") {
-            await ollamaStopModel(deploymentId);
+            await ollamaStopModel(deploymentId, undeployModelName);
             sendMsg("agent:deployment:status", {
               deploymentId,
               status: "stopped",

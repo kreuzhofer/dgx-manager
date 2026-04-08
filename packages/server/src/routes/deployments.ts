@@ -260,6 +260,7 @@ deploymentsRouter.delete("/:id", async (req, res) => {
       deleteAfter: wantDelete,
       clusterNodes: clusterNodeIps,
       runtime: deployConfig.runtime || "vllm",
+      modelName: deployConfig.modelName,
     },
   });
 
