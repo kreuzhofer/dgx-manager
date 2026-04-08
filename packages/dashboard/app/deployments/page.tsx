@@ -134,6 +134,7 @@ export default function DeploymentsPage() {
       // (starting/running are handled by optimistic update in deploy())
       if (["stopped", "failed"].includes(status)) {
         apiFetch<Node[]>("/api/nodes/idle").then(setIdleNodes).catch(() => {});
+        apiFetch<Node[]>("/api/nodes").then(setNodes).catch(() => {});
       }
     }
     if (event.type === "deployment:log") {
@@ -147,10 +148,19 @@ export default function DeploymentsPage() {
       const { deploymentId } = event.payload as { deploymentId: string };
       setDeployments((prev) => prev.filter((d) => d.id !== deploymentId));
       apiFetch<Node[]>("/api/nodes/idle").then(setIdleNodes).catch(() => {});
+      apiFetch<Node[]>("/api/nodes").then(setNodes).catch(() => {});
     }
     if (event.type === "node:status") {
       const { nodeId, status } = event.payload as { nodeId: string; status: string };
       setNodes((prev) => prev.map((n) => n.id === nodeId ? { ...n, status } : n));
+    }
+    if (event.type === "node:metrics") {
+      const { nodeId, vramUsed } = event.payload as unknown as { nodeId: string; vramUsed: number };
+      if (vramUsed !== undefined) {
+        setNodes((prev) => prev.map((n) =>
+          n.id === nodeId ? { ...n, metrics: [{ vramUsed }] } : n
+        ));
+      }
     }
   }, []);
 
