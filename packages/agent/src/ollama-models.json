@@ -11,5 +11,6 @@
   { "name": "phi4:14b", "size": "9.1GB", "description": "Microsoft Phi-4 14B" },
   { "name": "qwen3-vl:30b", "size": "18GB", "description": "Qwen 3 VL 30B (vision-language)" },
   { "name": "qwen3-vl:32b", "size": "20GB", "description": "Qwen 3 VL 32B (vision-language)" },
-  { "name": "qwen3-vl:8b", "size": "5.2GB", "description": "Qwen 3 VL 8B (vision-language)" }
+  { "name": "qwen3-vl:8b", "size": "5.2GB", "description": "Qwen 3 VL 8B (vision-language)" },
+  { "name": "qwen3-embedding:8b", "size": "4.9GB", "description": "Qwen 3 Embedding 8B" }
 ]
