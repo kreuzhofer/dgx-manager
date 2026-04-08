@@ -169,7 +169,22 @@ function connect() {
           }
         }
 
-        // Check Ollama deployments for eviction/resurrection
+        // Report all Ollama loaded models — server matches to deployments
+        try {
+          const { isOllamaRunning: ollamaUp } = await import("./runtime/ollama.js");
+          if (await ollamaUp()) {
+            const ps = await (await fetch("http://localhost:11434/api/ps")).json() as {
+              models?: { name: string; size: number }[];
+            };
+            const loadedModels = (ps.models || []).map((m) => ({
+              name: m.name,
+              vramMB: Math.round(m.size / 1024 / 1024),
+            }));
+            sendMsg("agent:ollama-status", { models: loadedModels });
+          }
+        } catch { /* ollama not running */ }
+
+        // Check tracked Ollama deployments for eviction
         const { getActiveDeployments: getOllamaDeployments } = await import("./runtime/ollama.js");
         for (const [depId, modelName] of getOllamaDeployments()) {
           const health = await checkOllamaHealth(depId);
@@ -177,27 +192,20 @@ function connect() {
           const prev = ollamaLastState.get(depId);
           if (!health.loaded && prev !== "evicted") {
             ollamaLastState.set(depId, "evicted");
-            ollamaLastVram.delete(depId);
             sendMsg("agent:deployment:status", {
               deploymentId: depId,
               status: "evicted",
               vramActual: 0,
               error: `Model ${modelName} was unloaded from GPU memory`,
             });
-          } else if (health.loaded) {
-            const prevVram = ollamaLastVram.get(depId);
-            const statusChanged = prev === "evicted" || !prev;
-            const vramChanged = health.vramUsed !== null && health.vramUsed !== prevVram;
-            if (statusChanged || vramChanged) {
-              ollamaLastState.set(depId, "running");
-              if (health.vramUsed !== null) ollamaLastVram.set(depId, health.vramUsed);
-              sendMsg("agent:deployment:status", {
-                deploymentId: depId,
-                status: "running",
-                port: 11434,
-                vramActual: health.vramUsed,
-              });
-            }
+          } else if (health.loaded && (prev === "evicted" || !prev)) {
+            ollamaLastState.set(depId, "running");
+            sendMsg("agent:deployment:status", {
+              deploymentId: depId,
+              status: "running",
+              port: 11434,
+              vramActual: health.vramUsed,
+            });
           }
         }
       } catch { /* ignore */ }

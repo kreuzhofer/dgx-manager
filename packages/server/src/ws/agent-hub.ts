@@ -101,6 +101,38 @@ export class AgentHub {
             break;
           }
 
+          case "agent:ollama-status": {
+            // Match loaded Ollama models to active deployments and update vramActual
+            if (!nodeId) break;
+            const loadedModels = msg.payload.models as { name: string; vramMB: number }[];
+            const activeOllama = await prisma.deployment.findMany({
+              where: {
+                nodeId,
+                status: { in: ["running", "evicted"] },
+                model: { runtime: "ollama" },
+              },
+              include: { model: true },
+            });
+            for (const dep of activeOllama) {
+              const loaded = loadedModels.find((m) => m.name.startsWith(dep.model.name));
+              if (loaded) {
+                if (dep.vramActual !== loaded.vramMB) {
+                  await prisma.deployment.update({
+                    where: { id: dep.id },
+                    data: { vramActual: loaded.vramMB, status: "running" },
+                  });
+                }
+              } else if (dep.status === "running") {
+                await prisma.deployment.update({
+                  where: { id: dep.id },
+                  data: { vramActual: 0, status: "evicted" },
+                });
+                sseBroadcast({ type: "deployment:status", payload: { deploymentId: dep.id, status: "evicted", vramActual: 0 } });
+              }
+            }
+            break;
+          }
+
           case "agent:metrics": {
             if (!nodeId) break;
             await prisma.metricSnapshot.create({

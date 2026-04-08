@@ -636,7 +636,11 @@ export default function DeploymentsPage() {
                 {/* Cluster nodes detail */}
                 {d.clusterMode && d.clusterNodes && d.clusterNodes.length > 0 && (
                   <div className="mt-3 flex gap-2 flex-wrap">
-                    {d.clusterNodes.map((cn) => (
+                    {d.clusterNodes.map((cn) => {
+                      const cnNode = nodes.find((n) => n.name === cn.node.name);
+                      const cnVram = cnNode?.metrics?.[0]?.vramUsed;
+                      const cnTotal = cnNode?.vramTotal;
+                      return (
                       <div
                         key={cn.id}
                         className={`text-xs px-2 py-1 rounded border ${
@@ -649,8 +653,14 @@ export default function DeploymentsPage() {
                         <span className="ml-1 text-[10px] opacity-70">
                           {cn.role === "head" ? "HEAD" : "worker"}
                         </span>
+                        {cnVram != null && cnTotal && (
+                          <span className="ml-1 text-[10px] opacity-60">
+                            {Math.round(cnVram / 1024)}GB/{Math.round(cnTotal / 1024)}GB
+                          </span>
+                        )}
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
 
