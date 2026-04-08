@@ -114,13 +114,13 @@ export default function DeploymentsPage() {
   // SSE handler for real-time updates
   const handleSSE = useCallback((event: SseEvent) => {
     if (event.type === "deployment:status") {
-      const { deploymentId, status, port, error } = event.payload as {
-        deploymentId: string; status: string; port?: number; error?: string;
+      const { deploymentId, status, port, error, vramActual } = event.payload as {
+        deploymentId: string; status: string; port?: number; error?: string; vramActual?: number;
       };
       setDeployments((prev) =>
         prev.map((d) =>
           d.id === deploymentId
-            ? { ...d, status, port: port ?? d.port }
+            ? { ...d, status, port: port ?? d.port, vramActual: vramActual ?? d.vramActual }
             : d
         )
       );

@@ -182,7 +182,8 @@ export class AgentHub {
               break;
             }
             if (error) console.error(`Deployment ${deploymentId} error: ${error}`);
-            sseBroadcast({ type: "deployment:status", payload: { deploymentId, status, port, error } });
+            const isStopped = ["stopped", "failed", "evicted"].includes(status as string);
+            sseBroadcast({ type: "deployment:status", payload: { deploymentId, status, port, error, vramActual: isStopped ? 0 : (vramActual ? Number(vramActual) : undefined) } });
 
             // Update cluster node statuses when deployment changes
             if (["stopped", "failed", "running"].includes(status)) {
