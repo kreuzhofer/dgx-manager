@@ -162,7 +162,7 @@ export async function provisionNode(host: string, checks: PrereqCheck[], nodeId?
           "curl -fsSL https://ollama.ai/install.sh | sh",
           // Ensure systemd service exists with OLLAMA_MODELS on NFS
           "sudo mkdir -p /etc/systemd/system/ollama.service.d",
-          `echo -e '[Service]\\nUser=${process.env.SSH_USER || "ubuntu"}\\nEnvironment=HOME=/home/${process.env.SSH_USER || "ubuntu"}' | sudo tee /etc/systemd/system/ollama.service.d/override.conf`,
+          `echo -e '[Service]\\nUser=${process.env.SSH_USER || "ubuntu"}\\nEnvironment=HOME=/home/${process.env.SSH_USER || "ubuntu"}\\nEnvironment=OLLAMA_MODELS=/mnt/tank/models/ollama' | sudo tee /etc/systemd/system/ollama.service.d/override.conf`,
           "sudo systemctl daemon-reload",
           "sudo systemctl enable ollama",
           "sudo systemctl restart ollama",
