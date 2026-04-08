@@ -195,13 +195,14 @@ function sendMsg(type: string, payload: Record<string, unknown>) {
 function handleCommand(msg: { type: string; payload: Record<string, unknown> }) {
   switch (msg.type) {
     case "cmd:deploy": {
-      const { deploymentId, recipeFile, config, clusterNodes, runtime, modelName } = msg.payload as {
+      const { deploymentId, recipeFile, config, clusterNodes, runtime, modelName, modelType } = msg.payload as {
         deploymentId: string;
         recipeFile?: string;
         config?: Record<string, unknown>;
         clusterNodes?: string[];
         runtime?: string;
         modelName?: string;
+        modelType?: "chat" | "embedding";
       };
 
       // Ollama deployment
@@ -218,7 +219,8 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
               port: status === "running" ? 11434 : undefined,
               error,
             });
-          }
+          },
+          modelType
         ).catch((err) => {
           sendMsg("agent:deployment:status", {
             deploymentId,

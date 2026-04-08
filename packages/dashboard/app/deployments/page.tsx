@@ -68,7 +68,7 @@ export default function DeploymentsPage() {
   // Deploy form state
   const [runtimeMode, setRuntimeMode] = useState<"vllm" | "ollama">("vllm");
   const [selectedRecipe, setSelectedRecipe] = useState<string>("");
-  const [ollamaModels, setOllamaModels] = useState<{ name: string; size: string; description: string }[]>([]);
+  const [ollamaModels, setOllamaModels] = useState<{ name: string; size: string; type?: string; description: string }[]>([]);
   const [selectedOllamaModel, setSelectedOllamaModel] = useState<string>("");
   const [idleNodes, setIdleNodes] = useState<Node[]>([]);
   const [selectedNode, setSelectedNode] = useState<string>("");
@@ -90,7 +90,7 @@ export default function DeploymentsPage() {
       apiFetch<Node[]>("/api/nodes"),
       apiFetch<Deployment[]>("/api/deployments"),
       apiFetch<Node[]>("/api/nodes/idle"),
-      apiFetch<{ name: string; size: string; description: string }[]>("/api/recipes/ollama-models"),
+      apiFetch<{ name: string; size: string; type?: string; description: string }[]>("/api/recipes/ollama-models"),
     ])
       .then(([r, n, d, idle, om]) => {
         setRecipes(r);
@@ -166,9 +166,11 @@ export default function DeploymentsPage() {
 
       if (runtimeMode === "ollama") {
         if (!selectedOllamaModel || !selectedNode) return;
+        const selectedModel = ollamaModels.find((m) => m.name === selectedOllamaModel);
         body = {
           runtime: "ollama",
           modelName: selectedOllamaModel,
+          modelType: selectedModel?.type || "chat",
           nodeId: selectedNode,
           config: {},
         };
@@ -342,7 +344,7 @@ export default function DeploymentsPage() {
                   <option value="">Select a model...</option>
                   {ollamaModels.map((m) => (
                     <option key={m.name} value={m.name}>
-                      {m.name} ({m.size}) — {m.description}
+                      {m.name} ({m.size}) [{m.type}] — {m.description}
                     </option>
                   ))}
                 </select>

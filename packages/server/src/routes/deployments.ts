@@ -17,7 +17,7 @@ deploymentsRouter.get("/", async (_req, res) => {
 });
 
 deploymentsRouter.post("/", async (req, res) => {
-  let { nodeId, nodeIds, recipeFile, config, runtime, modelName } = req.body;
+  let { nodeId, nodeIds, recipeFile, config, runtime, modelName, modelType } = req.body;
   const isOllama = runtime === "ollama";
 
   if (!isOllama && !recipeFile) {
@@ -130,7 +130,7 @@ deploymentsRouter.post("/", async (req, res) => {
       nodeId: headNodeId,
       clusterMode: isCluster,
       config: JSON.stringify(isOllama
-        ? { runtime: "ollama", modelName, ...config }
+        ? { runtime: "ollama", modelName, modelType: modelType || "chat", ...config }
         : { recipeFile, ...config }),
     },
   });
@@ -167,6 +167,7 @@ deploymentsRouter.post("/", async (req, res) => {
       deploymentId: deployment.id,
       runtime: isOllama ? "ollama" : "vllm",
       modelName: isOllama ? modelName : undefined,
+      modelType: isOllama ? (modelType || "chat") : undefined,
       recipeFile: isOllama ? undefined : recipeFile,
       config: config || {},
       clusterNodes: clusterNodeIps,

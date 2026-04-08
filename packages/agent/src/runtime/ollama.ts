@@ -10,6 +10,7 @@ const OLLAMA_PORT = 11434;
 export interface OllamaModel {
   name: string;
   size: string;
+  type: "chat" | "embedding";
   description: string;
 }
 
@@ -106,7 +107,8 @@ export async function deployModel(
   deploymentId: string,
   modelName: string,
   onLog?: (line: string) => void,
-  onStatus?: (status: string, error?: string) => void
+  onStatus?: (status: string, error?: string) => void,
+  modelType?: "chat" | "embedding"
 ): Promise<number> {
   activeDeployments.set(deploymentId, modelName);
   const abortController = new AbortController();
@@ -138,14 +140,22 @@ export async function deployModel(
     if (abortController.signal.aborted) return OLLAMA_PORT;
     onLog?.(`Pull complete.\n`);
 
-    // Load model into GPU memory by sending an empty chat
+    // Load model into GPU memory
     onStatus?.("loading");
     onLog?.(`Loading ${modelName} into GPU memory...\n`);
-    await ollamaFetch("/api/chat", {
-      method: "POST",
-      body: { model: modelName, messages: [], stream: false },
-      timeout: 300_000, // 5 min for large model loading
-    });
+    if (modelType === "embedding") {
+      await ollamaFetch("/api/embed", {
+        method: "POST",
+        body: { model: modelName, input: "test" },
+        timeout: 300_000,
+      });
+    } else {
+      await ollamaFetch("/api/chat", {
+        method: "POST",
+        body: { model: modelName, messages: [], stream: false },
+        timeout: 300_000,
+      });
+    }
 
     // Verify loaded
     const ps = await ollamaFetch("/api/ps") as { models?: { name: string }[] };
