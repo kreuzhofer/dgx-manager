@@ -480,10 +480,32 @@ export default function DeploymentsPage() {
         </div>
       )}
 
-      {/* Deployments list */}
-      {deployments.length > 0 && (
-        <div className="space-y-3">
-          {deployments.map((d) => {
+      {/* Deployments list — grouped by node */}
+      {deployments.length > 0 && (() => {
+        // Group deployments by node
+        const byNode = new Map<string, typeof deployments>();
+        for (const d of deployments) {
+          const nodeKey = d.node?.name || d.nodeId;
+          if (!byNode.has(nodeKey)) byNode.set(nodeKey, []);
+          byNode.get(nodeKey)!.push(d);
+        }
+
+        return (
+        <div className="space-y-4">
+          {Array.from(byNode.entries()).map(([nodeName, nodeDeps]) => {
+            const nodeData = nodes.find((n) => n.name === nodeName);
+            return (
+              <div key={nodeName}>
+                <div className="flex items-center gap-3 mb-2">
+                  <h3 className="text-sm font-semibold text-gray-300">{nodeName}</h3>
+                  {nodeData && (
+                    <span className="text-[10px] text-gray-500">
+                      {nodeData.ipAddress}
+                    </span>
+                  )}
+                </div>
+                <div className="space-y-2">
+          {nodeDeps.map((d) => {
             const config = d.config ? JSON.parse(d.config) : {};
             const recipeName = config.recipeFile
               ?.replace(/^recipes\//, "")
@@ -622,8 +644,13 @@ export default function DeploymentsPage() {
               </div>
             );
           })}
+                </div>
+              </div>
+            );
+          })}
         </div>
-      )}
+        );
+      })()}
 
       {deployments.length === 0 && recipes.length > 0 && (
         <div className="text-center py-12 text-gray-500">
