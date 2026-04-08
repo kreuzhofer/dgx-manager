@@ -486,12 +486,24 @@ export default function DeploymentsPage() {
 
       {/* Deployments list — grouped by node */}
       {deployments.length > 0 && (() => {
-        // Group deployments by node
-        const byNode = new Map<string, typeof deployments>();
+        // Group deployments by node — cluster deployments appear under each node
+        const byNode = new Map<string, { deployment: typeof deployments[0]; role: "head" | "worker" | "solo" }[]>();
         for (const d of deployments) {
+          // Add under head/solo node
           const nodeKey = d.node?.name || d.nodeId;
           if (!byNode.has(nodeKey)) byNode.set(nodeKey, []);
-          byNode.get(nodeKey)!.push(d);
+          byNode.get(nodeKey)!.push({ deployment: d, role: d.clusterMode ? "head" : "solo" });
+
+          // Also add under each worker node
+          if (d.clusterMode && d.clusterNodes) {
+            for (const cn of d.clusterNodes) {
+              if (cn.role === "worker") {
+                const workerKey = cn.node.name;
+                if (!byNode.has(workerKey)) byNode.set(workerKey, []);
+                byNode.get(workerKey)!.push({ deployment: d, role: "worker" });
+              }
+            }
+          }
         }
 
         return (
@@ -520,17 +532,19 @@ export default function DeploymentsPage() {
                   )}
                 </div>
                 <div className="space-y-2">
-          {nodeDeps.map((d) => {
+          {nodeDeps.map(({ deployment: d, role: nodeRole }) => {
             const config = d.config ? JSON.parse(d.config) : {};
             const recipeName = config.recipeFile
               ?.replace(/^recipes\//, "")
               .replace(/\.yaml$/, "");
             const isActive = ["running", "starting", "pending", "restarting", "building", "downloading", "launching", "loading"].includes(d.status);
             const isStopping = ["stopping", "removing"].includes(d.status);
+            const isWorker = nodeRole === "worker";
+            const isHead = nodeRole === "head";
 
             return (
               <div
-                key={d.id}
+                key={`${d.id}-${nodeRole}-${nodeName}`}
                 className="bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors"
               >
                 <div className="flex items-center justify-between">
@@ -583,58 +597,66 @@ export default function DeploymentsPage() {
                     >
                       {d.status}
                     </span>
-                    <button
-                      onClick={() =>
-                        setViewingLogs(viewingLogs === d.id ? null : d.id)
-                      }
-                      className="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors"
-                    >
-                      {viewingLogs === d.id ? "Hide Logs" : "Logs"}
-                    </button>
-                    {d.status === "running" && d.port && (
-                      <a
-                        href={`http://${d.node?.ipAddress || "localhost"}:${d.port}/v1/models`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-green-400 transition-colors"
-                      >
-                        API
-                      </a>
+                    {isWorker && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-500">worker</span>
                     )}
-                    {isStopping && (
-                      <span className="text-xs px-2 py-1 rounded bg-yellow-900/30 text-yellow-400 animate-pulse">
-                        Stopping...
-                      </span>
+                    {isHead && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-900/40 text-indigo-300">head</span>
                     )}
-                    {isActive && !isStopping && (
-                      <button
-                        onClick={() => stopDeployment(d.id)}
-                        className="text-xs px-2 py-1 rounded bg-red-900/50 hover:bg-red-800 text-red-300 transition-colors"
-                      >
-                        Stop
-                      </button>
-                    )}
-                    {(d.status === "stopped" || d.status === "failed" || d.status === "evicted") && (
+                    {!isWorker && (
                       <>
                         <button
-                          onClick={() => restartDeployment(d.id)}
-                          className="text-xs px-2 py-1 rounded bg-blue-900/50 hover:bg-blue-800 text-blue-300 transition-colors"
+                          onClick={() => setViewingLogs(viewingLogs === d.id ? null : d.id)}
+                          className="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors"
                         >
-                          Restart
+                          {viewingLogs === d.id ? "Hide Logs" : "Logs"}
                         </button>
-                        <button
-                          onClick={() => deleteDeployment(d.id)}
-                          className="text-xs px-2 py-1 rounded bg-red-900/50 hover:bg-red-800 text-red-300 transition-colors"
-                        >
-                          Delete
-                        </button>
+                        {d.status === "running" && d.port && (
+                          <a
+                            href={`http://${d.node?.ipAddress || "localhost"}:${d.port}/v1/models`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-green-400 transition-colors"
+                          >
+                            API
+                          </a>
+                        )}
+                        {isStopping && (
+                          <span className="text-xs px-2 py-1 rounded bg-yellow-900/30 text-yellow-400 animate-pulse">
+                            Stopping...
+                          </span>
+                        )}
+                        {isActive && !isStopping && (
+                          <button
+                            onClick={() => stopDeployment(d.id)}
+                            className="text-xs px-2 py-1 rounded bg-red-900/50 hover:bg-red-800 text-red-300 transition-colors"
+                          >
+                            Stop
+                          </button>
+                        )}
+                        {(d.status === "stopped" || d.status === "failed" || d.status === "evicted") && (
+                          <>
+                            <button
+                              onClick={() => restartDeployment(d.id)}
+                              className="text-xs px-2 py-1 rounded bg-blue-900/50 hover:bg-blue-800 text-blue-300 transition-colors"
+                            >
+                              Restart
+                            </button>
+                            <button
+                              onClick={() => deleteDeployment(d.id)}
+                              className="text-xs px-2 py-1 rounded bg-red-900/50 hover:bg-red-800 text-red-300 transition-colors"
+                            >
+                              Delete
+                            </button>
+                          </>
+                        )}
                       </>
                     )}
                   </div>
                 </div>
 
-                {/* Cluster nodes detail */}
-                {d.clusterMode && d.clusterNodes && d.clusterNodes.length > 0 && (
+                {/* Cluster nodes detail — only on head node */}
+                {!isWorker && d.clusterMode && d.clusterNodes && d.clusterNodes.length > 0 && (
                   <div className="mt-3 flex gap-2 flex-wrap">
                     {d.clusterNodes.map((cn) => {
                       const cnNode = nodes.find((n) => n.name === cn.node.name);
