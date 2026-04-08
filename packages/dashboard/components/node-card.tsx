@@ -39,6 +39,7 @@ interface Node {
 }
 
 const MAX_SAMPLES = 720;
+const DISPLAY_WINDOW = 360; // 30 minutes at 5s intervals
 
 const statusColors: Record<string, string> = {
   online: "bg-green-500",
@@ -88,31 +89,34 @@ export function NodeCard({
     onMetrics?.(appendSample);
   }, [onMetrics, appendSample]);
 
-  const latest = history.length > 0 ? history[history.length - 1] : null;
+  // Display window: last 30 minutes only
+  const displayHistory = history.slice(-DISPLAY_WINDOW);
+
+  const latest = displayHistory.length > 0 ? displayHistory[displayHistory.length - 1] : null;
   const statusColor = statusColors[node.status] || "bg-gray-500";
   const vramMax = node.vramTotal || 128000;
 
-  const gpuData = history.map((s) => s.gpuUtil);
-  const vramData = history.map((s) => s.vramUsed);
-  const tempData = history.filter((s) => s.temperature !== null).length > 0
-    ? history.map((s) => s.temperature ?? 0)
+  const gpuData = displayHistory.map((s) => s.gpuUtil);
+  const vramData = displayHistory.map((s) => s.vramUsed);
+  const tempData = displayHistory.filter((s) => s.temperature !== null).length > 0
+    ? displayHistory.map((s) => s.temperature ?? 0)
     : [];
-  const reqData = history.filter((s) => s.activeRequests !== null).length > 0
-    ? history.map((s) => s.activeRequests ?? 0)
+  const reqData = displayHistory.filter((s) => s.activeRequests !== null).length > 0
+    ? displayHistory.map((s) => s.activeRequests ?? 0)
     : [];
-  const tpsData = history.filter((s) => s.tps !== null).length > 0
-    ? history.map((s) => s.tps ?? 0)
+  const tpsData = displayHistory.filter((s) => s.tps !== null).length > 0
+    ? displayHistory.map((s) => s.tps ?? 0)
     : [];
 
   // Collect unique network interface names from history
   const ifaceNames = new Set<string>();
-  for (const s of history) {
+  for (const s of displayHistory) {
     for (const ni of s.netInterfaces || []) ifaceNames.add(ni.name);
   }
   // Build per-interface throughput arrays (combined rx+tx in Mbps)
   const netData = Array.from(ifaceNames).map((name) => ({
     name,
-    data: history.map((s) => {
+    data: displayHistory.map((s) => {
       const ni = s.netInterfaces?.find((n) => n.name === name);
       return ni ? (ni.rxBytesPerSec + ni.txBytesPerSec) * 8 / 1_000_000 : 0; // Mbps
     }),
@@ -120,12 +124,12 @@ export function NodeCard({
 
   // RDMA/InfiniBand interfaces
   const rdmaNames = new Set<string>();
-  for (const s of history) {
+  for (const s of displayHistory) {
     for (const ri of s.rdmaInterfaces || []) rdmaNames.add(ri.name);
   }
   const rdmaData = Array.from(rdmaNames).map((name) => ({
     name,
-    data: history.map((s) => {
+    data: displayHistory.map((s) => {
       const ri = s.rdmaInterfaces?.find((n) => n.name === name);
       return ri ? (ri.rxBytesPerSec + ri.txBytesPerSec) * 8 / 1_000_000 : 0; // Mbps
     }),

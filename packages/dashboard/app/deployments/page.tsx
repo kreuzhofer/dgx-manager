@@ -508,7 +508,7 @@ export default function DeploymentsPage() {
 
         return (
         <div className="space-y-4">
-          {Array.from(byNode.entries()).map(([nodeName, nodeDeps]) => {
+          {Array.from(byNode.entries()).sort(([a], [b]) => a.localeCompare(b)).map(([nodeName, nodeDeps]) => {
             const nodeData = nodes.find((n) => n.name === nodeName);
             return (
               <div key={nodeName}>
