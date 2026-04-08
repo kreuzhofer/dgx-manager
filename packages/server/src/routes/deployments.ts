@@ -98,19 +98,71 @@ deploymentsRouter.post("/", async (req, res) => {
     }
   }
 
-  // Check solo node isn't busy
+  let vramEstimate = 0;
+
+  // VRAM-based admission check for solo deployments
   if (!isCluster) {
-    const busy = await prisma.deployment.findFirst({
-      where: {
-        status: { in: activeStatuses },
-        OR: [
-          { nodeId: headNodeId },
-          { clusterNodes: { some: { nodeId: headNodeId } } },
-        ],
-      },
+    // Get node's latest metrics
+    const node = await prisma.node.findUnique({ where: { id: headNodeId } });
+    const latestMetric = await prisma.metricSnapshot.findFirst({
+      where: { nodeId: headNodeId },
+      orderBy: { timestamp: "desc" },
     });
-    if (busy) {
-      return res.status(409).json({ error: "Node already has an active deployment" });
+    const vramTotal = node?.vramTotal || 128000;
+    const vramUsed = latestMetric?.vramUsed || 0;
+    const vramAvailable = vramTotal - vramUsed;
+
+    // Estimate VRAM needed for this deployment
+    if (isOllama) {
+      // Parse size from ollama model list (e.g. "20GB" → 20000 MB)
+      const agentHub: AgentHub = req.app.get("agentHub");
+      const ollamaModel = agentHub.getOllamaModels().find((m) => m.name === modelName);
+      if (ollamaModel?.size) {
+        const sizeMatch = ollamaModel.size.match(/([\d.]+)\s*GB/i);
+        vramEstimate = sizeMatch ? Math.round(parseFloat(sizeMatch[1]) * 1024 * 1.1) : 0; // +10% overhead
+      }
+    } else {
+      // vLLM: estimate from gpu_memory_utilization
+      const agentHub: AgentHub = req.app.get("agentHub");
+      const recipe = agentHub.getRecipes().find((r) => r.file === recipeFile);
+      const gpuMemUtil = (config?.gpuMem as number) || (recipe?.defaults?.gpu_memory_utilization as number) || 0.85;
+      vramEstimate = Math.round(vramTotal * gpuMemUtil);
+    }
+
+    // Check port conflict for vLLM
+    if (!isOllama) {
+      const requestedPort = (config?.port as number) || 8000;
+      const portConflict = await prisma.deployment.findFirst({
+        where: {
+          nodeId: headNodeId,
+          port: requestedPort,
+          status: { in: activeStatuses },
+        },
+      });
+      if (portConflict) {
+        // Auto-increment port
+        const usedPorts = await prisma.deployment.findMany({
+          where: { nodeId: headNodeId, status: { in: activeStatuses }, port: { not: null } },
+          select: { port: true },
+        });
+        const usedPortSet = new Set(usedPorts.map((d) => d.port));
+        let nextPort = requestedPort;
+        while (usedPortSet.has(nextPort)) nextPort++;
+        if (!config) config = {};
+        config.port = nextPort;
+      }
+    }
+
+    // Check if there's enough VRAM (5% safety margin)
+    const safetyMargin = vramTotal * 0.05;
+    if (vramEstimate > 0 && vramEstimate > vramAvailable - safetyMargin) {
+      return res.status(409).json({
+        error: `Not enough VRAM: need ~${Math.round(vramEstimate / 1024)}GB, only ${Math.round(vramAvailable / 1024)}GB available`,
+        vramEstimate,
+        vramAvailable,
+        vramTotal,
+        vramUsed,
+      });
     }
   }
 
@@ -129,6 +181,7 @@ deploymentsRouter.post("/", async (req, res) => {
       modelId: model.id,
       nodeId: headNodeId,
       clusterMode: isCluster,
+      vramEstimate: vramEstimate || null,
       config: JSON.stringify(isOllama
         ? { runtime: "ollama", modelName, modelType: modelType || "chat", ...config }
         : { recipeFile, ...config }),

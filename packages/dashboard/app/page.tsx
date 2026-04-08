@@ -164,20 +164,25 @@ export default function OverviewPage() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {nodes.map((node) => {
-            const dep = deploymentList.find((d) =>
-              ["running", "starting", "loading", "downloading", "building", "launching"].includes(d.status) &&
-              (d.nodeId === node.id || d.clusterNodes?.some((cn) => cn.nodeId === node.id))
-            );
-            const depConfig = dep?.config ? JSON.parse(dep.config) : {};
+            const activeStatuses = ["running", "starting", "loading", "downloading", "building", "launching", "evicted"];
+            const nodeDeps = deploymentList
+              .filter((d) =>
+                activeStatuses.includes(d.status) &&
+                (d.nodeId === node.id || d.clusterNodes?.some((cn) => cn.nodeId === node.id))
+              )
+              .map((d) => {
+                const c = d.config ? JSON.parse(d.config) : {};
+                return {
+                  modelName: d.model?.name || "unknown",
+                  runtime: c.runtime || d.model?.runtime || "vllm",
+                  status: d.status,
+                };
+              });
             return (
             <NodeCard
               key={node.id}
               node={node}
-              deployment={dep ? {
-                modelName: dep.model?.name || "unknown",
-                runtime: depConfig.runtime || dep.model?.runtime || "vllm",
-                status: dep.status,
-              } : undefined}
+              deployments={nodeDeps}
               onMetrics={(handler) => {
                 metricsHandlers.current[node.id] = handler;
               }}

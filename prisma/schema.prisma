@@ -45,6 +45,8 @@ model Deployment {
   port         Int?
   config       String?
   clusterMode  Boolean                @default(false)
+  vramEstimate Int?
+  vramActual   Int?
   createdAt    DateTime               @default(now())
   updatedAt    DateTime               @updatedAt
   node         Node                   @relation(fields: [nodeId], references: [id])

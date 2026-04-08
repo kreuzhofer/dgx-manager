@@ -146,13 +146,13 @@ export async function deployModel(
     if (modelType === "embedding") {
       await ollamaFetch("/api/embed", {
         method: "POST",
-        body: { model: modelName, input: "test" },
+        body: { model: modelName, input: "test", keep_alive: -1 },
         timeout: 300_000,
       });
     } else {
       await ollamaFetch("/api/chat", {
         method: "POST",
-        body: { model: modelName, messages: [], stream: false },
+        body: { model: modelName, messages: [], stream: false, keep_alive: -1 },
         timeout: 300_000,
       });
     }

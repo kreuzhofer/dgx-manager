@@ -48,11 +48,11 @@ const statusColors: Record<string, string> = {
 
 export function NodeCard({
   node,
-  deployment,
+  deployments = [],
   onMetrics,
 }: {
   node: Node;
-  deployment?: NodeDeployment;
+  deployments?: NodeDeployment[];
   onMetrics?: (handler: (sample: MetricSample) => void) => void;
 }) {
   const [history, setHistory] = useState<MetricSample[]>([]);
@@ -143,19 +143,21 @@ export function NodeCard({
               <span className="ml-2 text-gray-400">{node.gpuModel}</span>
             )}
           </p>
-          <div className="mt-1">
-            {deployment ? (
-              <span className="inline-flex items-center gap-1.5">
+          <div className="mt-1 flex flex-wrap gap-1">
+            {deployments.length > 0 ? deployments.map((dep, i) => (
+              <span key={i} className="inline-flex items-center gap-1">
                 <span className={`text-[9px] px-1.5 py-0.5 rounded font-medium ${
-                  deployment.runtime === "ollama"
+                  dep.status === "evicted"
+                    ? "bg-yellow-900/60 text-yellow-300"
+                    : dep.runtime === "ollama"
                     ? "bg-cyan-900/60 text-cyan-300"
                     : "bg-green-900/60 text-green-300"
                 }`}>
-                  {deployment.runtime === "ollama" ? "Ollama" : "vLLM"}
+                  {dep.runtime === "ollama" ? "Ollama" : "vLLM"}
                 </span>
-                <span className="text-[10px] text-gray-400">{deployment.modelName}</span>
+                <span className="text-[10px] text-gray-400">{dep.modelName}</span>
               </span>
-            ) : (
+            )) : (
               <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-500">idle</span>
             )}
           </div>

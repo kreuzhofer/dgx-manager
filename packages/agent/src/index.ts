@@ -143,6 +143,19 @@ function connect() {
             });
           }
         }
+
+        // Check Ollama deployments for eviction
+        const { getActiveDeployments: getOllamaDeployments } = await import("./runtime/ollama.js");
+        for (const [depId, modelName] of getOllamaDeployments()) {
+          const health = await checkOllamaHealth(depId);
+          if (health && !health.loaded) {
+            sendMsg("agent:deployment:status", {
+              deploymentId: depId,
+              status: "evicted",
+              error: `Model ${modelName} was unloaded from GPU memory by Ollama`,
+            });
+          }
+        }
       } catch { /* ignore */ }
     }, HEALTH_CHECK_INTERVAL);
   });

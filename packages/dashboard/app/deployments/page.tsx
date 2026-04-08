@@ -54,6 +54,7 @@ const statusStyles: Record<string, string> = {
   running: "bg-green-900 text-green-300",
   stopping: "bg-yellow-900 text-yellow-300",
   stopped: "bg-gray-800 text-gray-400",
+  evicted: "bg-yellow-900 text-yellow-300",
   failed: "bg-red-900 text-red-300",
   removing: "bg-yellow-900 text-yellow-300",
   restarting: "bg-blue-900 text-blue-300",
