@@ -34,18 +34,15 @@ nodesRouter.get("/", async (_req, res) => {
   res.json(nodes);
 });
 
-// GET /api/nodes/idle — online nodes with no active deployments
+// GET /api/nodes/idle — online nodes available for deployments
+// Now returns all online nodes since multi-deployment is supported.
+// VRAM admission check happens at deploy time, not here.
 nodesRouter.get("/idle", async (_req, res) => {
-  const activeStatuses = ["pending", "running", "starting", "building", "downloading", "launching", "loading", "restarting"];
   const nodes = await prisma.node.findMany({
     where: {
       status: "online",
-      AND: [
-        { deployments: { none: { status: { in: activeStatuses } } } },
-        { clusterMemberships: { none: { deployment: { status: { in: activeStatuses } } } } },
-      ],
     },
-    orderBy: { createdAt: "asc" },
+    orderBy: { name: "asc" },
   });
   res.json(nodes);
 });
