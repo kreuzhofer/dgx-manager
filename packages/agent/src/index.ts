@@ -24,6 +24,8 @@ let reconnectDelay = RECONNECT_BASE;
 let metricsTimer: ReturnType<typeof setInterval> | null = null;
 let healthTimer: ReturnType<typeof setInterval> | null = null;
 const ollamaLastState = new Map<string, string>(); // deploymentId → last reported state
+const ollamaLastVram = new Map<string, number>(); // deploymentId → last reported vramActual
+const vllmLastVram = new Map<string, number>(); // deploymentId → last reported vramActual
 
 function connect() {
   console.log(`Connecting to ${MANAGER_URL}...`);
@@ -137,6 +139,28 @@ function connect() {
               status: "failed",
               error: status.error || "Container stopped unexpectedly",
             });
+          } else if (status.containerRunning) {
+            // Report vramActual for running vLLM containers
+            const m = await collectMetrics();
+            if (m.vramUsed > 0) {
+              const prevVram = vllmLastVram.get(status.deploymentId);
+              const changed = !prevVram || Math.abs(m.vramUsed - prevVram) > prevVram * 0.01;
+              if (changed) {
+                vllmLastVram.set(status.deploymentId, m.vramUsed);
+                sendMsg("agent:deployment:status", {
+                  deploymentId: status.deploymentId,
+                  status: "running",
+                  port: status.port,
+                  vramActual: m.vramUsed,
+                });
+              }
+            }
+            if (status.error) {
+              sendMsg("agent:deployment:log", {
+                deploymentId: status.deploymentId,
+                log: `[HEALTH] ${status.error}\n`,
+              });
+            }
           } else if (status.error) {
             sendMsg("agent:deployment:log", {
               deploymentId: status.deploymentId,
@@ -153,20 +177,27 @@ function connect() {
           const prev = ollamaLastState.get(depId);
           if (!health.loaded && prev !== "evicted") {
             ollamaLastState.set(depId, "evicted");
+            ollamaLastVram.delete(depId);
             sendMsg("agent:deployment:status", {
               deploymentId: depId,
               status: "evicted",
+              vramActual: 0,
               error: `Model ${modelName} was unloaded from GPU memory`,
             });
-          } else if (health.loaded && prev === "evicted") {
-            ollamaLastState.set(depId, "running");
-            sendMsg("agent:deployment:status", {
-              deploymentId: depId,
-              status: "running",
-              port: 11434,
-            });
-          } else if (health.loaded && !prev) {
-            ollamaLastState.set(depId, "running");
+          } else if (health.loaded) {
+            const prevVram = ollamaLastVram.get(depId);
+            const statusChanged = prev === "evicted" || !prev;
+            const vramChanged = health.vramUsed !== null && health.vramUsed !== prevVram;
+            if (statusChanged || vramChanged) {
+              ollamaLastState.set(depId, "running");
+              if (health.vramUsed !== null) ollamaLastVram.set(depId, health.vramUsed);
+              sendMsg("agent:deployment:status", {
+                deploymentId: depId,
+                status: "running",
+                port: 11434,
+                vramActual: health.vramUsed,
+              });
+            }
           }
         }
       } catch { /* ignore */ }
