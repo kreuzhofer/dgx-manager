@@ -32,18 +32,12 @@ deploymentsRouter.post("/", async (req, res) => {
   // Auto-resolve idle nodes
   if (nodeId === "auto" || nodeIds === "auto") {
     const idleNodes = await prisma.node.findMany({
-      where: {
-        status: "online",
-        AND: [
-          { deployments: { none: { status: { in: activeStatuses } } } },
-          { clusterMemberships: { none: { deployment: { status: { in: activeStatuses } } } } },
-        ],
-      },
-      orderBy: { createdAt: "asc" },
+      where: { status: "online" },
+      orderBy: { name: "asc" },
     });
 
     if (idleNodes.length === 0) {
-      return res.status(409).json({ error: "No idle nodes available" });
+      return res.status(409).json({ error: "No online nodes available" });
     }
 
     if (nodeIds === "auto") {
@@ -61,7 +55,7 @@ deploymentsRouter.post("/", async (req, res) => {
 
       if (needed > idleNodes.length) {
         return res.status(409).json({
-          error: `Recipe requires ${needed} nodes (TP=${tp} × PP=${pp}) but only ${idleNodes.length} idle`,
+          error: `Recipe requires ${needed} nodes (TP=${tp} × PP=${pp}) but only ${idleNodes.length} online`,
         });
       }
 
