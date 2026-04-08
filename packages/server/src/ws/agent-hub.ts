@@ -168,12 +168,13 @@ export class AgentHub {
           case "agent:deployment:status": {
             const { deploymentId, status, port, error, deleteAfter, vramActual } = msg.payload;
             try {
+              const isStopped = ["stopped", "failed", "evicted"].includes(status as string);
               await prisma.deployment.update({
                 where: { id: deploymentId },
                 data: {
                   status,
                   port: port ?? undefined,
-                  vramActual: vramActual ? Number(vramActual) : undefined,
+                  vramActual: isStopped ? 0 : (vramActual ? Number(vramActual) : undefined),
                 },
               });
             } catch {
