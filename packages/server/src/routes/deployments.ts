@@ -73,24 +73,6 @@ deploymentsRouter.post("/", async (req, res) => {
     return res.status(400).json({ error: "nodeId or nodeIds required" });
   }
 
-  // For cluster deployments, verify no selected node is busy
-  if (isCluster) {
-    const busy = await prisma.deployment.findMany({
-      where: {
-        status: { in: activeStatuses },
-        OR: [
-          { nodeId: { in: nodeIds } },
-          { clusterNodes: { some: { nodeId: { in: nodeIds } } } },
-        ],
-      },
-    });
-    if (busy.length > 0) {
-      return res.status(409).json({
-        error: "One or more selected nodes already have active deployments",
-        busyNodes: busy.map((d) => d.nodeId),
-      });
-    }
-  }
 
   let vramEstimate = 0;
 
