@@ -247,6 +247,7 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
       deploymentId: deployment.id,
       runtime: isOllamaRestart ? "ollama" : "vllm",
       modelName: isOllamaRestart ? config.modelName : undefined,
+      modelType: isOllamaRestart ? (config.modelType || "chat") : undefined,
       recipeFile: isOllamaRestart ? undefined : config.recipeFile,
       config,
       clusterNodes: clusterNodeIps,
