@@ -570,7 +570,7 @@ export default function DeploymentsPage() {
                         Stop
                       </button>
                     )}
-                    {(d.status === "stopped" || d.status === "failed") && (
+                    {(d.status === "stopped" || d.status === "failed" || d.status === "evicted") && (
                       <>
                         <button
                           onClick={() => restartDeployment(d.id)}
