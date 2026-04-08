@@ -87,7 +87,7 @@ export default function DeploymentsPage() {
   // Log viewer
   const [viewingLogs, setViewingLogs] = useState<string | null>(null);
   const [logs, setLogs] = useState<Record<string, string>>({});
-  const logRef = useRef<HTMLPreElement>(null);
+  // Log viewer state
 
   const loadData = useCallback(() => {
     Promise.all([
@@ -166,11 +166,11 @@ export default function DeploymentsPage() {
 
   const { connected } = useSSE(handleSSE, loadData);
 
-  // Auto-scroll logs
+  // Auto-scroll all visible log viewers
   useEffect(() => {
-    if (logRef.current) {
-      logRef.current.scrollTop = logRef.current.scrollHeight;
-    }
+    document.querySelectorAll("[data-log-viewer]").forEach((el) => {
+      el.scrollTop = el.scrollHeight;
+    });
   }, [logs, viewingLogs]);
 
   const deploy = async (e: React.FormEvent) => {
@@ -699,7 +699,7 @@ export default function DeploymentsPage() {
                 {/* Log viewer */}
                 {viewingLogs === d.id && (
                   <pre
-                    ref={logRef}
+                    data-log-viewer
                     className="mt-3 bg-black/50 border border-gray-800 rounded p-3 text-xs text-gray-400 font-mono max-h-64 overflow-y-auto whitespace-pre-wrap"
                   >
                     {logs[d.id] || "Waiting for logs..."}
