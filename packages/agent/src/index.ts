@@ -23,6 +23,7 @@ let ws: WebSocket | null = null;
 let reconnectDelay = RECONNECT_BASE;
 let metricsTimer: ReturnType<typeof setInterval> | null = null;
 let healthTimer: ReturnType<typeof setInterval> | null = null;
+const ollamaLastState = new Map<string, string>(); // deploymentId → last reported state
 
 function connect() {
   console.log(`Connecting to ${MANAGER_URL}...`);
@@ -144,16 +145,28 @@ function connect() {
           }
         }
 
-        // Check Ollama deployments for eviction
+        // Check Ollama deployments for eviction/resurrection
         const { getActiveDeployments: getOllamaDeployments } = await import("./runtime/ollama.js");
         for (const [depId, modelName] of getOllamaDeployments()) {
           const health = await checkOllamaHealth(depId);
-          if (health && !health.loaded) {
+          if (!health) continue;
+          const prev = ollamaLastState.get(depId);
+          if (!health.loaded && prev !== "evicted") {
+            ollamaLastState.set(depId, "evicted");
             sendMsg("agent:deployment:status", {
               deploymentId: depId,
               status: "evicted",
-              error: `Model ${modelName} was unloaded from GPU memory by Ollama`,
+              error: `Model ${modelName} was unloaded from GPU memory`,
             });
+          } else if (health.loaded && prev === "evicted") {
+            ollamaLastState.set(depId, "running");
+            sendMsg("agent:deployment:status", {
+              deploymentId: depId,
+              status: "running",
+              port: 11434,
+            });
+          } else if (health.loaded && !prev) {
+            ollamaLastState.set(depId, "running");
           }
         }
       } catch { /* ignore */ }
