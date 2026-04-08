@@ -6,6 +6,8 @@ import { collectMetrics } from "./metrics.js";
 import { discoverRecipes } from "./recipes.js";
 import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, isStopping, getTrackedDeployments, reattachLogs } from "./runtime/vllm.js";
 import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth, getOllamaModels } from "./runtime/ollama.js";
+import { discoverTrainingRecipes } from "./training-recipes.js";
+import { startFinetuneJob, stopFinetuneJob } from "./runtime/finetune.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_VERSION: string = JSON.parse(
@@ -80,6 +82,15 @@ function connect() {
       ws!.send(JSON.stringify({
         type: "agent:recipes",
         payload: { recipes },
+      }));
+    }
+
+    // Discover and report available training recipes
+    const trainingRecipes = discoverTrainingRecipes();
+    if (trainingRecipes.length > 0) {
+      ws!.send(JSON.stringify({
+        type: "agent:training-recipes",
+        payload: { recipes: trainingRecipes },
       }));
     }
 
@@ -434,6 +445,61 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
           });
         }
       })();
+      break;
+    }
+
+    case "cmd:finetune:start": {
+      const { jobId, recipeFile, dataset, outputDir, config } = msg.payload as {
+        jobId: string;
+        recipeFile: string;
+        dataset: string;
+        outputDir: string;
+        config?: Record<string, unknown>;
+      };
+
+      console.log(`[finetune] Starting job ${jobId} with recipe ${recipeFile}`);
+
+      startFinetuneJob(jobId, recipeFile, dataset, outputDir, config || {}, {
+        onLog: (line) => {
+          sendMsg("agent:finetune:progress", {
+            jobId,
+            log: line,
+          });
+        },
+        onProgress: (phase, phaseProgress, extra) => {
+          sendMsg("agent:finetune:progress", {
+            jobId,
+            phase,
+            phaseProgress,
+            step: extra?.step,
+            totalSteps: extra?.totalSteps,
+            loss: extra?.loss,
+          });
+        },
+        onComplete: (status, outputPath, error) => {
+          console.log(`[finetune] Job ${jobId} ${status}${error ? `: ${error}` : ""}`);
+          sendMsg("agent:finetune:complete", {
+            jobId,
+            status,
+            outputPath: outputPath ?? null,
+            error: error ?? undefined,
+          });
+        },
+      });
+      break;
+    }
+
+    case "cmd:finetune:stop":
+    case "cmd:finetune:cancel": {
+      const { jobId } = msg.payload as { jobId: string };
+      console.log(`[finetune] Stopping job ${jobId}`);
+      const stopped = stopFinetuneJob(jobId);
+      if (stopped) {
+        sendMsg("agent:finetune:complete", {
+          jobId,
+          status: "stopped",
+        });
+      }
       break;
     }
 

@@ -1,7 +1,7 @@
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
-import { PrismaClient } from "./generated/prisma/client.ts";
+import { PrismaClient } from "./generated/prisma/client.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const defaultDbPath = resolve(__dirname, "../../../prisma/dev.db");

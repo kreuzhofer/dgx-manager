@@ -20,6 +20,20 @@ export interface VllmRecipe {
   defaults: Record<string, unknown>;
 }
 
+export interface TrainingRecipe {
+  file: string;
+  name: string;
+  description?: string;
+  base_model: string;
+  framework: string;
+  method: string;
+  dataset_format?: string;
+  container: { image: string; name: string; build_context?: string };
+  scripts: { entrypoint: string; train: string; launch: string; ds_config?: string };
+  defaults: Record<string, unknown>;
+  hardware: { min_nodes: number; gpus_per_node: number; vram_estimate_mb: number };
+}
+
 interface AgentConnection {
   ws: WebSocket;
   nodeId: string;
@@ -29,9 +43,11 @@ export class AgentHub {
   private wss: WebSocketServer;
   private agents = new Map<string, AgentConnection>();
   private recipes: VllmRecipe[] = [];
+  private trainingRecipes: TrainingRecipe[] = [];
   private ollamaModels: OllamaModelInfo[] = [];
   private onMetrics?: (nodeId: string, metrics: Record<string, unknown>) => void;
   private onRecipes?: (recipes: VllmRecipe[]) => void;
+  private onTrainingRecipes?: (recipes: TrainingRecipe[]) => void;
 
   constructor() {
     this.wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
@@ -52,8 +68,16 @@ export class AgentHub {
     this.onRecipes = handler;
   }
 
+  setTrainingRecipesHandler(handler: (recipes: TrainingRecipe[]) => void) {
+    this.onTrainingRecipes = handler;
+  }
+
   getRecipes(): VllmRecipe[] {
     return this.recipes;
+  }
+
+  getTrainingRecipes(): TrainingRecipe[] {
+    return this.trainingRecipes;
   }
 
   getOllamaModels(): OllamaModelInfo[] {
@@ -92,6 +116,14 @@ export class AgentHub {
             this.recipes = incoming;
             console.log(`Received ${incoming.length} vLLM recipes from agent ${nodeId}`);
             this.onRecipes?.(incoming);
+            break;
+          }
+
+          case "agent:training-recipes": {
+            const incoming = msg.payload.recipes as TrainingRecipe[];
+            this.trainingRecipes = incoming;
+            console.log(`Received ${incoming.length} training recipe(s) from agent ${nodeId}`);
+            this.onTrainingRecipes?.(incoming);
             break;
           }
 
@@ -213,11 +245,15 @@ export class AgentHub {
           }
 
           case "agent:finetune:progress": {
-            const { jobId, progress, logs } = msg.payload;
-            await prisma.fineTuneJob.update({
-              where: { id: jobId },
-              data: { progress, logs },
-            });
+            const { jobId, phase, phaseProgress, step, totalSteps, loss, log } = msg.payload;
+            // Persist training progress to DB
+            if (phase === "training" && typeof phaseProgress === "number" && phaseProgress > 0) {
+              await prisma.fineTuneJob.update({
+                where: { id: jobId },
+                data: { progress: phaseProgress },
+              });
+            }
+            sseBroadcast({ type: "finetune:log", payload: { jobId, phase, phaseProgress, step, totalSteps, loss, log } });
             break;
           }
 
@@ -232,6 +268,7 @@ export class AgentHub {
                 completedAt: new Date(),
               },
             });
+            sseBroadcast({ type: "finetune:status", payload: { jobId: job.jobId, status: job.status, outputPath: job.outputPath, error: job.error } });
             break;
           }
         }

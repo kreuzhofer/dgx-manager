@@ -10,6 +10,7 @@ import { deploymentsRouter } from "./routes/deployments.js";
 import { finetuneRouter } from "./routes/finetune.js";
 import { loadbalancerRouter } from "./routes/loadbalancer.js";
 import { recipesRouter } from "./routes/recipes.js";
+import { trainingRecipesRouter } from "./routes/training-recipes.js";
 import { sseHandler } from "./sse.js";
 
 const app = express();
@@ -44,10 +45,14 @@ app.use("/api/deployments", deploymentsRouter);
 app.use("/api/finetune", finetuneRouter);
 app.use("/api/lb", loadbalancerRouter);
 app.use("/api/recipes", recipesRouter);
+app.use("/api/training-recipes", trainingRecipesRouter);
 
 // Broadcast recipe updates to dashboard
 agentHub.setRecipesHandler((recipes) => {
   dashboardHub.broadcast("update:recipes", recipes);
+});
+agentHub.setTrainingRecipesHandler((recipes) => {
+  dashboardHub.broadcast("update:training-recipes", recipes);
 });
 
 // SSE endpoint for real-time dashboard updates

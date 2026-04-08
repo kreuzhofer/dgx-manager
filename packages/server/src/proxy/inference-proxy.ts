@@ -7,8 +7,9 @@ export const inferenceProxy = Router();
 const rrCounters = new Map<string, number>();
 
 inferenceProxy.all("/:ruleName/v1/*", async (req: Request, res: Response) => {
+  const ruleName = req.params.ruleName as string;
   const rule = await prisma.loadBalancerRule.findUnique({
-    where: { name: req.params.ruleName },
+    where: { name: ruleName },
     include: {
       endpoints: {
         include: {
@@ -20,8 +21,8 @@ inferenceProxy.all("/:ruleName/v1/*", async (req: Request, res: Response) => {
 
   if (!rule) return res.status(404).json({ error: "Rule not found" });
 
-  const activeEndpoints = rule.endpoints.filter(
-    (ep) => ep.deployment.status === "running" && ep.deployment.port
+  const activeEndpoints = (rule as typeof rule & { endpoints: Array<{ deployment: { status: string; port: number | null; node: { ipAddress: string } } }> }).endpoints.filter(
+    (ep: { deployment: { status: string; port: number | null } }) => ep.deployment.status === "running" && ep.deployment.port
   );
 
   if (activeEndpoints.length === 0) {

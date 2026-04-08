@@ -336,11 +336,11 @@ export default function NodesPage() {
                   {isOutdated(node) && node.status === "online" && (
                     <button
                       onClick={() => upgradeAgent(node.id)}
-                      disabled={upgrading[node.id] || nodeIsBusy(node)}
-                      title={nodeIsBusy(node) ? "Stop active deployments before upgrading" : "Upgrade agent to latest version"}
+                      disabled={upgrading[node.id]}
+                      title="Upgrade agent to latest version (active deployments are preserved)"
                       className="bg-orange-600 hover:bg-orange-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-3 py-1 rounded text-xs font-medium transition-colors"
                     >
-                      {upgrading[node.id] ? "Upgrading..." : nodeIsBusy(node) ? "Busy" : "Upgrade Agent"}
+                      {upgrading[node.id] ? "Upgrading..." : "Upgrade Agent"}
                     </button>
                   )}
                   {!isOutdated(node) && node.status === "online" && (

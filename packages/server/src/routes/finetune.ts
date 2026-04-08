@@ -22,14 +22,23 @@ finetuneRouter.get("/:id", async (req, res) => {
 });
 
 finetuneRouter.post("/", async (req, res) => {
-  const { nodeId, baseModel, method, dataset, config } = req.body;
-  if (!nodeId || !baseModel || !method || !dataset) {
-    return res.status(400).json({ error: "nodeId, baseModel, method, and dataset required" });
+  const { nodeId, recipeFile, dataset, config } = req.body;
+  if (!nodeId || !recipeFile || !dataset) {
+    return res.status(400).json({ error: "nodeId, recipeFile, and dataset required" });
   }
+
+  // Look up recipe metadata from cached training recipes
+  const agentHub: AgentHub = req.app.get("agentHub");
+  const recipes = agentHub.getTrainingRecipes();
+  const recipe = recipes.find((r) => r.file === recipeFile);
+
+  const baseModel = recipe?.base_model || recipeFile;
+  const method = recipe?.method || "lora";
 
   const job = await prisma.fineTuneJob.create({
     data: {
       nodeId,
+      recipeFile,
       baseModel,
       method,
       dataset,
@@ -38,24 +47,51 @@ finetuneRouter.post("/", async (req, res) => {
     },
   });
 
-  const agentHub: AgentHub = req.app.get("agentHub");
+  // Set outputDir with the actual job ID
+  const outputDir = `/mnt/tank/outputs/${job.id}`;
+  await prisma.fineTuneJob.update({
+    where: { id: job.id },
+    data: { outputDir },
+  });
+
   agentHub.sendToAgent(nodeId, {
     type: "cmd:finetune:start",
     payload: {
       jobId: job.id,
-      baseModel,
-      method,
+      recipeFile,
       dataset,
+      outputDir: `/workspace/outputs/${job.id}`, // container path (NFS mounted)
       config: config || {},
     },
   });
 
   await prisma.fineTuneJob.update({
     where: { id: job.id },
-    data: { status: "running", startedAt: new Date() },
+    data: { status: "starting", startedAt: new Date() },
   });
 
-  res.status(201).json(job);
+  const result = await prisma.fineTuneJob.findUnique({
+    where: { id: job.id },
+    include: { node: true },
+  });
+  res.status(201).json(result);
+});
+
+finetuneRouter.delete("/:id", async (req, res) => {
+  const job = await prisma.fineTuneJob.findUnique({ where: { id: req.params.id } });
+  if (!job) return res.status(404).json({ error: "Job not found" });
+
+  // If running, stop it first
+  if (["pending", "starting", "running"].includes(job.status)) {
+    const agentHub: AgentHub = req.app.get("agentHub");
+    agentHub.sendToAgent(job.nodeId, {
+      type: "cmd:finetune:stop",
+      payload: { jobId: job.id },
+    });
+  }
+
+  await prisma.fineTuneJob.delete({ where: { id: req.params.id } });
+  res.json({ deleted: true });
 });
 
 finetuneRouter.post("/:id/stop", async (req, res) => {
