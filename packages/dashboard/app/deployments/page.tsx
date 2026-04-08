@@ -20,6 +20,8 @@ interface Node {
   name: string;
   ipAddress: string;
   status: string;
+  vramTotal?: number;
+  metrics?: { vramUsed: number }[];
 }
 
 interface ClusterNodeInfo {
@@ -499,9 +501,20 @@ export default function DeploymentsPage() {
                 <div className="flex items-center gap-3 mb-2">
                   <h3 className="text-sm font-semibold text-gray-300">{nodeName}</h3>
                   {nodeData && (
-                    <span className="text-[10px] text-gray-500">
-                      {nodeData.ipAddress}
-                    </span>
+                    <>
+                      <span className="text-[10px] text-gray-500">{nodeData.ipAddress}</span>
+                      {nodeData.vramTotal && (() => {
+                        const used = nodeData.metrics?.[0]?.vramUsed || 0;
+                        const total = nodeData.vramTotal!;
+                        const free = total - used;
+                        const pct = Math.round(used / total * 100);
+                        return (
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${pct > 80 ? "bg-red-900/40 text-red-300" : pct > 50 ? "bg-yellow-900/40 text-yellow-300" : "bg-gray-800 text-gray-400"}`}>
+                            {Math.round(used / 1024)}GB / {Math.round(total / 1024)}GB ({Math.round(free / 1024)}GB free)
+                          </span>
+                        );
+                      })()}
+                    </>
                   )}
                 </div>
                 <div className="space-y-2">
