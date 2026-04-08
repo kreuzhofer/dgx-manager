@@ -40,6 +40,8 @@ interface Deployment {
   port: number | null;
   config: string | null;
   clusterMode: boolean;
+  vramEstimate: number | null;
+  vramActual: number | null;
   createdAt: string;
   node?: { name: string; ipAddress: string };
   model?: { name: string };
@@ -543,6 +545,13 @@ export default function DeploymentsPage() {
                           {config.runtime === "ollama" ? "Ollama" : "vLLM"}
                         </span>
                         {d.model?.name || recipeName || d.modelId}
+                        {(d.vramEstimate || d.vramActual) && (
+                          <span className="text-[10px] font-normal text-gray-500 ml-1">
+                            {d.vramActual
+                              ? `${Math.round(d.vramActual / 1024)}GB`
+                              : `~${Math.round((d.vramEstimate || 0) / 1024)}GB est`}
+                          </span>
+                        )}
                       </h3>
                       <p className="text-xs text-gray-500 mt-0.5">
                         {d.clusterMode && d.clusterNodes ? (

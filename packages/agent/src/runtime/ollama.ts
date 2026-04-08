@@ -109,7 +109,7 @@ export async function deployModel(
   onLog?: (line: string) => void,
   onStatus?: (status: string, error?: string) => void,
   modelType?: "chat" | "embedding"
-): Promise<number> {
+): Promise<{ port: number; vramActual: number }> {
   activeDeployments.set(deploymentId, modelName);
   const abortController = new AbortController();
   activeAbortControllers.set(deploymentId, abortController);
@@ -137,7 +137,7 @@ export async function deployModel(
     onStatus?.("downloading");
     onLog?.(`Pulling ${modelName}...\n`);
     await pullModel(modelName, onLog, abortController.signal);
-    if (abortController.signal.aborted) return OLLAMA_PORT;
+    if (abortController.signal.aborted) return { port: OLLAMA_PORT, vramActual: 0 };
     onLog?.(`Pull complete.\n`);
 
     // Load model into GPU memory
@@ -157,16 +157,17 @@ export async function deployModel(
       });
     }
 
-    // Verify loaded
-    const ps = await ollamaFetch("/api/ps") as { models?: { name: string }[] };
-    const loaded = ps.models?.some((m) => m.name.startsWith(modelName));
-    if (!loaded) {
+    // Verify loaded and get actual VRAM usage
+    const ps = await ollamaFetch("/api/ps") as { models?: { name: string; size: number }[] };
+    const loadedModel = ps.models?.find((m) => m.name.startsWith(modelName));
+    if (!loadedModel) {
       throw new Error("Model not in GPU memory after loading");
     }
 
-    onLog?.(`${modelName} is running on port ${OLLAMA_PORT}\n`);
+    const vramActualMB = Math.round(loadedModel.size / 1024 / 1024);
+    onLog?.(`${modelName} is running on port ${OLLAMA_PORT} (${Math.round(vramActualMB / 1024)}GB VRAM)\n`);
     onStatus?.("running");
-    return OLLAMA_PORT;
+    return { port: OLLAMA_PORT, vramActual: vramActualMB };
   } catch (err) {
     activeDeployments.delete(deploymentId);
     onStatus?.("failed", String(err));

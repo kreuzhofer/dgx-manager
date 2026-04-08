@@ -134,11 +134,15 @@ export class AgentHub {
           }
 
           case "agent:deployment:status": {
-            const { deploymentId, status, port, error, deleteAfter } = msg.payload;
+            const { deploymentId, status, port, error, deleteAfter, vramActual } = msg.payload;
             try {
               await prisma.deployment.update({
                 where: { id: deploymentId },
-                data: { status, port: port ?? undefined },
+                data: {
+                  status,
+                  port: port ?? undefined,
+                  vramActual: vramActual ? Number(vramActual) : undefined,
+                },
               });
             } catch {
               // Deployment may already be deleted

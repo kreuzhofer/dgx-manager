@@ -239,15 +239,20 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
           modelName,
           (line) => sendMsg("agent:deployment:log", { deploymentId, log: line }),
           (status, error) => {
-            sendMsg("agent:deployment:status", {
-              deploymentId,
-              status,
-              port: status === "running" ? 11434 : undefined,
-              error,
-            });
+            if (status !== "running") {
+              sendMsg("agent:deployment:status", { deploymentId, status, error });
+            }
+            // "running" is sent below with vramActual from the return value
           },
           modelType
-        ).catch((err) => {
+        ).then((result) => {
+          sendMsg("agent:deployment:status", {
+            deploymentId,
+            status: "running",
+            port: result.port,
+            vramActual: result.vramActual,
+          });
+        }).catch((err) => {
           sendMsg("agent:deployment:status", {
             deploymentId,
             status: "failed",
