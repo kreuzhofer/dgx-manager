@@ -37,22 +37,47 @@ The server APIs for these features are complete, but the dashboard pages are sti
 - **Load Balancer UI** — Rule management, endpoint assignment, strategy configuration
 - **Models UI** — Model registry browser and management
 
-## Phase 3: Fine-Tuning Pipeline 🔜
+## Phase 3: Fine-Tuning Pipeline ✅
 
-**Goal:** Run training jobs on cluster nodes with full visibility from the dashboard.
+**Goal:** Run training jobs on cluster nodes with full visibility from the dashboard, then deploy fine-tuned models for inference.
 
-This is the next active development phase. The database schema and server API routes already exist; the work is in agent-side execution and the dashboard UI.
+### Training
 
-**Key deliverables:**
+- Recipe-based training system mirroring vLLM deployment recipes
+- External training recipes repo ([dgx-manager-fine-tune-recipes](https://github.com/kreuzhofer/dgx-manager-fine-tune-recipes)) with shared `lib/` for DGX Spark patches, dataset handling, logging
+- Supported frameworks: DeepSpeed ZeRO-2 + LoRA, plain TRL + PEFT, Unsloth QLoRA
+- Tested recipes: Gemma 4 E2B, E4B, 26B-A4B (DeepSpeed), Gemma 4 E2B (TRL), Llama 3.1 8B (Unsloth)
+- Multi-format dataset support: ShareGPT, OpenAI, QA (question/context/answer), Instruct (instruction/input/output)
+- HuggingFace dataset IDs loaded directly (e.g., `b-mc2/sql-create-context`)
+- Dashboard: Job creation form with recipe/node/dataset selection, hyperparameter overrides
 
-- Agent-side training execution supporting multiple frameworks:
-  - **Unsloth** — LoRA/QLoRA fine-tuning, optimized for single-node low-VRAM workloads
-  - **Hugging Face Transformers + PEFT** — Standard fine-tuning stack with adapter support
-  - **Torchtune** — Meta's native PyTorch fine-tuning library
-- Job creation UI: select base model, training method, dataset, and hyperparameters
-- Real-time training log streaming and progress tracking
-- VRAM-aware scheduling (training jobs share the admission control system with deployments)
-- Output model registration — fine-tuned models feed back into the deployment pipeline
+### Monitoring & Observability
+
+- Phase-aware progress tracking: container → downloading → loading → tokenizing → training → eval → saving
+- Real-time loss curve visualization (SVG chart, live-updating via SSE)
+- Training metrics persisted to DB (TrainingMetric table: step, loss, lr, evalLoss)
+- `[TRAIN]` and `[EVAL]` callbacks for explicit progress reporting through Docker pipes
+- Smoothed ETA estimation (20-sample rolling average of iteration speed)
+- Log file persistence: `train.log` written via Python Tee, survives page refresh and agent restart
+- Agent reattaches to running training containers after restart (tails train.log)
+- Deployment log persistence to NFS files
+
+### Merge & Deploy
+
+- LoRA adapter merge: loads base model + adapter → `merge_and_unload()` → saves full model
+- Gemma 4 weight key fix: remaps flattened ClippableLinear keys back to nested format for vLLM
+- PEFT dispatch patch: teaches LoRA to handle Gemma4ClippableLinear without model modification
+- Dynamic vLLM recipe generation for merged models (container type from training recipe config)
+- Deploy button on completed+merged jobs → navigates to deployments page with model pre-filled
+- Full loop tested: train → merge → deploy → serve → inference
+
+### DGX Spark Workarounds
+
+- pynvml monkey-patch (nvmlDeviceGetMemoryInfo not supported on GB10 unified memory)
+- NFS page cache flush after safetensors shard loads
+- `skip_memory_metrics=True` for HF Trainer
+- Auto-increment torchrun master port for concurrent training jobs
+- `chmod a+rw` on output files (containers run as root)
 
 ### Storage abstraction
 
@@ -72,10 +97,11 @@ The current implementation assumes a shared NFS mount (`/mnt/tank`) across all n
 - Format validation and preview (JSONL, Alpaca, ShareGPT, etc.)
 - Direct integration with fine-tuning jobs from Phase 3
 
-## Phase 5: Evaluation & Benchmarks
+## Phase 5: Evaluation & Benchmarks 🔜
 
 **Goal:** Measure and track model quality across deployments and fine-tuning runs.
 
+- SQL evaluation script (base vs fine-tuned exact-match accuracy comparison) — implemented
 - Run evaluation suites (lm-eval-harness, custom benchmarks) against deployed models
 - Track quality metrics over time with per-model and per-run history
 - Compare base models against fine-tuned variants
@@ -109,12 +135,14 @@ The current implementation assumes a shared NFS mount (`/mnt/tank`) across all n
 | Deployments | ✅ | ✅ | ✅ | ✅ |
 | Load Balancer | ✅ | — | placeholder | ✅ |
 | Models | ✅ | — | placeholder | ✅ |
-| Fine-Tuning | ✅ | stub | placeholder | ✅ |
+| Fine-Tuning | ✅ | ✅ | ✅ | ✅ |
+| Merge & Deploy | ✅ | ✅ | ✅ | ✅ |
+| Training Metrics | ✅ | ✅ | ✅ | ✅ |
 | Datasets | — | — | — | — |
-| Evaluation | — | — | — | — |
+| Evaluation | partial | — | — | — |
 | Auth & RBAC | — | — | — | — |
 | Multi-Cluster | — | — | — | — |
 
 ---
 
-*Last updated: April 2026*
+*Last updated: April 9, 2026*
