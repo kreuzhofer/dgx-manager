@@ -4,10 +4,10 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
 import { discoverRecipes } from "./recipes.js";
-import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, isStopping, getTrackedDeployments, reattachLogs } from "./runtime/vllm.js";
+import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, isStopping, getTrackedDeployments, reattachLogs, generateLocalModelRecipe } from "./runtime/vllm.js";
 import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth, getOllamaModels } from "./runtime/ollama.js";
 import { discoverTrainingRecipes } from "./training-recipes.js";
-import { startFinetuneJob, stopFinetuneJob } from "./runtime/finetune.js";
+import { startFinetuneJob, stopFinetuneJob, mergeLoraAdapter } from "./runtime/finetune.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_VERSION: string = JSON.parse(
@@ -474,6 +474,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             step: extra?.step,
             totalSteps: extra?.totalSteps,
             loss: extra?.loss,
+            etaSeconds: extra?.etaSeconds,
           });
         },
         onComplete: (status, outputPath, error) => {
@@ -498,6 +499,77 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         sendMsg("agent:finetune:complete", {
           jobId,
           status: "stopped",
+        });
+      }
+      break;
+    }
+
+    case "cmd:finetune:merge": {
+      const { jobId, baseModel, adapterPath, mergedOutputDir } = msg.payload as {
+        jobId: string; baseModel: string; adapterPath: string; mergedOutputDir: string;
+      };
+
+      console.log(`[finetune] Merging job ${jobId}: ${baseModel} + ${adapterPath}`);
+      mergeLoraAdapter(jobId, baseModel, adapterPath, mergedOutputDir, {
+        onLog: (line) => {
+          sendMsg("agent:finetune:merge-progress", { jobId, log: line });
+        },
+        onProgress: (phase, phaseProgress) => {
+          sendMsg("agent:finetune:merge-progress", { jobId, phase, phaseProgress });
+        },
+        onComplete: (status, outputPath, error) => {
+          console.log(`[finetune] Merge ${jobId} ${status}${error ? `: ${error}` : ""}`);
+          sendMsg("agent:finetune:merge-complete", {
+            jobId, status, mergedPath: outputPath ?? null, error: error ?? undefined,
+          });
+        },
+      });
+      break;
+    }
+
+    case "cmd:finetune:deploy": {
+      const { jobId, deploymentId, modelPath, config } = msg.payload as {
+        jobId: string; deploymentId: string; modelPath: string; config?: Record<string, unknown>;
+      };
+
+      console.log(`[finetune] Deploying merged model from ${modelPath}`);
+      try {
+        const recipeFile = generateLocalModelRecipe({
+          jobId,
+          modelPath,
+          port: (config?.port as number) ?? 8000,
+          gpuMemoryUtilization: (config?.gpuMem as number) ?? 0.85,
+          maxModelLen: (config?.maxModelLen as number) ?? 4096,
+        });
+
+        sendMsg("agent:deployment:status", { deploymentId, status: "starting" });
+        let lastPhase = "starting";
+        launchRecipe(
+          deploymentId,
+          recipeFile,
+          { port: (config?.port as number) ?? 8000 },
+          (line) => {
+            sendMsg("agent:deployment:log", { deploymentId, log: line });
+            const phase = detectPhase(line);
+            if (phase && phase !== lastPhase) {
+              lastPhase = phase;
+              sendMsg("agent:deployment:status", { deploymentId, status: phase });
+            }
+          },
+          (code) => {
+            if (code === 0 && isVllmContainerRunning()) {
+              console.log(`[finetune] Deploy run-recipe.sh exited 0, container running`);
+            } else if (!isVllmContainerRunning()) {
+              sendMsg("agent:deployment:status", {
+                deploymentId, status: "failed",
+                error: code === 0 ? "Container not running after launch" : `Launch failed with exit code ${code}`,
+              });
+            }
+          }
+        );
+      } catch (err) {
+        sendMsg("agent:deployment:status", {
+          deploymentId, status: "failed", error: String(err),
         });
       }
       break;

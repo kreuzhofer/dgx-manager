@@ -17,7 +17,7 @@ interface FinetuneInstance {
 
 const running = new Map<string, FinetuneInstance>();
 
-type TrainingPhase = "setup" | "downloading" | "loading" | "tokenizing" | "training" | "eval" | "saving";
+type TrainingPhase = "container" | "setup" | "downloading" | "loading" | "tokenizing" | "training" | "eval" | "saving";
 
 interface ProgressInfo {
   phase: TrainingPhase;
@@ -25,78 +25,144 @@ interface ProgressInfo {
   step?: number;
   totalSteps?: number;
   loss?: number;
+  iterSpeed?: number; // iterations per second from tqdm
+}
+
+/**
+ * Rolling average for smoothing iteration speed estimates.
+ */
+class SpeedSmoother {
+  private samples: number[] = [];
+  private maxSamples: number;
+
+  constructor(windowSize: number = 20) {
+    this.maxSamples = windowSize;
+  }
+
+  push(speed: number): void {
+    if (speed > 0) {
+      this.samples.push(speed);
+      if (this.samples.length > this.maxSamples) {
+        this.samples.shift();
+      }
+    }
+  }
+
+  /** Smoothed speed (iterations per second). */
+  get average(): number {
+    if (this.samples.length === 0) return 0;
+    return this.samples.reduce((a, b) => a + b, 0) / this.samples.length;
+  }
+
+  /** Estimated seconds remaining given items left. */
+  eta(remaining: number): number | undefined {
+    const avg = this.average;
+    if (avg <= 0 || remaining <= 0) return undefined;
+    return Math.round(remaining / avg);
+  }
+
+  reset(): void {
+    this.samples = [];
+  }
 }
 
 /**
  * Detect the current training phase from a log line.
+ * Order matters — more specific matches first.
  */
 function detectPhase(line: string): TrainingPhase | null {
   const l = line.toLowerCase();
-  if (l.includes("downloading") || l.includes("fetching") || l.includes("config.json") || l.includes(".safetensors")) return "downloading";
+  // Container lifecycle
+  if (l.includes("starting container") || l.includes("pulling image")) return "container";
+  if (l.includes("container ready") || l.includes("=== ready ===")) return "setup";
+  // Download (HF model files)
+  if (l.includes("downloading") || l.includes("fetching") && (l.includes("files") || l.includes("model"))) return "downloading";
+  // Model loading
   if (l.includes("loading model") || l.includes("loading weights") || l.includes("from_pretrained") || l.includes("model loaded")) return "loading";
+  // Tokenizing — only trigger on the explicit label, NOT on tqdm bars
   if (l.includes("tokeniz")) return "tokenizing";
-  if (l.includes("starting training") || l.includes("'loss'") || /\d+\/\d+\s*\[/.test(line)) return "training";
-  if (l.includes("eval_loss") || l.includes("evaluation")) return "eval";
-  if (l.includes("saving model") || l.includes("lora adapter saved") || l.includes("save_pretrained")) return "saving";
+  // Training — only trigger on explicit markers, not tqdm
+  if (l.includes("[train]") || l.includes("starting training") || l.includes("'loss'")) return "training";
+  // Eval
+  if (l.includes("eval_loss") || l.includes("evaluation") || l.includes("running eval")) return "eval";
+  // Saving
+  if (l.includes("lora adapter saved") || l.includes("save_pretrained")) return "saving";
   return null;
 }
 
 /**
  * Parse training log output for progress info.
+ * Only extracts numeric progress from lines that match the CURRENT phase.
  */
 function parseProgress(line: string, currentPhase: TrainingPhase): ProgressInfo | null {
-  // HF download progress: "Downloading model.safetensors:  45%|████▌ | 1.2G/2.5G"
-  // or tqdm download bars: " 45%|████▌     | 1.2G/2.5G [01:23<01:30, 15.2MB/s]"
-  // or file-count: "Fetching 12 files: 75%|████ | 9/12"
-  if (currentPhase === "downloading") {
-    const pctMatch = line.match(/(\d+)%\|/);
-    if (pctMatch) {
-      return { phase: "downloading", phaseProgress: parseInt(pctMatch[1]) / 100 };
-    }
+  // Explicit training log from our callback: [TRAIN] step=5/50 loss=2.345 lr=0.0002
+  const trainLogMatch = line.match(/\[TRAIN\]\s+step=(\d+)\/(\d+)\s+loss=([\d.?]+)/);
+  if (trainLogMatch) {
+    const step = parseInt(trainLogMatch[1]);
+    const total = parseInt(trainLogMatch[2]);
+    const loss = trainLogMatch[3] !== "?" ? parseFloat(trainLogMatch[3]) : undefined;
+    return {
+      phase: "training",
+      step,
+      totalSteps: total,
+      phaseProgress: total > 0 ? step / total : 0,
+      loss,
+    };
   }
 
-  // Model loading progress: "Loading weights:  45%|████▌     | 907/2011"
-  const loadMatch = line.match(/[Ll]oading\s+weights?:\s*(\d+)%/) || (currentPhase === "loading" && line.match(/(\d+)%\|.*\|\s*\d+\/\d+/));
-  if (loadMatch) {
-    return { phase: "loading", phaseProgress: parseInt(loadMatch[1]) / 100 };
-  }
-
-  // Tokenizing progress: "Tokenizing (num_proc=4):  60%|██████    | 3/5"
-  const tokenMatch = line.match(/[Tt]okeniz.*?(\d+)%/);
-  if (tokenMatch) {
-    return { phase: "tokenizing", phaseProgress: parseInt(tokenMatch[1]) / 100 };
-  }
-
-  // Training loss dict: {'loss': '51.79', ...}
+  // Training loss dict: {'loss': '51.79', ...} or {'loss': 51.79, ...}
   const dictMatch = line.match(/\{'loss':\s*'?([\d.]+)/);
   if (dictMatch) {
     return { phase: "training", loss: parseFloat(dictMatch[1]) };
   }
 
-  // Training tqdm: " 33%|███▎      | 1/3 [00:02<00:04,  2.13s/it]" or "  0%|          | 0/3"
-  // Must be in training phase to avoid matching loading/tokenizing tqdm
-  if (currentPhase === "training") {
-    const tqdmMatch = line.match(/\s+(\d+)%\|.*\|\s*(\d+)\/(\d+)/);
-    if (tqdmMatch) {
-      const step = parseInt(tqdmMatch[2]);
-      const total = parseInt(tqdmMatch[3]);
+  // Generic tqdm bar: " 33%|███▎ | 1/3 [00:02<00:04, 2.66it/s]"
+  // Route to the correct phase based on currentPhase
+  const tqdmMatch = line.match(/\s*(\d+)%\|.*\|\s*(\d+)\/(\d+)/);
+  if (tqdmMatch) {
+    const pct = parseInt(tqdmMatch[1]);
+    const current = parseInt(tqdmMatch[2]);
+    const total = parseInt(tqdmMatch[3]);
+
+    // Parse iteration speed: "2.66it/s" or "1.23s/it" or "10277.50 examples/s"
+    let iterSpeed: number | undefined;
+    const itsMatch = line.match(/([\d.]+)\s*it\/s/);
+    const sitMatch = line.match(/([\d.]+)\s*s\/it/);
+    const exMatch = line.match(/([\d.]+)\s*examples\/s/);
+    if (itsMatch) iterSpeed = parseFloat(itsMatch[1]);
+    else if (sitMatch) iterSpeed = 1 / parseFloat(sitMatch[1]);
+    else if (exMatch) iterSpeed = parseFloat(exMatch[1]);
+
+    if (currentPhase === "downloading") {
+      return { phase: "downloading", phaseProgress: pct / 100, iterSpeed };
+    }
+    if (currentPhase === "loading") {
+      return { phase: "loading", phaseProgress: pct / 100, iterSpeed };
+    }
+    if (currentPhase === "tokenizing") {
+      return { phase: "tokenizing", phaseProgress: pct / 100, iterSpeed };
+    }
+    if (currentPhase === "training") {
       const lossMatch = line.match(/loss[=:]\s*([\d.]+)/i);
       return {
         phase: "training",
-        phaseProgress: total > 0 ? step / total : 0,
-        step,
+        phaseProgress: total > 0 ? current / total : 0,
+        step: current,
         totalSteps: total,
         loss: lossMatch ? parseFloat(lossMatch[1]) : undefined,
+        iterSpeed,
       };
     }
+    if (currentPhase === "eval") {
+      return { phase: "eval", phaseProgress: pct / 100, iterSpeed };
+    }
+    return { phase: currentPhase, phaseProgress: pct / 100, iterSpeed };
   }
 
-  // Eval progress
-  if (currentPhase === "eval" || line.includes("eval")) {
-    const evalMatch = line.match(/\{'eval_loss':\s*'?([\d.]+)/);
-    if (evalMatch) {
-      return { phase: "eval", loss: parseFloat(evalMatch[1]) };
-    }
+  // Eval results
+  const evalMatch = line.match(/\{'eval_loss':\s*'?([\d.]+)/);
+  if (evalMatch) {
+    return { phase: "eval", loss: parseFloat(evalMatch[1]) };
   }
 
   return null;
@@ -140,7 +206,7 @@ async function waitForReady(
 
 export interface FinetuneCallbacks {
   onLog: (line: string) => void;
-  onProgress: (phase: string, phaseProgress: number, extra?: { step?: number; totalSteps?: number; loss?: number }) => void;
+  onProgress: (phase: string, phaseProgress: number, extra?: { step?: number; totalSteps?: number; loss?: number; etaSeconds?: number }) => void;
   onComplete: (status: "completed" | "failed" | "stopped", outputPath?: string, error?: string) => void;
 }
 
@@ -284,24 +350,8 @@ export async function startFinetuneJob(
     if (resolvedDataset.startsWith("/mnt/tank/")) {
       resolvedDataset = resolvedDataset.replace("/mnt/tank/", "/workspace/");
     }
-
-    // If dataset is a HuggingFace ID (not an absolute path), download it first
-    if (!resolvedDataset.startsWith("/")) {
-      callbacks.onLog(`Downloading dataset: ${dataset}...\n`);
-      try {
-        const dlResult = execSync(
-          `docker exec ${containerName} python -c "from datasets import load_dataset; ds = load_dataset('${dataset}', split='train'); ds.to_json('/tmp/hf_dataset.jsonl')"`,
-          { timeout: 600_000 }
-        );
-        callbacks.onLog(dlResult.toString());
-        resolvedDataset = "/tmp/hf_dataset.jsonl";
-        callbacks.onLog(`Dataset downloaded to ${resolvedDataset}\n`);
-      } catch (err) {
-        callbacks.onComplete("failed", undefined, `Failed to download dataset: ${err}`);
-        cleanup(containerName, jobId);
-        return;
-      }
-    }
+    // HuggingFace dataset IDs (e.g., "b-mc2/sql-create-context") are passed
+    // directly to the training script — it handles download via load_dataset()
 
     if (instance.aborted) {
       cleanup(containerName, jobId);
@@ -344,6 +394,7 @@ export async function startFinetuneJob(
     instance.execProcess = execProc;
 
     let currentPhase: TrainingPhase = "setup";
+    const speedSmoother = new SpeedSmoother(20);
 
     const handleOutput = (data: Buffer) => {
       const text = data.toString();
@@ -356,7 +407,7 @@ export async function startFinetuneJob(
         const newPhase = detectPhase(line);
         if (newPhase && newPhase !== currentPhase) {
           currentPhase = newPhase;
-          // Notify phase change even without numeric progress
+          speedSmoother.reset(); // reset ETA on phase change
           callbacks.onProgress(currentPhase, 0);
         }
 
@@ -364,11 +415,31 @@ export async function startFinetuneJob(
         const progress = parseProgress(line, currentPhase);
         if (progress) {
           currentPhase = progress.phase;
+
+          // Feed speed smoother
+          if (progress.iterSpeed) {
+            speedSmoother.push(progress.iterSpeed);
+          }
+
           if (progress.phaseProgress !== undefined) {
+            // Compute ETA from smoothed speed
+            let etaSeconds: number | undefined;
+            if (progress.step != null && progress.totalSteps != null) {
+              etaSeconds = speedSmoother.eta(progress.totalSteps - progress.step);
+            } else if (progress.phaseProgress > 0 && progress.phaseProgress < 1) {
+              // Estimate remaining from progress ratio and speed
+              const elapsed = speedSmoother.average;
+              if (elapsed > 0) {
+                // phaseProgress = done/total, so remaining fraction = 1 - phaseProgress
+                // Can't compute without total count, use tqdm's own ETA as fallback
+              }
+            }
+
             callbacks.onProgress(progress.phase, progress.phaseProgress, {
               step: progress.step,
               totalSteps: progress.totalSteps,
               loss: progress.loss,
+              etaSeconds,
             });
           } else if (progress.loss !== undefined) {
             callbacks.onProgress(progress.phase, -1, { loss: progress.loss });
@@ -431,4 +502,105 @@ function cleanup(containerName: string, jobId: string) {
     execSync(`docker rm -f ${containerName}`, { timeout: 30_000, stdio: "ignore" });
   } catch { /* ignore */ }
   running.delete(jobId);
+}
+
+/**
+ * Merge a LoRA adapter into the base model and save the full merged model.
+ */
+export async function mergeLoraAdapter(
+  jobId: string,
+  baseModel: string,
+  adapterPath: string,
+  mergedOutputDir: string,
+  callbacks: FinetuneCallbacks
+): Promise<void> {
+  const containerName = `dgx-merge-${jobId.slice(0, 12)}`;
+  const containerImage = "nvcr.io/nvidia/pytorch:25.11-py3";
+  const mergeScript = "/workspace/src/github/dgx-manager-fine-tune-recipes/scripts/merge.py";
+
+  // Translate NFS paths to container paths
+  const containerAdapterPath = adapterPath.replace("/mnt/tank/", "/workspace/");
+  const containerOutputDir = mergedOutputDir.replace("/mnt/tank/", "/workspace/");
+
+  try {
+    try { execSync(`docker rm -f ${containerName}`, { timeout: 15_000, stdio: "ignore" }); } catch { /* */ }
+
+    callbacks.onLog(`Starting merge container...\n`);
+    callbacks.onProgress("loading", 0);
+
+    const dockerArgs = [
+      "run", "-d",
+      "--name", containerName,
+      "--gpus", "all",
+      "--network", "host",
+      "--ipc", "host",
+      "--privileged",
+      "--ulimit", "memlock=-1",
+      "--shm-size=1g",
+      "--user", "root",
+      "-e", "CUDA_VISIBLE_DEVICES=0",
+      "-e", "PYTHONUNBUFFERED=1",
+      "-e", "HF_HOME=/workspace/models",
+      "-e", "HF_HUB_OFFLINE=0",
+    ];
+    if (process.env.HF_TOKEN) {
+      dockerArgs.push("-e", `HF_TOKEN=${process.env.HF_TOKEN}`);
+    }
+    dockerArgs.push(
+      "-v", "/mnt/tank:/workspace",
+      "--entrypoint", "bash",
+      containerImage,
+      "-c", "pip install -q peft transformers accelerate safetensors && touch /tmp/.ready && sleep infinity"
+    );
+
+    execSync(`docker ${dockerArgs.join(" ")}`, { timeout: 120_000 });
+
+    // Wait for deps install
+    const ready = await waitForReady(containerName, 300_000, callbacks.onLog);
+    if (!ready) {
+      callbacks.onComplete("failed", undefined, "Merge container setup timed out");
+      try { execSync(`docker rm -f ${containerName}`, { timeout: 15_000, stdio: "ignore" }); } catch { /* */ }
+      return;
+    }
+
+    callbacks.onLog(`\nRunning merge: ${baseModel} + ${containerAdapterPath} → ${containerOutputDir}\n\n`);
+
+    const mergeProc = spawn("docker", [
+      "exec", containerName,
+      "python", mergeScript,
+      "--base_model", baseModel,
+      "--adapter_path", containerAdapterPath,
+      "--output_dir", containerOutputDir,
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+
+    mergeProc.stdout?.on("data", (data: Buffer) => {
+      const text = data.toString();
+      callbacks.onLog(text);
+      const l = text.toLowerCase();
+      if (l.includes("loading base model")) callbacks.onProgress("loading", 0.1);
+      if (l.includes("base model loaded")) callbacks.onProgress("loading", 0.4);
+      if (l.includes("adapter loaded")) callbacks.onProgress("loading", 0.5);
+      if (l.includes("merge complete")) callbacks.onProgress("saving", 0.6);
+      if (l.includes("saving merged model")) callbacks.onProgress("saving", 0.7);
+      if (l.includes("model saved")) callbacks.onProgress("saving", 0.9);
+      if (l.includes("saving tokenizer")) callbacks.onProgress("saving", 0.95);
+    });
+    mergeProc.stderr?.on("data", (data: Buffer) => callbacks.onLog(data.toString()));
+
+    await new Promise<void>((resolve, reject) => {
+      mergeProc.on("exit", (code) => {
+        if (code === 0) {
+          callbacks.onProgress("saving", 1.0);
+          callbacks.onComplete("completed", mergedOutputDir);
+        } else {
+          callbacks.onComplete("failed", undefined, `Merge failed with exit code ${code}`);
+        }
+        try { execSync(`docker rm -f ${containerName}`, { timeout: 15_000, stdio: "ignore" }); } catch { /* */ }
+        resolve();
+      });
+    });
+  } catch (err) {
+    callbacks.onComplete("failed", undefined, `Merge error: ${err}`);
+    try { execSync(`docker rm -f ${containerName}`, { timeout: 15_000, stdio: "ignore" }); } catch { /* */ }
+  }
 }

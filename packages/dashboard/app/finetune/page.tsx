@@ -35,6 +35,9 @@ interface FineTuneJob {
   progress: number | null;
   outputDir: string | null;
   outputPath: string | null;
+  mergeStatus: string | null;
+  mergedPath: string | null;
+  deploymentId: string | null;
   logs: string | null;
   startedAt: string | null;
   completedAt: string | null;
@@ -84,6 +87,7 @@ export default function FinetunePage() {
     step?: number;
     totalSteps?: number;
     loss?: number;
+    etaSeconds?: number;
   }>>({});
 
   const loadData = useCallback(() => {
@@ -106,8 +110,8 @@ export default function FinetunePage() {
 
   const handleSSE = useCallback((event: SseEvent) => {
     if (event.type === "finetune:log") {
-      const { jobId, phase, phaseProgress, step, totalSteps, loss, log } = event.payload as {
-        jobId: string; phase?: string; phaseProgress?: number; step?: number; totalSteps?: number; loss?: number; log?: string;
+      const { jobId, phase, phaseProgress, step, totalSteps, loss, etaSeconds, log } = event.payload as {
+        jobId: string; phase?: string; phaseProgress?: number; step?: number; totalSteps?: number; loss?: number; etaSeconds?: number; log?: string;
       };
       if (log) {
         setLogs((prev) => ({
@@ -124,6 +128,7 @@ export default function FinetunePage() {
             step: step ?? prev[jobId]?.step,
             totalSteps: totalSteps ?? prev[jobId]?.totalSteps,
             loss: loss ?? prev[jobId]?.loss,
+            etaSeconds: etaSeconds ?? prev[jobId]?.etaSeconds,
           },
         }));
         // Update job status to running once training starts
@@ -160,6 +165,23 @@ export default function FinetunePage() {
       if (["completed", "failed", "stopped"].includes(status)) {
         apiFetch<Node[]>("/api/nodes/idle").then(setIdleNodes).catch(() => {});
       }
+    }
+    if (event.type === "finetune:merge-progress") {
+      const { jobId, log } = event.payload as { jobId: string; log?: string };
+      if (log) {
+        setLogs((prev) => ({
+          ...prev,
+          [jobId]: (prev[jobId] || "") + log,
+        }));
+      }
+    }
+    if (event.type === "finetune:merge-status") {
+      const { jobId, status, mergedPath } = event.payload as {
+        jobId: string; status: string; mergedPath?: string;
+      };
+      setJobs((prev) =>
+        prev.map((j) => j.id === jobId ? { ...j, mergeStatus: status, mergedPath: mergedPath ?? j.mergedPath } : j)
+      );
     }
   }, []);
 
@@ -232,6 +254,36 @@ export default function FinetunePage() {
     if (!confirm("Delete this fine-tune job?")) return;
     await apiFetch(`/api/finetune/${id}`, { method: "DELETE" });
     setJobs((prev) => prev.filter((j) => j.id !== id));
+  };
+
+  const mergeJob = async (id: string) => {
+    try {
+      await apiFetch(`/api/finetune/${id}/merge`, { method: "POST" });
+      setJobs((prev) =>
+        prev.map((j) => j.id === id ? { ...j, mergeStatus: "running" } : j)
+      );
+    } catch (err) { alert(String(err)); }
+  };
+
+  const deployJob = async (id: string) => {
+    try {
+      await apiFetch(`/api/finetune/${id}/deploy`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      setJobs((prev) =>
+        prev.map((j) => j.id === id ? { ...j, deploymentId: "pending" } : j)
+      );
+    } catch (err) { alert(String(err)); }
+  };
+
+  const formatEta = (seconds: number | undefined) => {
+    if (seconds == null || seconds <= 0) return "";
+    if (seconds < 60) return `~${seconds}s left`;
+    const mins = Math.floor(seconds / 60);
+    if (mins < 60) return `~${mins}m left`;
+    const hrs = Math.floor(mins / 60);
+    return `~${hrs}h ${mins % 60}m left`;
   };
 
   const formatElapsed = (startedAt: string | null) => {
@@ -437,7 +489,8 @@ export default function FinetunePage() {
             const isStopping = job.status === "stopping";
             const phaseInfo = jobPhases[job.id];
             const phaseLabels: Record<string, string> = {
-              setup: "Setting up",
+              container: "Preparing container",
+              setup: "Installing dependencies",
               downloading: "Downloading model",
               loading: "Loading model",
               tokenizing: "Tokenizing dataset",
@@ -446,6 +499,7 @@ export default function FinetunePage() {
               saving: "Saving adapter",
             };
             const phaseColors: Record<string, string> = {
+              container: "bg-gray-500",
               setup: "bg-gray-500",
               downloading: "bg-cyan-500",
               loading: "bg-blue-500",
@@ -506,6 +560,35 @@ export default function FinetunePage() {
                         Stop
                       </button>
                     )}
+                    {job.status === "completed" && !job.mergeStatus && (
+                      <button
+                        onClick={() => mergeJob(job.id)}
+                        className="text-xs px-2 py-1 rounded bg-blue-900/50 hover:bg-blue-800 text-blue-300 transition-colors"
+                      >
+                        Merge Model
+                      </button>
+                    )}
+                    {job.mergeStatus === "running" && (
+                      <span className="text-xs px-2 py-1 rounded bg-blue-900/30 text-blue-400 animate-pulse">
+                        Merging...
+                      </span>
+                    )}
+                    {job.mergeStatus === "completed" && !job.deploymentId && (
+                      <button
+                        onClick={() => deployJob(job.id)}
+                        className="text-xs px-2 py-1 rounded bg-green-900/50 hover:bg-green-800 text-green-300 transition-colors"
+                      >
+                        Deploy
+                      </button>
+                    )}
+                    {job.deploymentId && (
+                      <a
+                        href="/deployments"
+                        className="text-xs px-2 py-1 rounded bg-green-900/30 text-green-400 transition-colors hover:bg-green-800"
+                      >
+                        View Deployment
+                      </a>
+                    )}
                     {!isActive && !isStopping && (
                       <button
                         onClick={() => deleteJob(job.id)}
@@ -532,6 +615,7 @@ export default function FinetunePage() {
                         )}
                       </span>
                       <span className="text-gray-500">
+                        {phaseInfo.etaSeconds ? `${formatEta(phaseInfo.etaSeconds)} ` : ""}
                         {phaseInfo.phaseProgress > 0 ? `${Math.round(phaseInfo.phaseProgress * 100)}%` : ""}
                       </span>
                     </div>
@@ -552,11 +636,19 @@ export default function FinetunePage() {
                   </div>
                 )}
 
-                {/* Output path for completed jobs */}
-                {job.status === "completed" && job.outputPath && (
-                  <p className="mt-2 text-xs text-green-400">
-                    Output: {job.outputPath}
-                  </p>
+                {/* Output info for completed jobs */}
+                {job.status === "completed" && (
+                  <div className="mt-2 text-xs space-y-0.5">
+                    {job.outputPath && (
+                      <p className="text-green-400">Adapter: {job.outputPath}</p>
+                    )}
+                    {job.mergeStatus === "completed" && job.mergedPath && (
+                      <p className="text-blue-400">Merged: {job.mergedPath}</p>
+                    )}
+                    {job.mergeStatus === "failed" && (
+                      <p className="text-red-400">Merge failed</p>
+                    )}
+                  </div>
                 )}
 
                 {/* Log viewer */}

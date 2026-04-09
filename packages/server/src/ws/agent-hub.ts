@@ -245,7 +245,7 @@ export class AgentHub {
           }
 
           case "agent:finetune:progress": {
-            const { jobId, phase, phaseProgress, step, totalSteps, loss, log } = msg.payload;
+            const { jobId, phase, phaseProgress, step, totalSteps, loss, etaSeconds, log } = msg.payload;
             // Persist training progress to DB
             if (phase === "training" && typeof phaseProgress === "number" && phaseProgress > 0) {
               await prisma.fineTuneJob.update({
@@ -253,7 +253,7 @@ export class AgentHub {
                 data: { progress: phaseProgress },
               });
             }
-            sseBroadcast({ type: "finetune:log", payload: { jobId, phase, phaseProgress, step, totalSteps, loss, log } });
+            sseBroadcast({ type: "finetune:log", payload: { jobId, phase, phaseProgress, step, totalSteps, loss, etaSeconds, log } });
             break;
           }
 
@@ -269,6 +269,25 @@ export class AgentHub {
               },
             });
             sseBroadcast({ type: "finetune:status", payload: { jobId: job.jobId, status: job.status, outputPath: job.outputPath, error: job.error } });
+            break;
+          }
+
+          case "agent:finetune:merge-progress": {
+            const { jobId, phase, phaseProgress, log } = msg.payload;
+            sseBroadcast({ type: "finetune:merge-progress", payload: { jobId, phase, phaseProgress, log } });
+            break;
+          }
+
+          case "agent:finetune:merge-complete": {
+            const { jobId, status, mergedPath, error } = msg.payload;
+            await prisma.fineTuneJob.update({
+              where: { id: jobId },
+              data: {
+                mergeStatus: status,
+                mergedPath: mergedPath ?? null,
+              },
+            });
+            sseBroadcast({ type: "finetune:merge-status", payload: { jobId, status, mergedPath, error } });
             break;
           }
         }

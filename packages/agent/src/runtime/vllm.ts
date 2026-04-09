@@ -1,5 +1,5 @@
 import { execSync, spawn, ChildProcess } from "child_process";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { saveDeployment, removeDeployment, loadDeployments, clearDeployments, type TrackedDeployment } from "./deployment-store.js";
 
@@ -31,6 +31,56 @@ interface VllmInstance {
 }
 
 const running = new Map<string, VllmInstance>();
+
+/**
+ * Generate a vLLM recipe YAML for a locally-stored model (e.g., merged fine-tune output).
+ * Places it in the spark-vllm-docker recipes/ dir so run-recipe.sh can find it.
+ * Returns the recipe file path relative to the repo root (e.g., "recipes/finetune-abc123.yaml").
+ */
+export function generateLocalModelRecipe(params: {
+  jobId: string;
+  modelPath: string;      // host NFS path (e.g., /mnt/tank/outputs/job123/merged)
+  port?: number;
+  gpuMemoryUtilization?: number;
+  maxModelLen?: number;
+}): string {
+  const recipeName = `finetune-${params.jobId.slice(0, 12)}`;
+  const recipeFile = `recipes/${recipeName}.yaml`;
+  const fullPath = join(VLLM_REPO_PATH, recipeFile);
+  const containerModelPath = params.modelPath.replace("/mnt/tank/", "/workspace/");
+
+  const port = params.port ?? 8000;
+  const gpuMem = params.gpuMemoryUtilization ?? 0.85;
+  const maxLen = params.maxModelLen ?? 4096;
+
+  const yaml = `# Auto-generated recipe for fine-tuned model
+recipe_version: "1"
+name: ${recipeName}
+description: Fine-tuned model from job ${params.jobId}
+model: ${containerModelPath}
+container: vllm-node
+solo_only: true
+
+defaults:
+  port: ${port}
+  host: 0.0.0.0
+  gpu_memory_utilization: ${gpuMem}
+  max_model_len: ${maxLen}
+
+command: |
+  vllm serve ${containerModelPath} \\
+    --host {host} \\
+    --port {port} \\
+    --max-model-len {max_model_len} \\
+    --gpu-memory-utilization {gpu_memory_utilization} \\
+    --dtype auto
+`;
+
+  mkdirSync(join(VLLM_REPO_PATH, "recipes"), { recursive: true });
+  writeFileSync(fullPath, yaml, "utf-8");
+  console.log(`Generated vLLM recipe: ${fullPath}`);
+  return recipeFile;
+}
 
 /**
  * Launch a vLLM inference server using a spark-vllm-docker recipe.

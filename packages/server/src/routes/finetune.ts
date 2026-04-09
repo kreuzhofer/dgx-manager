@@ -111,3 +111,84 @@ finetuneRouter.post("/:id/stop", async (req, res) => {
 
   res.json({ status: "stopping" });
 });
+
+finetuneRouter.post("/:id/merge", async (req, res) => {
+  const job = await prisma.fineTuneJob.findUnique({ where: { id: req.params.id } });
+  if (!job) return res.status(404).json({ error: "Job not found" });
+  if (job.status !== "completed") return res.status(400).json({ error: "Job must be completed before merging" });
+
+  const agentHub: AgentHub = req.app.get("agentHub");
+  const mergedOutputDir = `/mnt/tank/outputs/${job.id}/merged`;
+
+  agentHub.sendToAgent(job.nodeId, {
+    type: "cmd:finetune:merge",
+    payload: {
+      jobId: job.id,
+      baseModel: job.baseModel,
+      adapterPath: job.outputDir ? `${job.outputDir}/lora_adapter` : job.outputPath!,
+      mergedOutputDir,
+    },
+  });
+
+  await prisma.fineTuneJob.update({
+    where: { id: job.id },
+    data: { mergeStatus: "running" },
+  });
+
+  res.json({ status: "merging", mergedOutputDir });
+});
+
+finetuneRouter.post("/:id/deploy", async (req, res) => {
+  const job = await prisma.fineTuneJob.findUnique({
+    where: { id: req.params.id },
+    include: { node: true },
+  });
+  if (!job) return res.status(404).json({ error: "Job not found" });
+
+  const { nodeId, config } = req.body;
+  const targetNodeId = nodeId || job.nodeId;
+
+  // Determine model path — use merged if available, otherwise adapter
+  const modelPath = job.mergedPath || (job.outputDir ? `${job.outputDir}/merged` : null);
+  if (!modelPath || job.mergeStatus !== "completed") {
+    return res.status(400).json({ error: "Model must be merged before deployment. Call POST /merge first." });
+  }
+
+  // Create a deployment record
+  const model = await prisma.model.upsert({
+    where: { name: `finetune-${job.id.slice(0, 8)}` },
+    create: { name: `finetune-${job.id.slice(0, 8)}`, runtime: "vllm" },
+    update: {},
+  });
+
+  const deployment = await prisma.deployment.create({
+    data: {
+      nodeId: targetNodeId,
+      modelId: model.id,
+      status: "pending",
+      config: JSON.stringify({ ...config, localModelPath: modelPath }),
+    },
+  });
+
+  await prisma.fineTuneJob.update({
+    where: { id: job.id },
+    data: { deploymentId: deployment.id },
+  });
+
+  const agentHub: AgentHub = req.app.get("agentHub");
+  agentHub.sendToAgent(targetNodeId, {
+    type: "cmd:finetune:deploy",
+    payload: {
+      jobId: job.id,
+      deploymentId: deployment.id,
+      modelPath,
+      config: config || {},
+    },
+  });
+
+  const result = await prisma.deployment.findUnique({
+    where: { id: deployment.id },
+    include: { node: true, model: true },
+  });
+  res.status(201).json(result);
+});
