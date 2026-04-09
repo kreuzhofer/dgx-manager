@@ -90,6 +90,15 @@ export default function FinetunePage() {
     etaSeconds?: number;
   }>>({});
 
+  // Per-job training metrics for loss curve
+  const [jobMetrics, setJobMetrics] = useState<Record<string, {
+    steps: number[];
+    losses: number[];
+    lrs: number[];
+    evalLosses: (number | null)[];
+    loaded: boolean;
+  }>>({});
+
   const loadData = useCallback(() => {
     Promise.all([
       apiFetch<TrainingRecipe[]>("/api/training-recipes"),
@@ -101,6 +110,27 @@ export default function FinetunePage() {
         setIdleNodes(n);
         if (n.length > 0 && !selectedNode) setSelectedNode(n[0].id);
         setJobs(j);
+        // Load metrics for active/completed jobs
+        for (const job of j) {
+          if (["starting", "running", "completed"].includes(job.status)) {
+            apiFetch<{ step: number; loss: number; lr: number | null; evalLoss: number | null }[]>(`/api/finetune/${job.id}/metrics`)
+              .then(metrics => {
+                if (metrics.length > 0) {
+                  setJobMetrics(prev => ({
+                    ...prev,
+                    [job.id]: {
+                      steps: metrics.map(m => m.step),
+                      losses: metrics.map(m => m.loss),
+                      lrs: metrics.map(m => m.lr ?? 0),
+                      evalLosses: metrics.map(m => m.evalLoss),
+                      loaded: true,
+                    },
+                  }));
+                }
+              })
+              .catch(() => {});
+          }
+        }
       })
       .catch(console.error)
       .finally(() => setLoading(false));
@@ -110,8 +140,8 @@ export default function FinetunePage() {
 
   const handleSSE = useCallback((event: SseEvent) => {
     if (event.type === "finetune:log") {
-      const { jobId, phase, phaseProgress, step, totalSteps, loss, etaSeconds, log } = event.payload as {
-        jobId: string; phase?: string; phaseProgress?: number; step?: number; totalSteps?: number; loss?: number; etaSeconds?: number; log?: string;
+      const { jobId, phase, phaseProgress, step, totalSteps, loss, lr, evalLoss, etaSeconds, log } = event.payload as {
+        jobId: string; phase?: string; phaseProgress?: number; step?: number; totalSteps?: number; loss?: number; lr?: number; evalLoss?: number; etaSeconds?: number; log?: string;
       };
       if (log) {
         setLogs((prev) => ({
@@ -143,6 +173,24 @@ export default function FinetunePage() {
             prev.map((j) => j.id === jobId ? { ...j, progress: phaseProgress } : j)
           );
         }
+      }
+      // Accumulate metrics for loss curve
+      if (typeof step === "number" && typeof loss === "number") {
+        setJobMetrics((prev) => {
+          const existing = prev[jobId] || { steps: [], losses: [], lrs: [], evalLosses: [], loaded: false };
+          // Avoid duplicates
+          if (existing.steps.length > 0 && existing.steps[existing.steps.length - 1] >= step) return prev;
+          return {
+            ...prev,
+            [jobId]: {
+              steps: [...existing.steps, step],
+              losses: [...existing.losses, loss],
+              lrs: [...existing.lrs, lr ?? 0],
+              evalLosses: [...existing.evalLosses, evalLoss ?? null],
+              loaded: existing.loaded,
+            },
+          };
+        });
       }
     }
     if (event.type === "finetune:status") {
@@ -645,6 +693,41 @@ export default function FinetunePage() {
                     </div>
                   </div>
                 )}
+
+                {/* Loss curve chart */}
+                {(() => {
+                  const m = jobMetrics[job.id];
+                  if (!m || m.losses.length < 2) return null;
+                  const maxLoss = Math.max(...m.losses);
+                  const minLoss = Math.min(...m.losses);
+                  const range = maxLoss - minLoss || 1;
+                  const w = 300, h = 60, pad = 2;
+                  const gw = w - pad * 2, gh = h - pad * 2;
+                  const points = m.losses.map((v, i) => {
+                    const x = pad + (i / (m.losses.length - 1)) * gw;
+                    const y = pad + gh - ((v - minLoss) / range) * gh;
+                    return `${x},${y}`;
+                  });
+                  const linePath = `M${points.join("L")}`;
+                  const areaPath = `${linePath}L${pad + gw},${pad + gh}L${pad},${pad + gh}Z`;
+                  const lastLoss = m.losses[m.losses.length - 1];
+                  return (
+                    <div className="mt-3">
+                      <div className="flex justify-between items-baseline mb-0.5">
+                        <span className="text-[10px] text-gray-500 uppercase tracking-wide">Loss Curve</span>
+                        <span className="text-xs font-mono text-gray-300">
+                          {lastLoss.toFixed(2)}
+                          <span className="text-gray-600 ml-1">({m.losses.length} points)</span>
+                        </span>
+                      </div>
+                      <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="w-full rounded" style={{ height: `${h}px` }}>
+                        <rect x={0} y={0} width={w} height={h} rx={4} fill="rgba(0,0,0,0.2)" />
+                        <path d={areaPath} fill="#22c55e" opacity={0.12} />
+                        <path d={linePath} fill="none" stroke="#22c55e" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+                      </svg>
+                    </div>
+                  );
+                })()}
 
                 {/* Output info for completed jobs */}
                 {job.status === "completed" && (

@@ -15,7 +15,7 @@ services:
     volumes:
       - dgx-data:/app/data
       - ${HOME}/.ssh:/root/.ssh:ro
-      - /mnt/tank:/mnt/tank:ro
+      - /mnt/tank:/mnt/tank
     restart: unless-stopped
 
   dashboard:

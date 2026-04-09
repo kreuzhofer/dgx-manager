@@ -115,6 +115,8 @@ interface ProgressInfo {
   step?: number;
   totalSteps?: number;
   loss?: number;
+  lr?: number;
+  evalLoss?: number;
   iterSpeed?: number; // iterations per second from tqdm
 }
 
@@ -186,18 +188,26 @@ function detectPhase(line: string): TrainingPhase | null {
  */
 function parseProgress(line: string, currentPhase: TrainingPhase): ProgressInfo | null {
   // Explicit training log from our callback: [TRAIN] step=5/50 loss=2.345 lr=0.0002
-  const trainLogMatch = line.match(/\[TRAIN\]\s+step=(\d+)\/(\d+)\s+loss=([\d.?]+)/);
+  const trainLogMatch = line.match(/\[TRAIN\]\s+step=(\d+)\/(\d+)\s+loss=([\d.eE+\-?]+)(?:\s+lr=([\d.eE+\-]+))?/);
   if (trainLogMatch) {
     const step = parseInt(trainLogMatch[1]);
     const total = parseInt(trainLogMatch[2]);
     const loss = trainLogMatch[3] !== "?" ? parseFloat(trainLogMatch[3]) : undefined;
+    const lr = trainLogMatch[4] ? parseFloat(trainLogMatch[4]) : undefined;
     return {
       phase: "training",
       step,
       totalSteps: total,
       phaseProgress: total > 0 ? step / total : 0,
       loss,
+      lr,
     };
+  }
+
+  // Eval result: [EVAL] eval_loss=11.38
+  const evalLogMatch = line.match(/\[EVAL\]\s+eval_loss=([\d.]+)/);
+  if (evalLogMatch) {
+    return { phase: "eval", evalLoss: parseFloat(evalLogMatch[1]) };
   }
 
   // Training loss dict: {'loss': '51.79', ...} or {'loss': 51.79, ...}
@@ -296,7 +306,7 @@ async function waitForReady(
 
 export interface FinetuneCallbacks {
   onLog: (line: string) => void;
-  onProgress: (phase: string, phaseProgress: number, extra?: { step?: number; totalSteps?: number; loss?: number; etaSeconds?: number }) => void;
+  onProgress: (phase: string, phaseProgress: number, extra?: { step?: number; totalSteps?: number; loss?: number; lr?: number; evalLoss?: number; etaSeconds?: number }) => void;
   onComplete: (status: "completed" | "failed" | "stopped", outputPath?: string, error?: string) => void;
 }
 
@@ -533,10 +543,12 @@ export async function startFinetuneJob(
               step: progress.step,
               totalSteps: progress.totalSteps,
               loss: progress.loss,
+              lr: progress.lr,
+              evalLoss: progress.evalLoss,
               etaSeconds,
             });
-          } else if (progress.loss !== undefined) {
-            callbacks.onProgress(progress.phase, -1, { loss: progress.loss });
+          } else if (progress.loss !== undefined || progress.evalLoss !== undefined) {
+            callbacks.onProgress(progress.phase, -1, { loss: progress.loss, lr: progress.lr, evalLoss: progress.evalLoss });
           }
         }
       }

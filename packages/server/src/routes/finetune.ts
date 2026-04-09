@@ -44,6 +44,15 @@ finetuneRouter.get("/:id/logs", async (req, res) => {
   }
 });
 
+finetuneRouter.get("/:id/metrics", async (req, res) => {
+  const metrics = await prisma.trainingMetric.findMany({
+    where: { jobId: req.params.id },
+    orderBy: { step: "asc" },
+    select: { step: true, loss: true, lr: true, evalLoss: true },
+  });
+  res.json(metrics);
+});
+
 finetuneRouter.post("/", async (req, res) => {
   const { nodeId, recipeFile, dataset, config } = req.body;
   if (!nodeId || !recipeFile || !dataset) {

@@ -116,4 +116,18 @@ model FineTuneJob {
   completedAt  DateTime?
   createdAt    DateTime  @default(now())
   node         Node      @relation(fields: [nodeId], references: [id])
+  metrics      TrainingMetric[]
+}
+
+model TrainingMetric {
+  id        String   @id @default(cuid())
+  jobId     String
+  step      Int
+  loss      Float
+  lr        Float?
+  evalLoss  Float?
+  timestamp DateTime @default(now())
+  job       FineTuneJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, step])
 }

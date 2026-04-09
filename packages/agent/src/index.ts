@@ -477,6 +477,8 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             step: extra?.step,
             totalSteps: extra?.totalSteps,
             loss: extra?.loss,
+            lr: extra?.lr,
+            evalLoss: extra?.evalLoss,
             etaSeconds: extra?.etaSeconds,
           });
         },

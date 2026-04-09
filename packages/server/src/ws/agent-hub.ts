@@ -253,7 +253,7 @@ export class AgentHub {
           }
 
           case "agent:finetune:progress": {
-            let { jobId, phase, phaseProgress, step, totalSteps, loss, etaSeconds, log } = msg.payload;
+            let { jobId, phase, phaseProgress, step, totalSteps, loss, lr, evalLoss, etaSeconds, log } = msg.payload;
             // Resolve truncated job IDs from reattached containers (12 chars → full cuid)
             if (typeof jobId === "string" && jobId.length < 20) {
               const match = await prisma.fineTuneJob.findFirst({
@@ -269,7 +269,32 @@ export class AgentHub {
                 data: { progress: phaseProgress },
               }).catch(() => {});
             }
-            sseBroadcast({ type: "finetune:log", payload: { jobId, phase, phaseProgress, step, totalSteps, loss, etaSeconds, log } });
+            // Persist training metrics for loss curve visualization
+            if (phase === "training" && typeof step === "number" && typeof loss === "number") {
+              await prisma.trainingMetric.create({
+                data: {
+                  jobId: jobId as string,
+                  step: step as number,
+                  loss: loss as number,
+                  lr: typeof lr === "number" ? lr : null,
+                },
+              }).catch(() => {});
+            }
+            // Persist eval loss
+            if (typeof evalLoss === "number" && typeof jobId === "string") {
+              // Attach eval loss to the latest metric for this job
+              const latest = await prisma.trainingMetric.findFirst({
+                where: { jobId: jobId as string },
+                orderBy: { step: "desc" },
+              });
+              if (latest) {
+                await prisma.trainingMetric.update({
+                  where: { id: latest.id },
+                  data: { evalLoss: evalLoss as number },
+                }).catch(() => {});
+              }
+            }
+            sseBroadcast({ type: "finetune:log", payload: { jobId, phase, phaseProgress, step, totalSteps, loss, lr, evalLoss, etaSeconds, log } });
             break;
           }
 
