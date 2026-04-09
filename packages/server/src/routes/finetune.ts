@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { readFileSync, existsSync } from "fs";
 import { prisma } from "../prisma.js";
 import type { AgentHub } from "../ws/agent-hub.js";
 
@@ -19,6 +20,28 @@ finetuneRouter.get("/:id", async (req, res) => {
   });
   if (!job) return res.status(404).json({ error: "Job not found" });
   res.json(job);
+});
+
+finetuneRouter.get("/:id/logs", async (req, res) => {
+  const job = await prisma.fineTuneJob.findUnique({ where: { id: req.params.id } });
+  if (!job) return res.status(404).json({ error: "Job not found" });
+
+  const logPath = `/mnt/tank/outputs/${job.id}/train.log`;
+  if (!existsSync(logPath)) {
+    return res.type("text/plain").send("");
+  }
+
+  try {
+    const content = readFileSync(logPath, "utf-8");
+    const tail = parseInt(req.query.tail as string);
+    if (tail > 0) {
+      const lines = content.split("\n");
+      return res.type("text/plain").send(lines.slice(-tail).join("\n"));
+    }
+    res.type("text/plain").send(content);
+  } catch {
+    res.type("text/plain").send("");
+  }
 });
 
 finetuneRouter.post("/", async (req, res) => {

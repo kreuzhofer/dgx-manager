@@ -540,7 +540,22 @@ export default function FinetunePage() {
                       {job.status}
                     </span>
                     <button
-                      onClick={() => setViewingLogs(viewingLogs === job.id ? null : job.id)}
+                      onClick={() => {
+                        if (viewingLogs === job.id) {
+                          setViewingLogs(null);
+                        } else {
+                          setViewingLogs(job.id);
+                          // Fetch persisted logs from file
+                          if (!logs[job.id]) {
+                            fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000"}/api/finetune/${job.id}/logs`)
+                              .then(r => r.text())
+                              .then(text => {
+                                if (text) setLogs(prev => ({ ...prev, [job.id]: text + (prev[job.id] || "") }));
+                              })
+                              .catch(() => {});
+                          }
+                        }
+                      }}
                       className="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors"
                     >
                       {viewingLogs === job.id ? "Hide Logs" : "Logs"}

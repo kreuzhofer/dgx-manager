@@ -40,21 +40,20 @@ export function reattachFinetuneJobs(
 
       console.log(`[finetune] Reattaching to running ${isMerge ? "merge" : "training"} container: ${containerName}`);
 
-      // Find the training/merge process to reattach to its stdout
-      let targetPid: string | null = null;
+      // Find the train.log or merge.log file written by lib/logging.py
+      const logFileName = isMerge ? "merge.log" : "train.log";
+      let logFilePath: string | null = null;
       try {
-        const pgrepOut = execSync(
-          `docker exec ${containerName} pgrep -f "train.py|merge.py"`,
+        const findOut = execSync(
+          `docker exec ${containerName} find /workspace/outputs -name "${logFileName}" -maxdepth 3 2>/dev/null`,
           { timeout: 5_000 }
         ).toString().trim();
-        targetPid = pgrepOut.split("\n")[0] || null;
-      } catch { /* no matching process */ }
+        logFilePath = findOut.split("\n")[0] || null;
+      } catch { /* no log file yet */ }
 
-      if (targetPid || isMerge) {
-        // Read training output via /proc/<pid>/fd/1 (docker logs can't see docker exec output)
-        const tailCmd = targetPid
-          ? ["exec", containerName, "cat", `/proc/${targetPid}/fd/1`]
-          : ["logs", "-f", "--tail", "20", containerName];
+      if (logFilePath) {
+        // tail -f the log file — reliable across agent restarts
+        const tailCmd = ["exec", containerName, "tail", "-n", "5", "-f", logFilePath];
         const logProc = spawn("docker", tailCmd, {
           stdio: ["ignore", "pipe", "pipe"],
         });
