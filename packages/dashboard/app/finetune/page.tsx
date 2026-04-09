@@ -545,15 +545,20 @@ export default function FinetunePage() {
                           setViewingLogs(null);
                         } else {
                           setViewingLogs(job.id);
-                          // Fetch persisted logs from file
-                          if (!logs[job.id]) {
-                            fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000"}/api/finetune/${job.id}/logs`)
-                              .then(r => r.text())
-                              .then(text => {
-                                if (text) setLogs(prev => ({ ...prev, [job.id]: text + (prev[job.id] || "") }));
-                              })
-                              .catch(() => {});
-                          }
+                          // Fetch persisted logs from train.log file
+                          const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+                          fetch(`${apiBase}/api/finetune/${job.id}/logs`, { cache: "no-store" })
+                            .then(r => r.text())
+                            .then(text => {
+                              if (text) {
+                                // File content is the base, SSE content appends after
+                                setLogs(prev => {
+                                  const sseContent = prev[job.id] || "";
+                                  return { ...prev, [job.id]: text + (sseContent.length > text.length ? sseContent.slice(text.length) : "") };
+                                });
+                              }
+                            })
+                            .catch(() => {});
                         }
                       }}
                       className="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors"
