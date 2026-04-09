@@ -368,9 +368,13 @@ export async function startFinetuneJob(
       }
     }
 
+    // Pre-create output dir on host
+    const hostOutputDir = outputDir.replace("/workspace/", "/mnt/tank/");
+    try { execSync(`mkdir -p "${hostOutputDir}" && chmod 777 "${hostOutputDir}"`, { timeout: 5_000 }); } catch { /* */ }
+
     callbacks.onLog(`Starting container ${containerName} with image ${recipe.container.image}...\n`);
 
-    // Build docker run command
+    // Build docker run command — run as root for pip install but output dir is pre-created
     const entrypointPath = `/workspace/src/github/dgx-manager-fine-tune-recipes/${recipeFile}/${recipe.scripts.entrypoint}`;
     const dockerArgs = [
       "run", "-d",
@@ -543,9 +547,13 @@ export async function startFinetuneJob(
 
     execProc.on("exit", (code) => {
       if (instance.aborted) {
-        // Stop was requested — don't report completion
         return;
       }
+
+      // Make output files world-readable (container runs as root)
+      try {
+        execSync(`docker exec ${containerName} chmod -R a+rw ${outputDir}`, { timeout: 30_000, stdio: "ignore" });
+      } catch { /* best effort */ }
 
       if (code === 0) {
         const adapterPath = `${outputDir}/lora_adapter`;
@@ -682,6 +690,11 @@ export async function mergeLoraAdapter(
 
     await new Promise<void>((resolve, reject) => {
       mergeProc.on("exit", (code) => {
+        // Make output files world-readable
+        try {
+          execSync(`docker exec ${containerName} chmod -R a+rw ${containerOutputDir}`, { timeout: 30_000, stdio: "ignore" });
+        } catch { /* best effort */ }
+
         if (code === 0) {
           callbacks.onProgress("saving", 1.0);
           callbacks.onComplete("completed", mergedOutputDir);

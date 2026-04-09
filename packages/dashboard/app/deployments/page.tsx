@@ -660,7 +660,22 @@ export default function DeploymentsPage() {
                     {!isWorker && (
                       <>
                         <button
-                          onClick={() => setViewingLogs(viewingLogs === d.id ? null : d.id)}
+                          onClick={() => {
+                            if (viewingLogs === d.id) {
+                              setViewingLogs(null);
+                            } else {
+                              setViewingLogs(d.id);
+                              if (!logs[d.id]) {
+                                const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+                                fetch(`${apiBase}/api/deployments/${d.id}/logs`, { cache: "no-store" })
+                                  .then(r => r.text())
+                                  .then(text => {
+                                    if (text) setLogs(prev => ({ ...prev, [d.id]: text + (prev[d.id] || "") }));
+                                  })
+                                  .catch(() => {});
+                              }
+                            }
+                          }}
                           className="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors"
                         >
                           {viewingLogs === d.id ? "Hide Logs" : "Logs"}
