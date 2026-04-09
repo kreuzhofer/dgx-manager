@@ -70,8 +70,13 @@ export default function DeploymentsPage() {
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // Fine-tune deploy params (from URL query)
+  const [finetuneModel, setFinetuneModel] = useState<string | null>(null);
+  const [finetuneJobId, setFinetuneJobId] = useState<string | null>(null);
+  const [finetuneBaseModel, setFinetuneBaseModel] = useState<string | null>(null);
+
   // Deploy form state
-  const [runtimeMode, setRuntimeMode] = useState<"vllm" | "ollama">("vllm");
+  const [runtimeMode, setRuntimeMode] = useState<"vllm" | "ollama" | "finetune">("vllm");
   const [selectedRecipe, setSelectedRecipe] = useState<string>("");
   const [ollamaModels, setOllamaModels] = useState<{ name: string; size: string; type?: string; description: string }[]>([]);
   const [selectedOllamaModel, setSelectedOllamaModel] = useState<string>("");
@@ -110,6 +115,20 @@ export default function DeploymentsPage() {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  // Parse finetune deploy params from URL
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const fm = params.get("finetuneModel");
+    const fj = params.get("finetuneJobId");
+    const fb = params.get("baseModel");
+    if (fm) {
+      setFinetuneModel(fm);
+      setFinetuneJobId(fj);
+      setFinetuneBaseModel(fb);
+      setRuntimeMode("finetune");
+    }
+  }, []);
 
   // SSE handler for real-time updates
   const handleSSE = useCallback((event: SseEvent) => {
@@ -179,7 +198,24 @@ export default function DeploymentsPage() {
     try {
       let body: Record<string, unknown>;
 
-      if (runtimeMode === "ollama") {
+      if (runtimeMode === "finetune" && finetuneJobId) {
+        if (!selectedNode) return;
+        const config: Record<string, unknown> = { port: parseInt(port) || 8000 };
+        if (gpuMem) config.gpuMem = parseFloat(gpuMem);
+        if (maxModelLen) config.maxModelLen = parseInt(maxModelLen);
+        const result = await apiFetch<Deployment>(`/api/finetune/${finetuneJobId}/deploy`, {
+          method: "POST",
+          body: JSON.stringify({ nodeId: selectedNode, config }),
+        });
+        setDeployments((prev) => [result, ...prev]);
+        setRuntimeMode("vllm");
+        setFinetuneModel(null);
+        setFinetuneJobId(null);
+        // Clear URL params
+        window.history.replaceState({}, "", "/deployments");
+        setDeploying(false);
+        return;
+      } else if (runtimeMode === "ollama") {
         if (!selectedOllamaModel || !selectedNode) return;
         const selectedModel = ollamaModels.find((m) => m.name === selectedOllamaModel);
         body = {
@@ -324,7 +360,15 @@ export default function DeploymentsPage() {
         </div>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
           <div className="md:col-span-2">
-            {runtimeMode === "vllm" ? (
+            {runtimeMode === "finetune" && finetuneModel ? (
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Fine-tuned Model</label>
+                <div className="bg-gray-800 border border-purple-700 rounded px-3 py-2 text-sm text-purple-300">
+                  {finetuneBaseModel || "Fine-tuned model"}
+                  <span className="ml-2 text-[10px] text-gray-500">{finetuneModel}</span>
+                </div>
+              </div>
+            ) : runtimeMode === "vllm" ? (
               <>
                 <label className="block text-xs text-gray-400 mb-1">Recipe</label>
                 <select
@@ -479,7 +523,7 @@ export default function DeploymentsPage() {
         <div className="mt-4 flex justify-end">
           <button
             type="submit"
-            disabled={deploying || (runtimeMode === "vllm" ? (!selectedRecipe || !canDeploy) : (!selectedOllamaModel || !selectedNode))}
+            disabled={deploying || (runtimeMode === "finetune" ? !selectedNode : runtimeMode === "vllm" ? (!selectedRecipe || !canDeploy) : (!selectedOllamaModel || !selectedNode))}
             className="bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-5 py-2 rounded text-sm font-medium transition-colors"
           >
             {deploying ? "Deploying..." : "Deploy"}

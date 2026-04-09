@@ -17,6 +17,97 @@ interface FinetuneInstance {
 
 const running = new Map<string, FinetuneInstance>();
 
+/**
+ * Check for running finetune containers after agent restart.
+ * Reattaches log streaming so progress continues to flow to the dashboard.
+ */
+export function reattachFinetuneJobs(
+  sendMsg: (type: string, payload: Record<string, unknown>) => void
+): void {
+  try {
+    const output = execSync(
+      'docker ps --format "{{.Names}}" --filter "name=dgx-finetune-" --filter "name=dgx-merge-"',
+      { timeout: 10_000 }
+    ).toString().trim();
+
+    if (!output) return;
+
+    for (const containerName of output.split("\n")) {
+      // Extract jobId prefix from container name: dgx-finetune-{jobId12chars} or dgx-merge-{jobId12chars}
+      const isMerge = containerName.startsWith("dgx-merge-");
+      const jobIdPrefix = containerName.replace("dgx-finetune-", "").replace("dgx-merge-", "");
+      if (!jobIdPrefix) continue;
+
+      console.log(`[finetune] Reattaching to running ${isMerge ? "merge" : "training"} container: ${containerName}`);
+
+      // Find the training/merge process to reattach to its stdout
+      let targetPid: string | null = null;
+      try {
+        const pgrepOut = execSync(
+          `docker exec ${containerName} pgrep -f "train.py|merge.py"`,
+          { timeout: 5_000 }
+        ).toString().trim();
+        targetPid = pgrepOut.split("\n")[0] || null;
+      } catch { /* no matching process */ }
+
+      if (targetPid || isMerge) {
+        // Read training output via /proc/<pid>/fd/1 (docker logs can't see docker exec output)
+        const tailCmd = targetPid
+          ? ["exec", containerName, "cat", `/proc/${targetPid}/fd/1`]
+          : ["logs", "-f", "--tail", "20", containerName];
+        const logProc = spawn("docker", tailCmd, {
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+
+        const msgType = isMerge ? "agent:finetune:merge-progress" : "agent:finetune:progress";
+        const speedSmoother = new SpeedSmoother(20);
+        let currentPhase: TrainingPhase = isMerge ? "loading" : "training";
+
+        const handleReattach = (data: Buffer) => {
+          const text = data.toString();
+          sendMsg(msgType, { jobId: jobIdPrefix, log: text });
+
+          for (const line of text.split(/[\n\r]+/)) {
+            if (!line.trim()) continue;
+            const newPhase = detectPhase(line);
+            if (newPhase && newPhase !== currentPhase) {
+              currentPhase = newPhase;
+              sendMsg(msgType, { jobId: jobIdPrefix, phase: currentPhase, phaseProgress: 0 });
+            }
+            const progress = parseProgress(line, currentPhase);
+            if (progress) {
+              currentPhase = progress.phase;
+              if (progress.iterSpeed) speedSmoother.push(progress.iterSpeed);
+              if (progress.phaseProgress !== undefined) {
+                const etaSeconds = progress.step != null && progress.totalSteps != null
+                  ? speedSmoother.eta(progress.totalSteps - progress.step)
+                  : undefined;
+                sendMsg(msgType, {
+                  jobId: jobIdPrefix, phase: progress.phase, phaseProgress: progress.phaseProgress,
+                  step: progress.step, totalSteps: progress.totalSteps, loss: progress.loss, etaSeconds,
+                });
+              } else if (progress.loss !== undefined) {
+                sendMsg(msgType, { jobId: jobIdPrefix, phase: progress.phase, phaseProgress: -1, loss: progress.loss });
+              }
+            }
+          }
+        };
+
+        logProc.stdout?.on("data", handleReattach);
+        logProc.stderr?.on("data", handleReattach);
+
+        logProc.on("exit", () => {
+          console.log(`[finetune] Log stream ended for ${containerName}`);
+        });
+
+        running.set(jobIdPrefix, { jobId: jobIdPrefix, containerName, execProcess: logProc, aborted: false });
+      }
+    }
+  } catch (err) {
+    console.error("[finetune] Error reattaching:", err);
+  }
+}
+
 type TrainingPhase = "container" | "setup" | "downloading" | "loading" | "tokenizing" | "training" | "eval" | "saving";
 
 interface ProgressInfo {
@@ -548,20 +639,23 @@ export async function mergeLoraAdapter(
     }
     dockerArgs.push(
       "-v", "/mnt/tank:/workspace",
-      "--entrypoint", "bash",
+      "--entrypoint", "sleep",
       containerImage,
-      "-c", "pip install -q peft transformers accelerate safetensors && touch /tmp/.ready && sleep infinity"
+      "infinity"
     );
 
     execSync(`docker ${dockerArgs.join(" ")}`, { timeout: 120_000 });
 
-    // Wait for deps install
-    const ready = await waitForReady(containerName, 300_000, callbacks.onLog);
-    if (!ready) {
-      callbacks.onComplete("failed", undefined, "Merge container setup timed out");
+    // Install merge deps
+    callbacks.onLog("Installing merge dependencies...\n");
+    try {
+      execSync(`docker exec ${containerName} pip install -q peft transformers accelerate safetensors`, { timeout: 300_000, stdio: "ignore" });
+    } catch (err) {
+      callbacks.onComplete("failed", undefined, `Failed to install merge deps: ${err}`);
       try { execSync(`docker rm -f ${containerName}`, { timeout: 15_000, stdio: "ignore" }); } catch { /* */ }
       return;
     }
+    callbacks.onLog("Dependencies installed.\n");
 
     callbacks.onLog(`\nRunning merge: ${baseModel} + ${containerAdapterPath} → ${containerOutputDir}\n\n`);
 

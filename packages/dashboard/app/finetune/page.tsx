@@ -265,16 +265,14 @@ export default function FinetunePage() {
     } catch (err) { alert(String(err)); }
   };
 
-  const deployJob = async (id: string) => {
-    try {
-      await apiFetch(`/api/finetune/${id}/deploy`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      setJobs((prev) =>
-        prev.map((j) => j.id === id ? { ...j, deploymentId: "pending" } : j)
-      );
-    } catch (err) { alert(String(err)); }
+  const deployJob = (job: FineTuneJob) => {
+    const modelPath = job.mergedPath || `${job.outputDir}/merged`;
+    const params = new URLSearchParams({
+      finetuneModel: modelPath,
+      finetuneJobId: job.id,
+      baseModel: job.baseModel,
+    });
+    window.location.href = `/deployments?${params.toString()}`;
   };
 
   const formatEta = (seconds: number | undefined) => {
@@ -560,7 +558,7 @@ export default function FinetunePage() {
                         Stop
                       </button>
                     )}
-                    {job.status === "completed" && !job.mergeStatus && (
+                    {job.status === "completed" && (!job.mergeStatus || job.mergeStatus === "failed") && (
                       <button
                         onClick={() => mergeJob(job.id)}
                         className="text-xs px-2 py-1 rounded bg-blue-900/50 hover:bg-blue-800 text-blue-300 transition-colors"
@@ -573,21 +571,13 @@ export default function FinetunePage() {
                         Merging...
                       </span>
                     )}
-                    {job.mergeStatus === "completed" && !job.deploymentId && (
+                    {job.mergeStatus === "completed" && (
                       <button
-                        onClick={() => deployJob(job.id)}
+                        onClick={() => deployJob(job)}
                         className="text-xs px-2 py-1 rounded bg-green-900/50 hover:bg-green-800 text-green-300 transition-colors"
                       >
                         Deploy
                       </button>
-                    )}
-                    {job.deploymentId && (
-                      <a
-                        href="/deployments"
-                        className="text-xs px-2 py-1 rounded bg-green-900/30 text-green-400 transition-colors hover:bg-green-800"
-                      >
-                        View Deployment
-                      </a>
                     )}
                     {!isActive && !isStopping && (
                       <button

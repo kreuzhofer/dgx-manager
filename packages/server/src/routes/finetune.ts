@@ -175,14 +175,26 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
     data: { deploymentId: deployment.id },
   });
 
+  // Look up the training recipe's deploy config for container/defaults
   const agentHub: AgentHub = req.app.get("agentHub");
+  const trainingRecipe = job.recipeFile
+    ? agentHub.getTrainingRecipes().find((r) => r.file === job.recipeFile)
+    : undefined;
+  const deployConfig = trainingRecipe?.deploy;
+
   agentHub.sendToAgent(targetNodeId, {
     type: "cmd:finetune:deploy",
     payload: {
       jobId: job.id,
       deploymentId: deployment.id,
       modelPath,
-      config: config || {},
+      baseModel: job.baseModel,
+      deployContainer: deployConfig?.container || "vllm-node",
+      config: {
+        gpuMem: deployConfig?.gpu_memory_utilization,
+        maxModelLen: deployConfig?.max_model_len,
+        ...config,
+      },
     },
   });
 

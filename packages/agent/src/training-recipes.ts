@@ -25,6 +25,7 @@ export interface TrainingRecipe {
   };
   defaults: Record<string, unknown>;
   hardware: { min_nodes: number; gpus_per_node: number; vram_estimate_mb: number };
+  deploy?: { container: string; gpu_memory_utilization?: number; max_model_len?: number };
 }
 
 /** Ensure the training recipes repo is cloned locally. */
@@ -172,6 +173,11 @@ export function discoverTrainingRecipes(): TrainingRecipe[] {
           gpus_per_node: (hardware.gpus_per_node as number) || 1,
           vram_estimate_mb: (hardware.vram_estimate_mb as number) || 0,
         },
+        deploy: parsed.deploy ? {
+          container: ((parsed.deploy as Record<string, unknown>).container as string) || "vllm-node",
+          gpu_memory_utilization: (parsed.deploy as Record<string, unknown>).gpu_memory_utilization as number | undefined,
+          max_model_len: (parsed.deploy as Record<string, unknown>).max_model_len as number | undefined,
+        } : undefined,
       });
     } catch (err) {
       console.error(`Failed to parse training recipe ${entry.name}:`, err);

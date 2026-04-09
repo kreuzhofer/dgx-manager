@@ -7,7 +7,7 @@ import { discoverRecipes } from "./recipes.js";
 import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, isStopping, getTrackedDeployments, reattachLogs, generateLocalModelRecipe } from "./runtime/vllm.js";
 import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth, getOllamaModels } from "./runtime/ollama.js";
 import { discoverTrainingRecipes } from "./training-recipes.js";
-import { startFinetuneJob, stopFinetuneJob, mergeLoraAdapter } from "./runtime/finetune.js";
+import { startFinetuneJob, stopFinetuneJob, mergeLoraAdapter, reattachFinetuneJobs } from "./runtime/finetune.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_VERSION: string = JSON.parse(
@@ -75,6 +75,9 @@ function connect() {
       // as it may be part of an active cluster deployment.
       console.log("Found vLLM container with no local tracking — may be a cluster worker, leaving it running");
     }
+
+    // Reattach to any running finetune containers (survives agent restart)
+    reattachFinetuneJobs(sendMsg);
 
     // Discover and report available vLLM recipes
     const recipes = discoverRecipes();
@@ -528,15 +531,16 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
     }
 
     case "cmd:finetune:deploy": {
-      const { jobId, deploymentId, modelPath, config } = msg.payload as {
-        jobId: string; deploymentId: string; modelPath: string; config?: Record<string, unknown>;
+      const { jobId, deploymentId, modelPath, deployContainer, config } = msg.payload as {
+        jobId: string; deploymentId: string; modelPath: string; deployContainer?: string; config?: Record<string, unknown>;
       };
 
-      console.log(`[finetune] Deploying merged model from ${modelPath}`);
+      console.log(`[finetune] Deploying merged model from ${modelPath} (container: ${deployContainer})`);
       try {
         const recipeFile = generateLocalModelRecipe({
           jobId,
           modelPath,
+          container: deployContainer || "vllm-node",
           port: (config?.port as number) ?? 8000,
           gpuMemoryUtilization: (config?.gpuMem as number) ?? 0.85,
           maxModelLen: (config?.maxModelLen as number) ?? 4096,
@@ -547,7 +551,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         launchRecipe(
           deploymentId,
           recipeFile,
-          { port: (config?.port as number) ?? 8000 },
+          { port: (config?.port as number) ?? 8000, skipSetup: true },
           (line) => {
             sendMsg("agent:deployment:log", { deploymentId, log: line });
             const phase = detectPhase(line);

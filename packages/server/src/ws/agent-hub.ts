@@ -32,6 +32,7 @@ export interface TrainingRecipe {
   scripts: { entrypoint: string; train: string; launch: string; ds_config?: string };
   defaults: Record<string, unknown>;
   hardware: { min_nodes: number; gpus_per_node: number; vram_estimate_mb: number };
+  deploy?: { container: string; gpu_memory_utilization?: number; max_model_len?: number };
 }
 
 interface AgentConnection {
@@ -245,13 +246,21 @@ export class AgentHub {
           }
 
           case "agent:finetune:progress": {
-            const { jobId, phase, phaseProgress, step, totalSteps, loss, etaSeconds, log } = msg.payload;
+            let { jobId, phase, phaseProgress, step, totalSteps, loss, etaSeconds, log } = msg.payload;
+            // Resolve truncated job IDs from reattached containers (12 chars → full cuid)
+            if (typeof jobId === "string" && jobId.length < 20) {
+              const match = await prisma.fineTuneJob.findFirst({
+                where: { id: { startsWith: jobId as string } },
+                select: { id: true },
+              });
+              if (match) jobId = match.id;
+            }
             // Persist training progress to DB
             if (phase === "training" && typeof phaseProgress === "number" && phaseProgress > 0) {
               await prisma.fineTuneJob.update({
                 where: { id: jobId },
                 data: { progress: phaseProgress },
-              });
+              }).catch(() => {});
             }
             sseBroadcast({ type: "finetune:log", payload: { jobId, phase, phaseProgress, step, totalSteps, loss, etaSeconds, log } });
             break;

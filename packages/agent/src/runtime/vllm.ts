@@ -40,6 +40,7 @@ const running = new Map<string, VllmInstance>();
 export function generateLocalModelRecipe(params: {
   jobId: string;
   modelPath: string;      // host NFS path (e.g., /mnt/tank/outputs/job123/merged)
+  container?: string;     // vLLM container name (from training recipe deploy config)
   port?: number;
   gpuMemoryUtilization?: number;
   maxModelLen?: number;
@@ -47,18 +48,22 @@ export function generateLocalModelRecipe(params: {
   const recipeName = `finetune-${params.jobId.slice(0, 12)}`;
   const recipeFile = `recipes/${recipeName}.yaml`;
   const fullPath = join(VLLM_REPO_PATH, recipeFile);
+
+  // launch-cluster.sh mounts /mnt/tank:/workspace, so translate host path to container path
   const containerModelPath = params.modelPath.replace("/mnt/tank/", "/workspace/");
 
   const port = params.port ?? 8000;
   const gpuMem = params.gpuMemoryUtilization ?? 0.85;
   const maxLen = params.maxModelLen ?? 4096;
 
+  const container = params.container || "vllm-node";
+
   const yaml = `# Auto-generated recipe for fine-tuned model
 recipe_version: "1"
 name: ${recipeName}
 description: Fine-tuned model from job ${params.jobId}
 model: ${containerModelPath}
-container: vllm-node
+container: ${container}
 solo_only: true
 
 defaults:
@@ -88,7 +93,7 @@ command: |
 export function launchRecipe(
   deploymentId: string,
   recipeFile: string,
-  options?: { port?: number; gpuMem?: number; maxModelLen?: number; tensorParallel?: number; pipelineParallel?: number; clusterNodes?: string[] },
+  options?: { port?: number; gpuMem?: number; maxModelLen?: number; tensorParallel?: number; pipelineParallel?: number; clusterNodes?: string[]; skipSetup?: boolean },
   onLog?: (line: string) => void,
   onExit?: (code: number | null) => void
 ): number {
@@ -109,9 +114,11 @@ export function launchRecipe(
   const args = [recipeName];
 
   if (isCluster) {
-    args.push("-n", options!.clusterNodes!.join(","), "--setup");
+    args.push("-n", options!.clusterNodes!.join(","));
+    if (!options?.skipSetup) args.push("--setup");
   } else {
-    args.push("--solo", "--setup");
+    args.push("--solo");
+    if (!options?.skipSetup) args.push("--setup");
   }
 
   if (options?.port) args.push("--port", String(options.port));
