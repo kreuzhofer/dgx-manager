@@ -4,9 +4,11 @@ import { join } from "path";
 
 const TRAINING_REPO_URL =
   "https://github.com/kreuzhofer/dgx-manager-fine-tune-recipes.git";
+import { SHARED_STORAGE } from "./env.js";
+
 const TRAINING_REPO_PATH =
   process.env.TRAINING_REPO_PATH ||
-  "/mnt/tank/src/github/dgx-manager-fine-tune-recipes";
+  `${SHARED_STORAGE}/src/github/dgx-manager-fine-tune-recipes`;
 
 export interface TrainingRecipe {
   file: string; // relative dir path (e.g., "recipes/gemma4-e2b-lora")

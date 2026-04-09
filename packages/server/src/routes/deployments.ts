@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { readFileSync, existsSync } from "fs";
 import { prisma } from "../prisma.js";
+import { SHARED_STORAGE } from "../env.js";
 import type { AgentHub } from "../ws/agent-hub.js";
 
 export const deploymentsRouter = Router();
@@ -18,7 +19,7 @@ deploymentsRouter.get("/", async (_req, res) => {
 });
 
 deploymentsRouter.get("/:id/logs", async (req, res) => {
-  const logPath = `/mnt/tank/logs/deployments/${req.params.id}.log`;
+  const logPath = `${SHARED_STORAGE}/logs/deployments/${req.params.id}.log`;
   if (!existsSync(logPath)) {
     return res.type("text/plain").send("");
   }

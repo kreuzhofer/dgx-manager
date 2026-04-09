@@ -1,4 +1,5 @@
 import { sshExec, SshResult } from "./executor.js";
+import { SHARED_STORAGE } from "../env.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 
 export interface PrereqCheck {
@@ -96,10 +97,10 @@ export async function auditNode(host: string, nodeId?: string): Promise<Provisio
       }),
     },
     {
-      name: "NFS /mnt/tank",
-      cmd: "mountpoint -q /mnt/tank && echo mounted",
+      name: `NFS ${SHARED_STORAGE}`,
+      cmd: `mountpoint -q ${SHARED_STORAGE} && echo mounted`,
       eval: (r) => ({
-        name: "NFS /mnt/tank",
+        name: `NFS ${SHARED_STORAGE}`,
         status: r.stdout.includes("mounted") ? "green" : "red",
         detail: r.stdout.includes("mounted") ? "Mounted" : "Not mounted — configure NFS manually",
       }),
@@ -162,7 +163,7 @@ export async function provisionNode(host: string, checks: PrereqCheck[], nodeId?
           "curl -fsSL https://ollama.ai/install.sh | sh",
           // Ensure systemd service exists with OLLAMA_MODELS on NFS
           "sudo mkdir -p /etc/systemd/system/ollama.service.d",
-          `echo -e '[Service]\\nUser=${process.env.SSH_USER || "ubuntu"}\\nEnvironment=HOME=/home/${process.env.SSH_USER || "ubuntu"}\\nEnvironment=OLLAMA_MODELS=/mnt/tank/models/ollama\\nEnvironment=OLLAMA_HOST=0.0.0.0\\nEnvironment=OLLAMA_MAX_LOADED_MODELS=0' | sudo tee /etc/systemd/system/ollama.service.d/override.conf`,
+          `echo -e '[Service]\\nUser=${process.env.SSH_USER || "ubuntu"}\\nEnvironment=HOME=/home/${process.env.SSH_USER || "ubuntu"}\\nEnvironment=OLLAMA_MODELS=${SHARED_STORAGE}/models/ollama\\nEnvironment=OLLAMA_HOST=0.0.0.0\\nEnvironment=OLLAMA_MAX_LOADED_MODELS=0' | sudo tee /etc/systemd/system/ollama.service.d/override.conf`,
           "sudo systemctl daemon-reload",
           "sudo systemctl enable ollama",
           "sudo systemctl restart ollama",

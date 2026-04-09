@@ -1,10 +1,11 @@
 import { execSync, spawn, ChildProcess } from "child_process";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
+import { SHARED_STORAGE, WORKSPACE } from "../env.js";
 import { saveDeployment, removeDeployment, loadDeployments, clearDeployments, type TrackedDeployment } from "./deployment-store.js";
 
 const VLLM_REPO_PATH =
-  process.env.VLLM_REPO_PATH || "/mnt/tank/src/github/spark-vllm-docker";
+  process.env.VLLM_REPO_PATH || `${SHARED_STORAGE}/src/github/spark-vllm-docker`;
 const SSH_USER = process.env.SSH_USER || process.env.USER || "daniel";
 
 export interface VllmStatus {
@@ -39,7 +40,7 @@ const running = new Map<string, VllmInstance>();
  */
 export function generateLocalModelRecipe(params: {
   jobId: string;
-  modelPath: string;      // host NFS path (e.g., /mnt/tank/outputs/job123/merged)
+  modelPath: string;      // host path (e.g., ${SHARED_STORAGE}/outputs/job123/merged)
   container?: string;     // vLLM container name (from training recipe deploy config)
   port?: number;
   gpuMemoryUtilization?: number;
@@ -49,8 +50,8 @@ export function generateLocalModelRecipe(params: {
   const recipeFile = `recipes/${recipeName}.yaml`;
   const fullPath = join(VLLM_REPO_PATH, recipeFile);
 
-  // launch-cluster.sh mounts /mnt/tank:/workspace, so translate host path to container path
-  const containerModelPath = params.modelPath.replace("/mnt/tank/", "/workspace/");
+  // launch-cluster.sh mounts ${SHARED_STORAGE}:/workspace, so translate host path to container path
+  const containerModelPath = params.modelPath.replace(`${SHARED_STORAGE}/`, `${WORKSPACE}/`);
 
   const port = params.port ?? 8000;
   const gpuMem = params.gpuMemoryUtilization ?? 0.85;
@@ -145,7 +146,7 @@ export function launchRecipe(
 
   // For cluster mode, set LOCAL_IP so launch-cluster.sh finds the head node
   const extraEnv: Record<string, string> = {
-    HF_HOME: process.env.HF_HOME || "/mnt/tank/models",
+    HF_HOME: process.env.HF_HOME || `${SHARED_STORAGE}/models`,
   };
   if (isCluster && options!.clusterNodes![0]) {
     extraEnv.LOCAL_IP = options!.clusterNodes![0];

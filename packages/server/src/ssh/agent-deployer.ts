@@ -1,9 +1,10 @@
 import { sshExec } from "./executor.js";
+import { SHARED_STORAGE } from "../env.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 
 const NFS_AGENT_PATH =
   process.env.AGENT_SOURCE_PATH ||
-  "/mnt/tank/src/github/dgx-manager/packages/agent";
+  `${SHARED_STORAGE}/src/github/dgx-manager/packages/agent`;
 
 const AGENT_SERVICE = `[Unit]
 Description=DGX Manager Agent
@@ -17,10 +18,11 @@ Restart=always
 RestartSec=5
 Environment=MANAGER_URL=ws://%MANAGER_HOST%:%MANAGER_PORT%/ws/agent
 Environment=NODE_ID=%NODE_ID%
-Environment=HF_HOME=/mnt/tank/models
+Environment=SHARED_STORAGE_PATH=%SHARED_STORAGE%
+Environment=HF_HOME=%SHARED_STORAGE%/models
 Environment=HF_TOKEN=%HF_TOKEN%
-Environment=OLLAMA_MODELS=/mnt/tank/models/ollama
-Environment=VLLM_REPO_PATH=/mnt/tank/src/github/spark-vllm-docker
+Environment=OLLAMA_MODELS=%SHARED_STORAGE%/models/ollama
+Environment=VLLM_REPO_PATH=%SHARED_STORAGE%/src/github/spark-vllm-docker
 Environment=HOME=/home/%SSH_USER%
 Environment=PATH=/home/%SSH_USER%/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -72,7 +74,8 @@ export async function deployAgent(
     .replace(/%MANAGER_PORT%/g, String(managerPort))
     .replace(/%NODE_ID%/g, nodeId)
     .replace(/%SSH_USER%/g, sshUser)
-    .replace(/%HF_TOKEN%/g, process.env.HF_TOKEN || "");
+    .replace(/%HF_TOKEN%/g, process.env.HF_TOKEN || "")
+    .replace(/%SHARED_STORAGE%/g, SHARED_STORAGE);
 
   const writeService = await sshExec(
     host,

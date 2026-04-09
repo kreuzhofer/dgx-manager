@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { readFileSync, existsSync } from "fs";
 import { prisma } from "../prisma.js";
+import { SHARED_STORAGE } from "../env.js";
 import type { AgentHub } from "../ws/agent-hub.js";
 
 export const finetuneRouter = Router();
@@ -26,7 +27,7 @@ finetuneRouter.get("/:id/logs", async (req, res) => {
   const job = await prisma.fineTuneJob.findUnique({ where: { id: req.params.id } });
   if (!job) return res.status(404).json({ error: "Job not found" });
 
-  const logPath = `/mnt/tank/outputs/${job.id}/train.log`;
+  const logPath = `${SHARED_STORAGE}/outputs/${job.id}/train.log`;
   if (!existsSync(logPath)) {
     return res.type("text/plain").send("");
   }
@@ -80,7 +81,7 @@ finetuneRouter.post("/", async (req, res) => {
   });
 
   // Set outputDir with the actual job ID
-  const outputDir = `/mnt/tank/outputs/${job.id}`;
+  const outputDir = `${SHARED_STORAGE}/outputs/${job.id}`;
   await prisma.fineTuneJob.update({
     where: { id: job.id },
     data: { outputDir },
@@ -150,7 +151,7 @@ finetuneRouter.post("/:id/merge", async (req, res) => {
   if (job.status !== "completed") return res.status(400).json({ error: "Job must be completed before merging" });
 
   const agentHub: AgentHub = req.app.get("agentHub");
-  const mergedOutputDir = `/mnt/tank/outputs/${job.id}/merged`;
+  const mergedOutputDir = `${SHARED_STORAGE}/outputs/${job.id}/merged`;
 
   agentHub.sendToAgent(job.nodeId, {
     type: "cmd:finetune:merge",

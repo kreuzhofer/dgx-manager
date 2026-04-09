@@ -3,8 +3,10 @@ import { existsSync, readdirSync, readFileSync } from "fs";
 import { join, basename } from "path";
 
 const VLLM_REPO_URL = "https://github.com/kreuzhofer/spark-vllm-docker.git";
+import { SHARED_STORAGE } from "./env.js";
+
 const VLLM_REPO_PATH =
-  process.env.VLLM_REPO_PATH || "/mnt/tank/src/github/spark-vllm-docker";
+  process.env.VLLM_REPO_PATH || `${SHARED_STORAGE}/src/github/spark-vllm-docker`;
 
 export interface Recipe {
   file: string;

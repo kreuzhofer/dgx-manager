@@ -12,10 +12,11 @@ services:
       - MANAGER_ADVERTISE_HOST=${MANAGER_ADVERTISE_HOST:-192.168.44.36}
       - SSH_USER=${SSH_USER:-daniel}
       - HF_TOKEN=${HF_TOKEN:-}
+      - SHARED_STORAGE_PATH=${SHARED_STORAGE_PATH:-/mnt/tank}
     volumes:
       - dgx-data:/app/data
       - ${HOME}/.ssh:/root/.ssh:ro
-      - /mnt/tank:/mnt/tank
+      - ${SHARED_STORAGE_PATH:-/mnt/tank}:${SHARED_STORAGE_PATH:-/mnt/tank}
     restart: unless-stopped
 
   dashboard:

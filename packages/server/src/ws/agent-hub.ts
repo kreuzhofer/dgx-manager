@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { appendFileSync, mkdirSync } from "fs";
 import { prisma } from "../prisma.js";
+import { SHARED_STORAGE } from "../env.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import { metricsBuffer } from "../metrics-buffer.js";
 
@@ -244,7 +245,7 @@ export class AgentHub {
             const { deploymentId, log } = msg.payload;
             // Persist deployment logs to file
             try {
-              const logDir = "/mnt/tank/logs/deployments";
+              const logDir = `${SHARED_STORAGE}/logs/deployments`;
               mkdirSync(logDir, { recursive: true, mode: 0o777 });
               appendFileSync(`${logDir}/${deploymentId}.log`, log as string, { mode: 0o666 });
             } catch { /* best effort — NFS may not be mounted in dev */ }

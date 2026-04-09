@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 echo "Building agent..."
 npx tsc -p packages/agent/tsconfig.json
 
-NFS_TARGET="/mnt/tank/src/github/dgx-manager/packages/agent"
+NFS_TARGET="${SHARED_STORAGE_PATH:-/mnt/tank}/src/github/dgx-manager/packages/agent"
 echo "Syncing to NFS ($NFS_TARGET)..."
 rsync -a packages/agent/dist/ "$NFS_TARGET/dist/"
 cp packages/agent/package.json "$NFS_TARGET/package.json"

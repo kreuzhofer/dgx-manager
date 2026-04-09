@@ -6,6 +6,7 @@
 import { spawn, execSync, ChildProcess } from "child_process";
 import { existsSync } from "fs";
 import { join } from "path";
+import { SHARED_STORAGE, WORKSPACE, toContainerPath, toHostPath } from "../env.js";
 import { getTrainingRepoPath, type TrainingRecipe } from "../training-recipes.js";
 
 interface FinetuneInstance {
@@ -379,7 +380,7 @@ export async function startFinetuneJob(
     }
 
     // Pre-create output dir on host
-    const hostOutputDir = outputDir.replace("/workspace/", "/mnt/tank/");
+    const hostOutputDir = toHostPath(outputDir);
     try { execSync(`mkdir -p "${hostOutputDir}" && chmod 777 "${hostOutputDir}"`, { timeout: 5_000 }); } catch { /* */ }
 
     callbacks.onLog(`Starting container ${containerName} with image ${recipe.container.image}...\n`);
@@ -416,7 +417,7 @@ export async function startFinetuneJob(
     } catch { /* no IB */ }
 
     dockerArgs.push(
-      "-v", "/mnt/tank:/workspace",
+      "-v", `${SHARED_STORAGE}:${WORKSPACE}`,
       "--entrypoint", "bash",
       recipe.container.image,
       entrypointPath
@@ -449,10 +450,10 @@ export async function startFinetuneJob(
       return;
     }
 
-    // Translate host NFS paths to container paths (/mnt/tank → /workspace)
+    // Translate host paths to container paths
     let resolvedDataset = dataset;
-    if (resolvedDataset.startsWith("/mnt/tank/")) {
-      resolvedDataset = resolvedDataset.replace("/mnt/tank/", "/workspace/");
+    if (resolvedDataset.startsWith(`${SHARED_STORAGE}/`)) {
+      resolvedDataset = toContainerPath(resolvedDataset);
     }
     // HuggingFace dataset IDs (e.g., "b-mc2/sql-create-context") are passed
     // directly to the training script — it handles download via load_dataset()
@@ -629,8 +630,8 @@ export async function mergeLoraAdapter(
   const mergeScript = "/workspace/src/github/dgx-manager-fine-tune-recipes/scripts/merge.py";
 
   // Translate NFS paths to container paths
-  const containerAdapterPath = adapterPath.replace("/mnt/tank/", "/workspace/");
-  const containerOutputDir = mergedOutputDir.replace("/mnt/tank/", "/workspace/");
+  const containerAdapterPath = toContainerPath(adapterPath);
+  const containerOutputDir = toContainerPath(mergedOutputDir);
 
   try {
     try { execSync(`docker rm -f ${containerName}`, { timeout: 15_000, stdio: "ignore" }); } catch { /* */ }
@@ -657,7 +658,7 @@ export async function mergeLoraAdapter(
       dockerArgs.push("-e", `HF_TOKEN=${process.env.HF_TOKEN}`);
     }
     dockerArgs.push(
-      "-v", "/mnt/tank:/workspace",
+      "-v", `${SHARED_STORAGE}:${WORKSPACE}`,
       "--entrypoint", "sleep",
       containerImage,
       "infinity"
