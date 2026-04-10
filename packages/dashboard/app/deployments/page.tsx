@@ -163,6 +163,13 @@ export default function DeploymentsPage() {
         [deploymentId]: (prev[deploymentId] || "") + log,
       }));
     }
+    if (event.type === "deployment:created") {
+      const dep = event.payload as unknown as Deployment;
+      if (dep?.id) {
+        setDeployments((prev) => prev.some((d) => d.id === dep.id) ? prev : [dep, ...prev]);
+        apiFetch<Node[]>("/api/nodes/idle").then(setIdleNodes).catch(() => {});
+      }
+    }
     if (event.type === "deployment:deleted") {
       const { deploymentId } = event.payload as { deploymentId: string };
       setDeployments((prev) => prev.filter((d) => d.id !== deploymentId));

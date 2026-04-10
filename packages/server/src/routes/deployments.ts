@@ -2,6 +2,7 @@ import { Router } from "express";
 import { readFileSync, existsSync } from "fs";
 import { prisma } from "../prisma.js";
 import { SHARED_STORAGE } from "../env.js";
+import { broadcast as sseBroadcast } from "../sse.js";
 import type { AgentHub } from "../ws/agent-hub.js";
 
 export const deploymentsRouter = Router();
@@ -229,6 +230,7 @@ deploymentsRouter.post("/", async (req, res) => {
     include: { node: true, model: true, clusterNodes: { include: { node: true } } },
   });
 
+  sseBroadcast({ type: "deployment:created", payload: result });
   res.status(201).json(result);
 });
 

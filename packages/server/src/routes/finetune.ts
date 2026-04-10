@@ -2,6 +2,7 @@ import { Router } from "express";
 import { readFileSync, existsSync } from "fs";
 import { prisma } from "../prisma.js";
 import { SHARED_STORAGE } from "../env.js";
+import { broadcast as sseBroadcast } from "../sse.js";
 import type { AgentHub } from "../ws/agent-hub.js";
 
 export const finetuneRouter = Router();
@@ -107,6 +108,7 @@ finetuneRouter.post("/", async (req, res) => {
     where: { id: job.id },
     include: { node: true },
   });
+  sseBroadcast({ type: "finetune:created", payload: result });
   res.status(201).json(result);
 });
 
@@ -235,5 +237,6 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
     where: { id: deployment.id },
     include: { node: true, model: true },
   });
+  sseBroadcast({ type: "deployment:created", payload: result });
   res.status(201).json(result);
 });

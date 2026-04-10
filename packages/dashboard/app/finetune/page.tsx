@@ -139,6 +139,12 @@ export default function FinetunePage() {
   useEffect(() => { loadData(); }, [loadData]);
 
   const handleSSE = useCallback((event: SseEvent) => {
+    if (event.type === "finetune:created") {
+      const job = event.payload as unknown as FineTuneJob;
+      if (job?.id) {
+        setJobs((prev) => prev.some((j) => j.id === job.id) ? prev : [job, ...prev]);
+      }
+    }
     if (event.type === "finetune:log") {
       const { jobId, phase, phaseProgress, step, totalSteps, loss, lr, evalLoss, etaSeconds, log } = event.payload as {
         jobId: string; phase?: string; phaseProgress?: number; step?: number; totalSteps?: number; loss?: number; lr?: number; evalLoss?: number; etaSeconds?: number; log?: string;
