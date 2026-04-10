@@ -418,6 +418,9 @@ export async function startFinetuneJob(
       execSync("test -d /dev/infiniband", { timeout: 2_000, stdio: "ignore" });
       dockerArgs.push("--device=/dev/infiniband/");
       dockerArgs.push("-e", "NCCL_IB_DISABLE=0");
+      dockerArgs.push("-e", "NCCL_SOCKET_IFNAME=enp1s0f0np0");
+      dockerArgs.push("-e", "GLOO_SOCKET_IFNAME=enp1s0f0np0");
+      dockerArgs.push("-e", "NCCL_IB_HCA=rocep1s0f0");
     } catch { /* no IB */ }
 
     dockerArgs.push("-v", `${SHARED_STORAGE}:${WORKSPACE}`);
