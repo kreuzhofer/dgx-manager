@@ -101,7 +101,10 @@ The current implementation assumes a shared NFS mount (`/mnt/tank`) across all n
 
 **Goal:** Measure and track model quality across deployments and fine-tuning runs.
 
-- SQL evaluation script (base vs fine-tuned exact-match accuracy comparison) — implemented
+- SQL evaluation script — implemented and validated
+  - Gemma 4 E2B: base 4% → fine-tuned 22% exact-match accuracy on SQL generation (5.5x improvement)
+  - Key lesson: eval prompt format must match training format (no system prompt, same context layout)
+  - Better SQL normalization: handles quote style, chat template artifacts, whitespace
 - Run evaluation suites (lm-eval-harness, custom benchmarks) against deployed models
 - Track quality metrics over time with per-model and per-run history
 - Compare base models against fine-tuned variants
