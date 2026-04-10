@@ -46,7 +46,7 @@ export function reattachFinetuneJobs(
       let logFilePath: string | null = null;
       try {
         const findOut = execSync(
-          `docker exec ${containerName} find /workspace/outputs -name "${logFileName}" -maxdepth 3 2>/dev/null`,
+          `docker exec ${containerName} find ${WORKSPACE}/outputs -name "${logFileName}" -maxdepth 3 2>/dev/null`,
           { timeout: 5_000 }
         ).toString().trim();
         logFilePath = findOut.split("\n")[0] || null;
@@ -386,7 +386,7 @@ export async function startFinetuneJob(
     callbacks.onLog(`Starting container ${containerName} with image ${recipe.container.image}...\n`);
 
     // Build docker run command — run as root for pip install but output dir is pre-created
-    const entrypointPath = `/workspace/src/github/dgx-manager-fine-tune-recipes/${recipeFile}/${recipe.scripts.entrypoint}`;
+    const entrypointPath = `${WORKSPACE}/src/github/dgx-manager-fine-tune-recipes/${recipeFile}/${recipe.scripts.entrypoint}`;
     const dockerArgs = [
       "run", "-d",
       "--name", containerName,
@@ -399,7 +399,7 @@ export async function startFinetuneJob(
       "--user", "root",
       "-e", "CUDA_VISIBLE_DEVICES=0",
       "-e", "PYTHONUNBUFFERED=1",
-      "-e", `HF_HOME=/workspace/models`,
+      "-e", `HF_HOME=${WORKSPACE}/models`,
       "-e", "HF_HUB_OFFLINE=0",
       "-e", "HF_DATASETS_CACHE=/tmp/hf_datasets_cache",
     ];
@@ -467,7 +467,7 @@ export async function startFinetuneJob(
     const merged = { ...recipe.defaults, ...config };
 
     // Build launch command args
-    const launchPath = `/workspace/src/github/dgx-manager-fine-tune-recipes/${recipeFile}/${recipe.scripts.launch}`;
+    const launchPath = `${WORKSPACE}/src/github/dgx-manager-fine-tune-recipes/${recipeFile}/${recipe.scripts.launch}`;
     const trainArgs: string[] = [
       "--model_name", recipe.base_model,
       "--dataset", resolvedDataset,
@@ -627,7 +627,7 @@ export async function mergeLoraAdapter(
 ): Promise<void> {
   const containerName = `dgx-merge-${jobId.slice(0, 12)}`;
   const containerImage = "nvcr.io/nvidia/pytorch:25.11-py3";
-  const mergeScript = "/workspace/src/github/dgx-manager-fine-tune-recipes/scripts/merge.py";
+  const mergeScript = `${WORKSPACE}/src/github/dgx-manager-fine-tune-recipes/scripts/merge.py`;
 
   // Translate NFS paths to container paths
   const containerAdapterPath = toContainerPath(adapterPath);
@@ -651,7 +651,7 @@ export async function mergeLoraAdapter(
       "--user", "root",
       "-e", "CUDA_VISIBLE_DEVICES=0",
       "-e", "PYTHONUNBUFFERED=1",
-      "-e", "HF_HOME=/workspace/models",
+      "-e", `HF_HOME=${WORKSPACE}/models`,
       "-e", "HF_HUB_OFFLINE=0",
     ];
     if (process.env.HF_TOKEN) {
