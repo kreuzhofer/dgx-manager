@@ -278,14 +278,21 @@ export default function FinetunePage() {
       if (numEpochs) config.num_train_epochs = parseInt(numEpochs);
       if (maxSteps) config.max_steps = parseInt(maxSteps);
 
+      const selectedRecipeData = recipes.find((r) => r.file === selectedRecipe);
+      const needsMultiNode = (selectedRecipeData?.hardware?.min_nodes ?? 1) > 1;
+
+      const body: Record<string, unknown> = { recipeFile: selectedRecipe, dataset, config };
+      if (needsMultiNode) {
+        // Send all selected idle nodes (up to min_nodes)
+        const requiredNodes = selectedRecipeData!.hardware.min_nodes;
+        body.nodeIds = idleNodes.slice(0, requiredNodes).map(n => n.id);
+      } else {
+        body.nodeId = selectedNode;
+      }
+
       const job = await apiFetch<FineTuneJob>("/api/finetune", {
         method: "POST",
-        body: JSON.stringify({
-          nodeId: selectedNode,
-          recipeFile: selectedRecipe,
-          dataset,
-          config,
-        }),
+        body: JSON.stringify(body),
       });
       setJobs((prev) => [job, ...prev]);
       setViewingLogs(job.id);
@@ -390,25 +397,57 @@ export default function FinetunePage() {
             </select>
           </div>
           <div>
-            <label className="block text-xs text-gray-400 mb-1">Node</label>
-            <select
-              value={selectedNode}
-              onChange={(e) => setSelectedNode(e.target.value)}
-              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
-            >
-              {idleNodes.length === 0 ? (
-                <option value="">No idle nodes available</option>
-              ) : (
+            {(() => {
+              const recipeData = recipes.find((r) => r.file === selectedRecipe);
+              const minNodes = recipeData?.hardware?.min_nodes ?? 1;
+              const needsMulti = minNodes > 1;
+
+              if (needsMulti) {
+                return (
+                  <>
+                    <label className="block text-xs text-gray-400 mb-1">
+                      Nodes <span className="text-gray-600">({minNodes} required)</span>
+                    </label>
+                    <div className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm">
+                      {idleNodes.length < minNodes ? (
+                        <span className="text-red-400">
+                          Need {minNodes} nodes but only {idleNodes.length} idle
+                        </span>
+                      ) : (
+                        <span className="text-green-400">
+                          {idleNodes.slice(0, minNodes).map(n => n.name).join(", ")}
+                          <span className="text-gray-500 ml-1">({minNodes} of {idleNodes.length} idle)</span>
+                        </span>
+                      )}
+                    </div>
+                  </>
+                );
+              }
+
+              return (
                 <>
-                  {!selectedNode && <option value="">Select a node...</option>}
-                  {idleNodes.map((n) => (
-                    <option key={n.id} value={n.id}>
-                      {n.name} ({n.ipAddress})
-                    </option>
-                  ))}
+                  <label className="block text-xs text-gray-400 mb-1">Node</label>
+                  <select
+                    value={selectedNode}
+                    onChange={(e) => setSelectedNode(e.target.value)}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
+                  >
+                    {idleNodes.length === 0 ? (
+                      <option value="">No idle nodes available</option>
+                    ) : (
+                      <>
+                        {!selectedNode && <option value="">Select a node...</option>}
+                        {idleNodes.map((n) => (
+                          <option key={n.id} value={n.id}>
+                            {n.name} ({n.ipAddress})
+                          </option>
+                        ))}
+                      </>
+                    )}
+                  </select>
                 </>
-              )}
-            </select>
+              );
+            })()}
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1">
@@ -518,7 +557,11 @@ export default function FinetunePage() {
         <div className="mt-4 flex justify-end">
           <button
             type="submit"
-            disabled={submitting || !selectedRecipe || !selectedNode || !dataset}
+            disabled={submitting || !selectedRecipe || !dataset || (() => {
+              const r = recipes.find(x => x.file === selectedRecipe);
+              const minNodes = r?.hardware?.min_nodes ?? 1;
+              return minNodes > 1 ? idleNodes.length < minNodes : !selectedNode;
+            })()}
             className="bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-5 py-2 rounded text-sm font-medium transition-colors"
           >
             {submitting ? "Starting..." : "Start Training"}

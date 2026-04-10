@@ -452,17 +452,18 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
     }
 
     case "cmd:finetune:start": {
-      const { jobId, recipeFile, dataset, outputDir, config } = msg.payload as {
+      const { jobId, recipeFile, dataset, outputDir, config, clusterNodeIps } = msg.payload as {
         jobId: string;
         recipeFile: string;
         dataset: string;
         outputDir: string;
         config?: Record<string, unknown>;
+        clusterNodeIps?: string[];
       };
 
-      console.log(`[finetune] Starting job ${jobId} with recipe ${recipeFile}`);
+      console.log(`[finetune] Starting job ${jobId} with recipe ${recipeFile}${clusterNodeIps ? ` (${clusterNodeIps.length} nodes)` : ""}`);
 
-      startFinetuneJob(jobId, recipeFile, dataset, outputDir, config || {}, {
+      startFinetuneJob(jobId, recipeFile, dataset, outputDir, config || {}, clusterNodeIps, {
         onLog: (line) => {
           sendMsg("agent:finetune:progress", {
             jobId,

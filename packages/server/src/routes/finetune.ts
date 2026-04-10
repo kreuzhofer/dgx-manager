@@ -56,9 +56,9 @@ finetuneRouter.get("/:id/metrics", async (req, res) => {
 });
 
 finetuneRouter.post("/", async (req, res) => {
-  const { nodeId, recipeFile, dataset, config } = req.body;
-  if (!nodeId || !recipeFile || !dataset) {
-    return res.status(400).json({ error: "nodeId, recipeFile, and dataset required" });
+  const { nodeId, nodeIds, recipeFile, dataset, config } = req.body;
+  if ((!nodeId && !nodeIds) || !recipeFile || !dataset) {
+    return res.status(400).json({ error: "nodeId (or nodeIds), recipeFile, and dataset required" });
   }
 
   // Look up recipe metadata from cached training recipes
@@ -69,9 +69,13 @@ finetuneRouter.post("/", async (req, res) => {
   const baseModel = recipe?.base_model || recipeFile;
   const method = recipe?.method || "lora";
 
+  // Resolve nodes: single or multi-node
+  const isMultiNode = Array.isArray(nodeIds) && nodeIds.length > 1;
+  const headNodeId = isMultiNode ? nodeIds[0] : nodeId;
+
   const job = await prisma.fineTuneJob.create({
     data: {
-      nodeId,
+      nodeId: headNodeId,
       recipeFile,
       baseModel,
       method,
@@ -88,14 +92,26 @@ finetuneRouter.post("/", async (req, res) => {
     data: { outputDir },
   });
 
-  agentHub.sendToAgent(nodeId, {
+  // Resolve node IPs for multi-node
+  let clusterNodeIps: string[] | undefined;
+  if (isMultiNode) {
+    const nodes = await prisma.node.findMany({
+      where: { id: { in: nodeIds } },
+    });
+    // Maintain order: head first, then workers
+    const nodeMap = new Map(nodes.map((n) => [n.id, n.ipAddress]));
+    clusterNodeIps = nodeIds.map((id: string) => nodeMap.get(id)!).filter(Boolean);
+  }
+
+  agentHub.sendToAgent(headNodeId, {
     type: "cmd:finetune:start",
     payload: {
       jobId: job.id,
       recipeFile,
       dataset,
-      outputDir: `/workspace/outputs/${job.id}`, // container path (NFS mounted)
+      outputDir: `/workspace/outputs/${job.id}`, // container path
       config: config || {},
+      clusterNodeIps,
     },
   });
 

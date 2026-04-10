@@ -14,6 +14,7 @@ interface FinetuneInstance {
   containerName: string;
   execProcess: ChildProcess | null;
   aborted: boolean;
+  workerIps?: string[];
 }
 
 const running = new Map<string, FinetuneInstance>();
@@ -320,8 +321,10 @@ export async function startFinetuneJob(
   dataset: string,
   outputDir: string,
   config: Record<string, unknown>,
+  clusterNodeIps: string[] | undefined,
   callbacks: FinetuneCallbacks
 ): Promise<void> {
+  const isMultiNode = clusterNodeIps && clusterNodeIps.length > 1;
   const repoPath = getTrainingRepoPath();
   const recipeDir = join(repoPath, recipeFile);
   const recipeYamlPath = join(recipeDir, "recipe.yaml");
@@ -341,7 +344,8 @@ export async function startFinetuneJob(
   }
 
   const containerName = `dgx-finetune-${jobId.slice(0, 12)}`;
-  const instance: FinetuneInstance = { jobId, containerName, execProcess: null, aborted: false };
+  const workerIps = isMultiNode ? clusterNodeIps!.slice(1) : undefined;
+  const instance: FinetuneInstance = { jobId, containerName, execProcess: null, aborted: false, workerIps };
   running.set(jobId, instance);
 
   try {
@@ -416,12 +420,13 @@ export async function startFinetuneJob(
       dockerArgs.push("-e", "NCCL_IB_DISABLE=0");
     } catch { /* no IB */ }
 
-    dockerArgs.push(
-      "-v", `${SHARED_STORAGE}:${WORKSPACE}`,
-      "--entrypoint", "bash",
-      recipe.container.image,
-      entrypointPath
-    );
+    dockerArgs.push("-v", `${SHARED_STORAGE}:${WORKSPACE}`);
+    // Mount SSH keys for multi-node inter-container communication
+    if (isMultiNode) {
+      const sshDir = `${process.env.HOME || "/root"}/.ssh`;
+      dockerArgs.push("-v", `${sshDir}:/tmp/.ssh:ro`);
+    }
+    dockerArgs.push("--entrypoint", "bash", recipe.container.image, entrypointPath);
 
     // Pull image first (skip if locally built)
     if (!recipe.container.build_context) {
@@ -485,10 +490,79 @@ export async function startFinetuneJob(
       trainArgs.push("--lora_target_modules", String(merged.lora_target_modules));
     }
 
+    // Multi-node: generate hostfile, start worker containers via SSH
+    if (isMultiNode && clusterNodeIps) {
+      callbacks.onLog(`\nMulti-node training: ${clusterNodeIps.length} nodes\n`);
+
+      // Generate hostfile inside container
+      const hostfileContent = clusterNodeIps.map(ip => `${ip} slots=1`).join("\\n");
+      execSync(`docker exec ${containerName} bash -c 'echo -e "${hostfileContent}" > /tmp/hostfile.txt'`, { timeout: 5_000 });
+      callbacks.onLog(`Hostfile: ${clusterNodeIps.join(", ")}\n`);
+
+      // Start training containers on worker nodes via SSH
+      const workerIps = clusterNodeIps.slice(1);
+      const sshUser = process.env.SSH_USER || process.env.USER || "daniel";
+      for (const workerIp of workerIps) {
+        callbacks.onLog(`Starting worker container on ${workerIp}...\n`);
+        try {
+          // Start the same container image on the worker via host SSH
+          const workerDockerCmd = [
+            "docker run -d",
+            `--name ${containerName}`,
+            "--gpus all --network host --ipc host --privileged",
+            "--ulimit memlock=-1 --shm-size=1g --user root",
+            `-e CUDA_VISIBLE_DEVICES=0 -e PYTHONUNBUFFERED=1`,
+            `-e HF_HOME=${WORKSPACE}/models -e HF_HUB_OFFLINE=0`,
+            process.env.HF_TOKEN ? `-e HF_TOKEN=${process.env.HF_TOKEN}` : "",
+            `-v ${SHARED_STORAGE}:${WORKSPACE}`,
+            `-v /home/${sshUser}/.ssh:/tmp/.ssh:ro`,
+            `--entrypoint bash ${recipe.container.image}`,
+            entrypointPath,
+          ].filter(Boolean).join(" ");
+
+          execSync(`ssh -o StrictHostKeyChecking=no ${sshUser}@${workerIp} "docker rm -f ${containerName} 2>/dev/null; ${workerDockerCmd}"`, {
+            timeout: 120_000,
+          });
+
+          // Wait for worker readiness
+          let workerReady = false;
+          for (let attempt = 0; attempt < 60; attempt++) {
+            try {
+              execSync(`ssh ${sshUser}@${workerIp} "docker exec ${containerName} test -f /tmp/.ready"`, { timeout: 5_000, stdio: "ignore" });
+              workerReady = true;
+              break;
+            } catch { /* not ready yet */ }
+            await new Promise(r => setTimeout(r, 5_000));
+          }
+          if (!workerReady) {
+            callbacks.onComplete("failed", undefined, `Worker ${workerIp} setup timed out`);
+            cleanup(containerName, jobId);
+            return;
+          }
+          callbacks.onLog(`Worker ${workerIp} ready.\n`);
+
+          // Generate hostfile on worker too
+          execSync(`ssh ${sshUser}@${workerIp} "docker exec ${containerName} bash -c 'echo -e \\"${hostfileContent}\\" > /tmp/hostfile.txt'"`, { timeout: 5_000 });
+
+          // Launch training on worker (background, it will rendezvous with head)
+          const workerLaunchCmd = `docker exec -d ${containerName} bash ${launchPath} --hostfile /tmp/hostfile.txt ${trainArgs.join(" ")}`;
+          execSync(`ssh ${sshUser}@${workerIp} "${workerLaunchCmd}"`, { timeout: 30_000 });
+          callbacks.onLog(`Worker ${workerIp} training launched.\n`);
+        } catch (err) {
+          callbacks.onComplete("failed", undefined, `Failed to start worker ${workerIp}: ${err}`);
+          cleanup(containerName, jobId);
+          return;
+        }
+      }
+
+      // Add --hostfile to head node args
+      trainArgs.unshift("--hostfile", "/tmp/hostfile.txt");
+    }
+
     callbacks.onLog(`\nLaunching training: ${launchPath}\n`);
     callbacks.onLog(`Args: ${trainArgs.join(" ")}\n\n`);
 
-    // Exec the launch script inside the container
+    // Exec the launch script inside the container (head node for multi-node)
     const execProc = spawn("docker", [
       "exec", containerName,
       "bash", launchPath,
@@ -609,6 +683,19 @@ export function stopFinetuneJob(jobId: string): boolean {
 
 /** Clean up Docker container and remove from tracking. */
 function cleanup(containerName: string, jobId: string) {
+  const instance = running.get(jobId);
+
+  // Stop worker containers on remote nodes
+  if (instance?.workerIps) {
+    const sshUser = process.env.SSH_USER || process.env.USER || "daniel";
+    for (const ip of instance.workerIps) {
+      try {
+        execSync(`ssh -o StrictHostKeyChecking=no ${sshUser}@${ip} "docker rm -f ${containerName}"`, { timeout: 15_000, stdio: "ignore" });
+      } catch { /* ignore */ }
+    }
+  }
+
+  // Stop head container
   try {
     execSync(`docker rm -f ${containerName}`, { timeout: 30_000, stdio: "ignore" });
   } catch { /* ignore */ }
