@@ -1,5 +1,6 @@
 import WebSocket from "ws";
-import { readFileSync } from "fs";
+import { readFileSync, writeFileSync, existsSync } from "fs";
+import { execSync } from "child_process";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
@@ -10,17 +11,38 @@ import { discoverTrainingRecipes } from "./training-recipes.js";
 import { startFinetuneJob, stopFinetuneJob, mergeLoraAdapter, reattachFinetuneJobs } from "./runtime/finetune.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const AGENT_DIR = join(__dirname, "..");
 const AGENT_VERSION: string = JSON.parse(
-  readFileSync(join(__dirname, "../package.json"), "utf-8")
+  readFileSync(join(AGENT_DIR, "package.json"), "utf-8")
 ).version;
 
 const MANAGER_URL = process.env.MANAGER_URL || "ws://localhost:4000/ws/agent";
-const NODE_ID = process.env.NODE_ID || "unknown";
+const JOIN_TOKEN = process.env.JOIN_TOKEN || "";
+const NODE_ID_FILE = join(AGENT_DIR, "node-id");
 const METRICS_INTERVAL = 5_000;
 const HEALTH_CHECK_INTERVAL = 15_000;
 const RECONNECT_BASE = 1_000;
 const RECONNECT_MAX = 30_000;
 
+/**
+ * Resolve the node ID from (in priority order):
+ * 1. Persisted node-id file (from previous token registration)
+ * 2. NODE_ID env var
+ * 3. Empty string (will use JOIN_TOKEN flow)
+ */
+function resolveNodeId(): string {
+  // Check persisted file first
+  if (existsSync(NODE_ID_FILE)) {
+    const id = readFileSync(NODE_ID_FILE, "utf-8").trim();
+    if (id) return id;
+  }
+  // Fall back to env var
+  const envId = process.env.NODE_ID || "";
+  if (envId && envId !== "unknown") return envId;
+  return "";
+}
+
+let nodeId = resolveNodeId();
 let ws: WebSocket | null = null;
 let reconnectDelay = RECONNECT_BASE;
 let metricsTimer: ReturnType<typeof setInterval> | null = null;
@@ -37,19 +59,44 @@ function connect() {
     console.log("Connected to manager");
     reconnectDelay = RECONNECT_BASE;
 
-    // Register
+    // Register — use token flow if no nodeId persisted
     const metrics = await collectMetrics();
-    ws!.send(JSON.stringify({
-      type: "agent:register",
-      payload: {
-        nodeId: NODE_ID,
-        hostname: process.env.HOSTNAME || "unknown",
-        gpuModel: metrics.gpuModel,
-        vramTotal: metrics.vramTotal,
-        agentVersion: AGENT_VERSION,
-      },
-    }));
+    if (nodeId) {
+      ws!.send(JSON.stringify({
+        type: "agent:register",
+        payload: {
+          nodeId,
+          hostname: process.env.HOSTNAME || "unknown",
+          gpuModel: metrics.gpuModel,
+          vramTotal: metrics.vramTotal,
+          agentVersion: AGENT_VERSION,
+        },
+      }));
+    } else if (JOIN_TOKEN) {
+      console.log("Registering with join token...");
+      ws!.send(JSON.stringify({
+        type: "agent:register-token",
+        payload: {
+          token: JOIN_TOKEN,
+          hostname: process.env.HOSTNAME || "unknown",
+          gpuModel: metrics.gpuModel,
+          vramTotal: metrics.vramTotal,
+          agentVersion: AGENT_VERSION,
+        },
+      }));
+      // Wait for register:accepted before continuing setup
+      return;
+    } else {
+      console.error("No NODE_ID or JOIN_TOKEN configured. Cannot register.");
+      ws!.close();
+      return;
+    }
 
+    postRegistrationSetup();
+  });
+
+  /** Setup tasks that run after successful registration (either nodeId or token flow). */
+  function postRegistrationSetup() {
     // Reconcile tracked deployments after restart
     const tracked = getTrackedDeployments();
     if (tracked.length > 0) {
@@ -224,12 +271,35 @@ function connect() {
         }
       } catch { /* ignore */ }
     }, HEALTH_CHECK_INTERVAL);
-  });
+  }
 
   ws.on("message", (data) => {
     try {
       const msg = JSON.parse(data.toString());
-      console.log(`Received command: ${msg.type}`);
+      console.log(`Received: ${msg.type}`);
+
+      // Handle registration acceptance (token flow)
+      if (msg.type === "register:accepted") {
+        nodeId = msg.payload.nodeId;
+        console.log(`Registered as node: ${nodeId}`);
+        // Persist node ID for future reconnects
+        try {
+          writeFileSync(NODE_ID_FILE, nodeId, "utf-8");
+          console.log(`Node ID persisted to ${NODE_ID_FILE}`);
+        } catch (err) {
+          console.error(`Failed to persist node ID: ${err}`);
+        }
+        postRegistrationSetup();
+        return;
+      }
+
+      // Handle registration rejection
+      if (msg.type === "register:rejected") {
+        console.error(`Registration rejected: ${msg.payload?.error || "unknown reason"}`);
+        ws?.close();
+        return;
+      }
+
       handleCommand(msg);
     } catch (err) {
       console.error("Message parse error:", err);
@@ -452,16 +522,17 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
     }
 
     case "cmd:finetune:start": {
-      const { jobId, recipeFile, dataset, outputDir, config, clusterNodeIps } = msg.payload as {
+      const { jobId, recipeFile, dataset, outputDir, config, clusterNodeIps, resumeFromCheckpoint } = msg.payload as {
         jobId: string;
         recipeFile: string;
         dataset: string;
         outputDir: string;
         config?: Record<string, unknown>;
         clusterNodeIps?: string[];
+        resumeFromCheckpoint?: boolean;
       };
 
-      console.log(`[finetune] Starting job ${jobId} with recipe ${recipeFile}${clusterNodeIps ? ` (${clusterNodeIps.length} nodes)` : ""}`);
+      console.log(`[finetune] Starting job ${jobId} with recipe ${recipeFile}${clusterNodeIps ? ` (${clusterNodeIps.length} nodes)` : ""}${resumeFromCheckpoint ? " [RESUME]" : ""}`);
 
       startFinetuneJob(jobId, recipeFile, dataset, outputDir, config || {}, clusterNodeIps, {
         onLog: (line) => {
@@ -492,7 +563,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             error: error ?? undefined,
           });
         },
-      });
+      }, resumeFromCheckpoint);
       break;
     }
 
@@ -500,13 +571,12 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
     case "cmd:finetune:cancel": {
       const { jobId } = msg.payload as { jobId: string };
       console.log(`[finetune] Stopping job ${jobId}`);
-      const stopped = stopFinetuneJob(jobId);
-      if (stopped) {
-        sendMsg("agent:finetune:complete", {
-          jobId,
-          status: "stopped",
-        });
-      }
+      stopFinetuneJob(jobId);
+      // Always confirm: even if there were no containers to remove (already
+      // cleaned, stale record, etc.), the job is "stopped" from the server's
+      // perspective. Without this, jobs with no live containers get stuck in
+      // "stopping" state in the DB forever.
+      sendMsg("agent:finetune:complete", { jobId, status: "stopped" });
       break;
     }
 
@@ -578,6 +648,51 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         sendMsg("agent:deployment:status", {
           deploymentId, status: "failed", error: String(err),
         });
+      }
+      break;
+    }
+
+    case "cmd:update": {
+      const { bundleUrl, version } = msg.payload as { bundleUrl: string; version: string };
+      console.log(`[update] Updating agent to v${version} from ${bundleUrl}`);
+      sendMsg("agent:update-status", { status: "downloading", version });
+
+      try {
+        // Download bundle
+        execSync(`curl -sL -o /tmp/agent-bundle.tar.gz "${bundleUrl}"`, { timeout: 120_000 });
+
+        // /opt/dgx-agent* paths require root. Agent runs as a non-root systemd
+        // user, so all writes under /opt must go through sudo (configured
+        // NOPASSWD in the install script).
+        execSync("sudo rm -rf /opt/dgx-agent-new && sudo mkdir -p /opt/dgx-agent-new", { timeout: 10_000 });
+        execSync("sudo tar -xzf /tmp/agent-bundle.tar.gz -C /opt/dgx-agent-new/", { timeout: 30_000 });
+
+        // Preserve node-id file
+        if (existsSync(NODE_ID_FILE)) {
+          execSync(`sudo cp "${NODE_ID_FILE}" /opt/dgx-agent-new/node-id`, { timeout: 5_000 });
+        }
+
+        // Atomic swap
+        execSync("sudo rm -rf /opt/dgx-agent-old", { timeout: 5_000 });
+        execSync("sudo mv /opt/dgx-agent /opt/dgx-agent-old && sudo mv /opt/dgx-agent-new /opt/dgx-agent", { timeout: 10_000 });
+        execSync("rm -f /tmp/agent-bundle.tar.gz", { timeout: 5_000 });
+
+        sendMsg("agent:update-status", { status: "restarting", version });
+        console.log(`[update] Agent updated to v${version}, restarting...`);
+
+        // Restart the systemd service (agent will reconnect with new version)
+        setTimeout(() => {
+          try {
+            execSync("sudo systemctl restart dgx-agent", { timeout: 10_000 });
+          } catch (err) {
+            console.error(`[update] Failed to restart service: ${err}`);
+          }
+        }, 500);
+      } catch (err) {
+        console.error(`[update] Update failed: ${err}`);
+        sendMsg("agent:update-status", { status: "failed", error: String(err) });
+        // Clean up staging
+        try { execSync("sudo rm -rf /opt/dgx-agent-new && rm -f /tmp/agent-bundle.tar.gz"); } catch { /* */ }
       }
       break;
     }

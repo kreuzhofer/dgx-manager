@@ -20,11 +20,25 @@ RUN npm install
 # Copy server source
 COPY packages/server/ ./packages/server/
 
+# Copy agent source for bundle building (preserve node_modules from npm install)
+COPY packages/agent/src/ ./packages/agent/src/
+COPY packages/agent/tsconfig.json ./packages/agent/
+
 # Generate Prisma client
 ENV DATABASE_URL="file:/app/data/dev.db"
 RUN npx prisma generate
 
+# Build agent and create bundle tarball for HTTP serving
+# npm workspaces hoists deps to root node_modules/, so we bundle from there
+RUN npx tsc -p packages/agent/tsconfig.json && \
+    mkdir -p /tmp/agent-bundle && \
+    cp -r packages/agent/dist /tmp/agent-bundle/dist && \
+    cp packages/agent/package.json /tmp/agent-bundle/package.json && \
+    cp -r node_modules /tmp/agent-bundle/node_modules && \
+    tar -czf packages/server/agent-bundle.tar.gz -C /tmp/agent-bundle . && \
+    rm -rf /tmp/agent-bundle
+
 EXPOSE 4000
 
 # Ensure data dir exists and DB schema is applied on startup
-CMD ["sh", "-c", "mkdir -p /app/data && npx prisma db push && npx tsx packages/server/src/index.ts"]
+CMD ["sh", "-c", "mkdir -p /app/data && npx prisma db push --accept-data-loss && npx tsx packages/server/src/index.ts"]

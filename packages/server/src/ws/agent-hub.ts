@@ -114,6 +114,88 @@ export class AgentHub {
             break;
           }
 
+          case "agent:register-token": {
+            const { token, hostname, gpuModel, vramTotal, agentVersion: tokenAgentVersion } = msg.payload;
+
+            // Validate token
+            const joinToken = await prisma.joinToken.findUnique({ where: { token } });
+            if (!joinToken) {
+              ws.send(JSON.stringify({ type: "register:rejected", payload: { error: "Invalid token" } }));
+              ws.close();
+              return;
+            }
+            if (joinToken.revokedAt) {
+              ws.send(JSON.stringify({ type: "register:rejected", payload: { error: "Token has been revoked" } }));
+              ws.close();
+              return;
+            }
+            if (joinToken.usedAt) {
+              ws.send(JSON.stringify({ type: "register:rejected", payload: { error: "Token has already been used" } }));
+              ws.close();
+              return;
+            }
+            if (joinToken.expiresAt && joinToken.expiresAt < new Date()) {
+              ws.send(JSON.stringify({ type: "register:rejected", payload: { error: "Token has expired" } }));
+              ws.close();
+              return;
+            }
+
+            // Resolve unique name (append suffix on collision)
+            let nodeName = hostname || "node";
+            let suffix = 0;
+            while (true) {
+              const candidateName = suffix === 0 ? nodeName : `${nodeName}-${suffix}`;
+              const existing = await prisma.node.findUnique({ where: { name: candidateName } });
+              if (!existing) {
+                nodeName = candidateName;
+                break;
+              }
+              suffix++;
+            }
+
+            // Extract IP from WebSocket connection
+            const remoteIp = (ws as unknown as { _socket?: { remoteAddress?: string } })._socket?.remoteAddress?.replace("::ffff:", "") || null;
+
+            // Create node record
+            const node = await prisma.node.create({
+              data: {
+                name: nodeName,
+                ipAddress: remoteIp,
+                status: "online",
+                provisionStatus: "agent-deployed",
+                bootstrapMethod: "token",
+                gpuModel: gpuModel || null,
+                vramTotal: vramTotal || null,
+                agentVersion: tokenAgentVersion || null,
+                dockerAvailable: true, // install script ensures Docker is present
+                lastSeen: new Date(),
+              },
+            });
+
+            // Mark token as used
+            await prisma.joinToken.update({
+              where: { id: joinToken.id },
+              data: { usedAt: new Date(), usedByNodeId: node.id },
+            });
+
+            nodeId = node.id;
+            this.agents.set(nodeId, { ws, nodeId });
+
+            console.log(`Agent registered via token: ${nodeId} (${nodeName}, v${tokenAgentVersion || "unknown"})`);
+
+            // Send acceptance with nodeId
+            ws.send(JSON.stringify({ type: "register:accepted", payload: { nodeId: node.id } }));
+
+            sseBroadcast({ type: "node:status", payload: { nodeId, status: "online", agentVersion: tokenAgentVersion } });
+            break;
+          }
+
+          case "agent:update-status": {
+            console.log(`Agent ${nodeId} update: ${msg.payload.status} (v${msg.payload.version || "?"})`);
+            sseBroadcast({ type: "node:update-status", payload: { nodeId, ...msg.payload } });
+            break;
+          }
+
           case "agent:recipes": {
             const incoming = msg.payload.recipes as VllmRecipe[];
             this.recipes = incoming;
@@ -270,14 +352,21 @@ export class AgentHub {
                 data: { progress: phaseProgress },
               }).catch(() => {});
             }
-            // Persist training metrics for loss curve visualization
+            // Persist training metrics for loss curve visualization. Agent
+            // emits multiple events per step ([TRAIN] line + dict log + tqdm
+            // bar can all match), so dedupe via upsert on (jobId, step).
             if (phase === "training" && typeof step === "number" && typeof loss === "number") {
-              await prisma.trainingMetric.create({
-                data: {
+              await prisma.trainingMetric.upsert({
+                where: { jobId_step: { jobId: jobId as string, step: step as number } },
+                create: {
                   jobId: jobId as string,
                   step: step as number,
                   loss: loss as number,
                   lr: typeof lr === "number" ? lr : null,
+                },
+                update: {
+                  loss: loss as number,
+                  lr: typeof lr === "number" ? lr : undefined,
                 },
               }).catch(() => {});
             }

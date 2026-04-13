@@ -28,7 +28,10 @@ finetuneRouter.get("/:id/logs", async (req, res) => {
   const job = await prisma.fineTuneJob.findUnique({ where: { id: req.params.id } });
   if (!job) return res.status(404).json({ error: "Job not found" });
 
-  const logPath = `${SHARED_STORAGE}/outputs/${job.id}/train.log`;
+  // Use the job's actual outputDir — for resumed jobs this points to the
+  // previous job's directory, which is where the appended train.log lives.
+  const logDir = job.outputDir || `${SHARED_STORAGE}/outputs/${job.id}`;
+  const logPath = `${logDir}/train.log`;
   if (!existsSync(logPath)) {
     return res.type("text/plain").send("");
   }
@@ -46,6 +49,33 @@ finetuneRouter.get("/:id/logs", async (req, res) => {
   }
 });
 
+finetuneRouter.get("/:id/checkpoints", async (req, res) => {
+  const job = await prisma.fineTuneJob.findUnique({ where: { id: req.params.id } });
+  if (!job) return res.status(404).json({ error: "Job not found" });
+  if (!job.outputDir) return res.json([]);
+
+  try {
+    const { readdirSync, statSync } = await import("fs");
+    const entries = readdirSync(job.outputDir, { withFileTypes: true });
+    const checkpoints = entries
+      .filter((e) => e.isDirectory() && e.name.startsWith("checkpoint-"))
+      .map((e) => {
+        const step = parseInt(e.name.replace("checkpoint-", ""), 10);
+        const path = `${job.outputDir}/${e.name}`;
+        let createdAt: string | undefined;
+        try {
+          createdAt = statSync(path).mtime.toISOString();
+        } catch { /* ignore */ }
+        return { step, name: e.name, path, createdAt };
+      })
+      .filter((c) => Number.isFinite(c.step))
+      .sort((a, b) => b.step - a.step);
+    res.json(checkpoints);
+  } catch {
+    res.json([]);
+  }
+});
+
 finetuneRouter.get("/:id/metrics", async (req, res) => {
   const metrics = await prisma.trainingMetric.findMany({
     where: { jobId: req.params.id },
@@ -56,37 +86,55 @@ finetuneRouter.get("/:id/metrics", async (req, res) => {
 });
 
 finetuneRouter.post("/", async (req, res) => {
-  const { nodeId, nodeIds, recipeFile, dataset, config } = req.body;
-  if ((!nodeId && !nodeIds) || !recipeFile || !dataset) {
-    return res.status(400).json({ error: "nodeId (or nodeIds), recipeFile, and dataset required" });
+  const { nodeId, nodeIds, recipeFile, dataset, config, resumeFromJobId } = req.body;
+
+  // Resume mode: inherit recipe/dataset/config/outputDir from the previous job
+  // so HF Trainer can find the checkpoint-* dirs. The caller only needs to
+  // pass nodeIds + resumeFromJobId; everything else is derived.
+  let resumeJob: Awaited<ReturnType<typeof prisma.fineTuneJob.findUnique>> = null;
+  if (resumeFromJobId) {
+    resumeJob = await prisma.fineTuneJob.findUnique({ where: { id: resumeFromJobId } });
+    if (!resumeJob) return res.status(404).json({ error: "resumeFromJobId not found" });
+    if (!resumeJob.outputDir) return res.status(400).json({ error: "Previous job has no outputDir" });
+  }
+
+  const effectiveRecipeFile = recipeFile || resumeJob?.recipeFile;
+  const effectiveDataset = dataset || resumeJob?.dataset;
+
+  if ((!nodeId && !nodeIds) || !effectiveRecipeFile || !effectiveDataset) {
+    return res.status(400).json({ error: "nodeId (or nodeIds), recipeFile, and dataset required (recipeFile/dataset can be inherited via resumeFromJobId)" });
   }
 
   // Look up recipe metadata from cached training recipes
   const agentHub: AgentHub = req.app.get("agentHub");
   const recipes = agentHub.getTrainingRecipes();
-  const recipe = recipes.find((r) => r.file === recipeFile);
+  const recipe = recipes.find((r) => r.file === effectiveRecipeFile);
 
-  const baseModel = recipe?.base_model || recipeFile;
+  const baseModel = recipe?.base_model || effectiveRecipeFile;
   const method = recipe?.method || "lora";
 
   // Resolve nodes: single or multi-node
   const isMultiNode = Array.isArray(nodeIds) && nodeIds.length > 1;
   const headNodeId = isMultiNode ? nodeIds[0] : nodeId;
 
+  // Merge config: previous job's config + new overrides on top
+  const prevConfig = resumeJob?.config ? JSON.parse(resumeJob.config) : {};
+  const mergedConfig = { ...prevConfig, ...(config || {}) };
+
   const job = await prisma.fineTuneJob.create({
     data: {
       nodeId: headNodeId,
-      recipeFile,
+      recipeFile: effectiveRecipeFile,
       baseModel,
       method,
-      dataset,
-      config: config ? JSON.stringify(config) : null,
+      dataset: effectiveDataset,
+      config: Object.keys(mergedConfig).length ? JSON.stringify(mergedConfig) : null,
       status: "pending",
     },
   });
 
-  // Set outputDir with the actual job ID
-  const outputDir = `${SHARED_STORAGE}/outputs/${job.id}`;
+  // Resume reuses the previous job's outputDir; fresh runs create their own
+  const outputDir = resumeJob?.outputDir || `${SHARED_STORAGE}/outputs/${job.id}`;
   await prisma.fineTuneJob.update({
     where: { id: job.id },
     data: { outputDir },
@@ -103,15 +151,19 @@ finetuneRouter.post("/", async (req, res) => {
     clusterNodeIps = nodeIds.map((id: string) => nodeMap.get(id)!).filter(Boolean);
   }
 
+  // Container path matches outputDir's basename, which differs from job.id when resuming
+  const outputDirBasename = outputDir.split("/").pop()!;
+
   agentHub.sendToAgent(headNodeId, {
     type: "cmd:finetune:start",
     payload: {
       jobId: job.id,
-      recipeFile,
-      dataset,
-      outputDir: `/workspace/outputs/${job.id}`, // container path
-      config: config || {},
+      recipeFile: effectiveRecipeFile,
+      dataset: effectiveDataset,
+      outputDir: `/workspace/outputs/${outputDirBasename}`,
+      config: mergedConfig,
       clusterNodeIps,
+      resumeFromCheckpoint: !!resumeJob,
     },
   });
 
@@ -141,8 +193,60 @@ finetuneRouter.delete("/:id", async (req, res) => {
     });
   }
 
+  const cleanFiles = req.query.cleanFiles === "true";
+  let filesRemoved = false;
+  let filesKept = false;
+  let filesError: string | undefined;
+
+  if (cleanFiles && job.outputDir) {
+    // Don't nuke the directory if a resumed-child or sibling job still uses it
+    const otherRefs = await prisma.fineTuneJob.count({
+      where: { outputDir: job.outputDir, id: { not: job.id } },
+    });
+    if (otherRefs > 0) {
+      filesKept = true;
+    } else {
+      try {
+        const { rm } = await import("fs/promises");
+        await rm(job.outputDir, { recursive: true, force: true });
+        filesRemoved = true;
+      } catch (err) {
+        filesError = String(err);
+      }
+    }
+  }
+
   await prisma.fineTuneJob.delete({ where: { id: req.params.id } });
-  res.json({ deleted: true });
+  res.json({ deleted: true, filesRemoved, filesKept, filesError });
+});
+
+finetuneRouter.get("/:id/disk-usage", async (req, res) => {
+  const job = await prisma.fineTuneJob.findUnique({ where: { id: req.params.id } });
+  if (!job) return res.status(404).json({ error: "Job not found" });
+  if (!job.outputDir) return res.json({ bytes: 0, dir: null, sharedWith: 0 });
+
+  const sharedWith = await prisma.fineTuneJob.count({
+    where: { outputDir: job.outputDir, id: { not: job.id } },
+  });
+
+  try {
+    const { statSync, readdirSync } = await import("fs");
+    let total = 0;
+    function walk(p: string) {
+      try {
+        const st = statSync(p);
+        if (st.isDirectory()) {
+          for (const e of readdirSync(p)) walk(`${p}/${e}`);
+        } else {
+          total += st.size;
+        }
+      } catch { /* ignore unreadable */ }
+    }
+    walk(job.outputDir);
+    res.json({ bytes: total, dir: job.outputDir, sharedWith });
+  } catch {
+    res.json({ bytes: 0, dir: job.outputDir, sharedWith });
+  }
 });
 
 finetuneRouter.post("/:id/stop", async (req, res) => {

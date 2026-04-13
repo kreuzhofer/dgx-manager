@@ -10,7 +10,7 @@ datasource db {
 model Node {
   id              String           @id @default(cuid())
   name            String           @unique
-  ipAddress       String           @unique
+  ipAddress       String?
   agentPort       Int              @default(8089)
   status          String           @default("new")
   provisionStatus String           @default("pending")
@@ -20,12 +20,29 @@ model Node {
   dockerAvailable Boolean          @default(false)
   ollamaInstalled Boolean          @default(false)
   agentVersion    String?
+  bootstrapMethod String           @default("ssh")
   lastSeen        DateTime?
   createdAt       DateTime         @default(now())
   deployments          Deployment[]
   clusterMemberships   ClusterNode[]
   finetuneJobs         FineTuneJob[]
   metrics              MetricSnapshot[]
+}
+
+model JoinToken {
+  id           String    @id @default(cuid())
+  token        String    @unique
+  label        String?
+  expiresAt    DateTime?
+  usedAt       DateTime?
+  usedByNodeId String?
+  revokedAt    DateTime?
+  createdAt    DateTime  @default(now())
+}
+
+model Setting {
+  key   String @id
+  value String
 }
 
 model Model {
@@ -119,6 +136,20 @@ model FineTuneJob {
   metrics      TrainingMetric[]
 }
 
+model Dataset {
+  id            String   @id @default(cuid())
+  name          String
+  description   String?
+  format        String   @default("jsonl")
+  source        String   @default("upload")
+  path          String?
+  huggingfaceId String?
+  size          Int?
+  sampleCount   Int?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
 model TrainingMetric {
   id        String   @id @default(cuid())
   jobId     String
@@ -129,5 +160,6 @@ model TrainingMetric {
   timestamp DateTime @default(now())
   job       FineTuneJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
+  @@unique([jobId, step])
   @@index([jobId, step])
 }

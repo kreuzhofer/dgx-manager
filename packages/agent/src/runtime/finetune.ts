@@ -4,7 +4,7 @@
  */
 
 import { spawn, execSync, ChildProcess } from "child_process";
-import { existsSync } from "fs";
+import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { SHARED_STORAGE, WORKSPACE, toContainerPath, toHostPath } from "../env.js";
 import { getTrainingRepoPath, type TrainingRecipe } from "../training-recipes.js";
@@ -15,9 +15,86 @@ interface FinetuneInstance {
   execProcess: ChildProcess | null;
   aborted: boolean;
   workerIps?: string[];
+  watchdogTimer?: NodeJS.Timeout;
 }
 
 const running = new Map<string, FinetuneInstance>();
+
+/**
+ * Persist multi-node worker IPs to NFS so cleanup can find them after agent restart.
+ * Without this, a restarted agent reattaches to the head container but loses the
+ * worker list — stop commands then leak worker containers on other nodes.
+ */
+function clusterFilePath(hostOutputDir: string): string {
+  return `${hostOutputDir}/.cluster-workers.json`;
+}
+
+function persistClusterWorkers(hostOutputDir: string, workerIps: string[]): void {
+  try {
+    writeFileSync(clusterFilePath(hostOutputDir), JSON.stringify(workerIps));
+  } catch (err) {
+    console.error(`[finetune] Failed to persist cluster workers:`, err);
+  }
+}
+
+function loadClusterWorkers(hostOutputDir: string): string[] | undefined {
+  try {
+    const raw = readFileSync(clusterFilePath(hostOutputDir), "utf-8");
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) {
+      return parsed;
+    }
+  } catch { /* missing or invalid */ }
+  return undefined;
+}
+
+/** Find the host output dir for a job by scanning shared storage. */
+function findOutputDirForJob(jobId: string): string | undefined {
+  try {
+    const out = execSync(
+      `ls -d ${SHARED_STORAGE}/outputs/${jobId}* 2>/dev/null | head -1`,
+      { timeout: 5_000, shell: "/bin/bash" }
+    ).toString().trim();
+    return out || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Force-clean a job's containers across head + workers when the agent has no
+ * in-memory record of it. Used as fallback in stopFinetuneJob after restart.
+ */
+function forceCleanupJob(jobId: string): boolean {
+  const containerName = `dgx-finetune-${jobId.slice(0, 12)}`;
+  let didSomething = false;
+
+  // Recover worker list from persisted state (if multi-node)
+  const outputDir = findOutputDirForJob(jobId);
+  const workerIps = outputDir ? loadClusterWorkers(outputDir) : undefined;
+
+  // Head container — silent if not present
+  try {
+    execSync(`docker rm -f ${containerName}`, { timeout: 30_000, stdio: "ignore" });
+    didSomething = true;
+  } catch { /* not present */ }
+
+  // Worker containers via SSH
+  if (workerIps && workerIps.length > 0) {
+    const sshUser = process.env.SSH_USER || process.env.USER || "daniel";
+    for (const ip of workerIps) {
+      try {
+        execSync(
+          `ssh -o StrictHostKeyChecking=no ${sshUser}@${ip} "docker rm -f ${containerName}"`,
+          { timeout: 15_000, stdio: "ignore" }
+        );
+        didSomething = true;
+      } catch { /* not present or unreachable */ }
+    }
+  }
+
+  return didSomething;
+}
 
 /**
  * Check for running finetune containers after agent restart.
@@ -43,11 +120,14 @@ export function reattachFinetuneJobs(
       console.log(`[finetune] Reattaching to running ${isMerge ? "merge" : "training"} container: ${containerName}`);
 
       // Find the train.log or merge.log file written by lib/logging.py
+      // Use the jobIdPrefix from container name to find the correct output directory
       const logFileName = isMerge ? "merge.log" : "train.log";
       let logFilePath: string | null = null;
       try {
+        // First try exact match by job ID prefix
+        const exactPath = `${WORKSPACE}/outputs/${jobIdPrefix}*/${logFileName}`;
         const findOut = execSync(
-          `docker exec ${containerName} find ${WORKSPACE}/outputs -name "${logFileName}" -maxdepth 3 2>/dev/null`,
+          `docker exec ${containerName} bash -c 'ls ${exactPath} 2>/dev/null || find ${WORKSPACE}/outputs -name "${logFileName}" -path "*${jobIdPrefix}*" -maxdepth 3 2>/dev/null'`,
           { timeout: 5_000 }
         ).toString().trim();
         logFilePath = findOut.split("\n")[0] || null;
@@ -101,7 +181,11 @@ export function reattachFinetuneJobs(
           console.log(`[finetune] Log stream ended for ${containerName}`);
         });
 
-        running.set(jobIdPrefix, { jobId: jobIdPrefix, containerName, execProcess: logProc, aborted: false });
+        // Restore cluster worker IPs from NFS so cleanup can reach them after restart
+        const outputDir = findOutputDirForJob(jobIdPrefix);
+        const workerIps = outputDir ? loadClusterWorkers(outputDir) : undefined;
+
+        running.set(jobIdPrefix, { jobId: jobIdPrefix, containerName, execProcess: logProc, aborted: false, workerIps });
       }
     }
   } catch (err) {
@@ -322,7 +406,8 @@ export async function startFinetuneJob(
   outputDir: string,
   config: Record<string, unknown>,
   clusterNodeIps: string[] | undefined,
-  callbacks: FinetuneCallbacks
+  callbacks: FinetuneCallbacks,
+  resumeFromCheckpoint: boolean = false
 ): Promise<void> {
   const isMultiNode = clusterNodeIps && clusterNodeIps.length > 1;
   const repoPath = getTrainingRepoPath();
@@ -347,6 +432,13 @@ export async function startFinetuneJob(
   const workerIps = isMultiNode ? clusterNodeIps!.slice(1) : undefined;
   const instance: FinetuneInstance = { jobId, containerName, execProcess: null, aborted: false, workerIps };
   running.set(jobId, instance);
+
+  // Persist multi-node worker IPs to NFS so cleanup survives agent restart.
+  if (workerIps && workerIps.length > 0) {
+    const hostOutputDir = toHostPath(outputDir);
+    try { execSync(`mkdir -p "${hostOutputDir}"`, { timeout: 5_000 }); } catch { /* */ }
+    persistClusterWorkers(hostOutputDir, workerIps);
+  }
 
   try {
     // Stop any existing container with the same name
@@ -493,6 +585,11 @@ export async function startFinetuneJob(
       trainArgs.push("--lora_target_modules", String(merged.lora_target_modules));
     }
 
+    if (resumeFromCheckpoint) {
+      trainArgs.push("--resume_from_checkpoint", "true");
+      callbacks.onLog(`\n=== RESUMING from latest checkpoint in ${outputDir} ===\n\n`);
+    }
+
     // Multi-node: generate hostfile, start worker containers via SSH
     if (isMultiNode && clusterNodeIps) {
       callbacks.onLog(`\nMulti-node training: ${clusterNodeIps.length} nodes\n`);
@@ -516,6 +613,12 @@ export async function startFinetuneJob(
             "--ulimit memlock=-1 --shm-size=1g --user root",
             `-e CUDA_VISIBLE_DEVICES=0 -e PYTHONUNBUFFERED=1`,
             `-e HF_HOME=${WORKSPACE}/models -e HF_HUB_OFFLINE=0`,
+            // NCCL InfiniBand config — must match head node
+            `-e NCCL_IB_DISABLE=0`,
+            `-e NCCL_SOCKET_IFNAME=enp1s0f0np0`,
+            `-e GLOO_SOCKET_IFNAME=enp1s0f0np0`,
+            `-e NCCL_IB_HCA=rocep1s0f0`,
+            `--device=/dev/infiniband/`,
             process.env.HF_TOKEN ? `-e HF_TOKEN=${process.env.HF_TOKEN}` : "",
             `-v ${SHARED_STORAGE}:${WORKSPACE}`,
             `-v /home/${sshUser}/.ssh:/tmp/.ssh:ro`,
@@ -547,10 +650,14 @@ export async function startFinetuneJob(
           // Generate hostfile on worker too
           execSync(`ssh ${sshUser}@${workerIp} "docker exec ${containerName} bash -c 'echo -e \\"${hostfileContent}\\" > /tmp/hostfile.txt'"`, { timeout: 5_000 });
 
-          // Launch training on worker (background, it will rendezvous with head)
-          const workerLaunchCmd = `docker exec -d ${containerName} bash ${launchPath} --hostfile /tmp/hostfile.txt ${trainArgs.join(" ")}`;
+          // Launch training on worker, redirecting stdout+stderr to a per-worker
+          // log file on shared NFS so we can post-mortem worker failures (without
+          // this, detached `docker exec -d` discards all output and we fly blind
+          // when ranks > 0 crash).
+          const workerLogPath = `${outputDir}/worker-${workerIp.replace(/\./g, "_")}.log`;
+          const workerLaunchCmd = `docker exec -d ${containerName} bash -c 'bash ${launchPath} --hostfile /tmp/hostfile.txt ${trainArgs.join(" ")} > ${workerLogPath} 2>&1'`;
           execSync(`ssh ${sshUser}@${workerIp} "${workerLaunchCmd}"`, { timeout: 30_000 });
-          callbacks.onLog(`Worker ${workerIp} training launched.\n`);
+          callbacks.onLog(`Worker ${workerIp} training launched (log: ${workerLogPath}).\n`);
         } catch (err) {
           callbacks.onComplete("failed", undefined, `Failed to start worker ${workerIp}: ${err}`);
           cleanup(containerName, jobId);
@@ -560,6 +667,35 @@ export async function startFinetuneJob(
 
       // Add --hostfile to head node args
       trainArgs.unshift("--hostfile", "/tmp/hostfile.txt");
+
+      // Watchdog: poll worker container status every 30s. If any worker's
+      // container exits while head is still running, force cleanup. Without
+      // this, a worker crash inside an NCCL collective leaves head hanging
+      // forever (because TORCH_NCCL_ASYNC_ERROR_HANDLING=1 disables timeout
+      // to tolerate 26B ZeRO-3 all-gather), leaking containers and pinning GPU.
+      const sshUserForWatchdog = process.env.SSH_USER || process.env.USER || "daniel";
+      const watchdogWorkerIps = clusterNodeIps!.slice(1);
+      instance.watchdogTimer = setInterval(() => {
+        if (instance.aborted) return;
+        for (const ip of watchdogWorkerIps) {
+          try {
+            const status = execSync(
+              `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${sshUserForWatchdog}@${ip} "docker inspect -f '{{.State.Status}}' ${containerName} 2>/dev/null || echo missing"`,
+              { timeout: 10_000 }
+            ).toString().trim();
+            if (status !== "running") {
+              callbacks.onLog(`\n[watchdog] Worker ${ip} container is ${status}. Force-stopping job.\n`);
+              if (instance.watchdogTimer) clearInterval(instance.watchdogTimer);
+              instance.aborted = true;
+              cleanup(containerName, jobId);
+              callbacks.onComplete("failed", undefined, `Worker ${ip} container exited (${status})`);
+              return;
+            }
+          } catch {
+            // Transient SSH/network failure — skip this tick
+          }
+        }
+      }, 30_000);
     }
 
     callbacks.onLog(`\nLaunching training: ${launchPath}\n`);
@@ -664,29 +800,41 @@ export async function startFinetuneJob(
 
 /**
  * Stop a running fine-tune job.
+ *
+ * If the job is tracked locally, kill its exec process and clean up via the
+ * normal path. Otherwise fall back to force cleanup using state persisted to
+ * NFS — this handles the case where the agent restarted and lost the in-memory
+ * record of the job (e.g. multi-node workers need to be cleaned even when the
+ * head agent doesn't remember them).
  */
 export function stopFinetuneJob(jobId: string): boolean {
   const instance = running.get(jobId);
-  if (!instance) return false;
 
-  instance.aborted = true;
-
-  // Kill the exec process
-  if (instance.execProcess?.pid) {
-    try {
-      process.kill(-instance.execProcess.pid, "SIGTERM");
-    } catch {
-      try { instance.execProcess.kill("SIGTERM"); } catch { /* ignore */ }
+  if (instance) {
+    instance.aborted = true;
+    if (instance.execProcess?.pid) {
+      try {
+        process.kill(-instance.execProcess.pid, "SIGTERM");
+      } catch {
+        try { instance.execProcess.kill("SIGTERM"); } catch { /* ignore */ }
+      }
     }
+    cleanup(instance.containerName, jobId);
+    return true;
   }
 
-  cleanup(instance.containerName, jobId);
-  return true;
+  // Not tracked — force cleanup using on-disk state
+  return forceCleanupJob(jobId);
 }
 
 /** Clean up Docker container and remove from tracking. */
 function cleanup(containerName: string, jobId: string) {
   const instance = running.get(jobId);
+
+  // Stop the watchdog first so it doesn't re-trigger mid-cleanup
+  if (instance?.watchdogTimer) {
+    clearInterval(instance.watchdogTimer);
+  }
 
   // Stop worker containers on remote nodes
   if (instance?.workerIps) {

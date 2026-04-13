@@ -11,6 +11,10 @@ import { finetuneRouter } from "./routes/finetune.js";
 import { loadbalancerRouter } from "./routes/loadbalancer.js";
 import { recipesRouter } from "./routes/recipes.js";
 import { trainingRecipesRouter } from "./routes/training-recipes.js";
+import { tokensRouter } from "./routes/tokens.js";
+import { settingsRouter } from "./routes/settings.js";
+import { agentBundleRouter } from "./routes/agent-bundle.js";
+import { datasetsRouter } from "./routes/datasets.js";
 import { sseHandler } from "./sse.js";
 
 const app = express();
@@ -46,6 +50,10 @@ app.use("/api/finetune", finetuneRouter);
 app.use("/api/lb", loadbalancerRouter);
 app.use("/api/recipes", recipesRouter);
 app.use("/api/training-recipes", trainingRecipesRouter);
+app.use("/api/tokens", tokensRouter);
+app.use("/api/settings", settingsRouter);
+app.use("/api/agent", agentBundleRouter);
+app.use("/api/datasets", datasetsRouter);
 
 // Broadcast recipe updates to dashboard
 agentHub.setRecipesHandler((recipes) => {
