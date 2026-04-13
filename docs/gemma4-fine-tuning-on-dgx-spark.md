@@ -184,6 +184,70 @@ We maintain a shared Python library (`lib/`) with all DGX Spark workarounds:
 
 ---
 
+## Production Pitfalls (Lessons from a 44h Training Run)
+
+The "happy path" for multi-day training runs has several sharp edges. Here's what we hit and fixed.
+
+### The Eval Collator Crash at the Finish Line
+
+After 44 hours of successful training, our first full 26B run crashed during the final end-of-epoch evaluation:
+
+```
+ValueError: Unable to create tensor... Perhaps your features
+(`labels` in this case) have excessive nesting
+```
+
+The root cause: our `format_example` function was pre-computing `tokens["labels"] = tokens["input_ids"].copy()` during tokenization. Training worked fine because `per_device_train_batch_size=1` — each batch has one sequence, no stacking needed. Evaluation uses `per_device_eval_batch_size=8` by default, and `tokenizer.pad()` doesn't pad the `labels` field, so stacking sequences of different lengths into a tensor blows up.
+
+**Fix:** don't pre-compute labels. `DataCollatorForLanguageModeling(mlm=False)` derives labels from `input_ids` *after* padding, which is the correct order.
+
+### The Invisible HF Datasets Cache
+
+After removing the pre-computed labels, the bug still reproduced. Files on disk showed the fix, but the tokenized dataset was being pulled from a stale HF datasets cache dated *before* the fix. HuggingFace's dataset fingerprint hashing misses changes behind `lambda` in `.map()` calls.
+
+**Fix:** pass `load_from_cache_file=False` to `raw.map()`. Costs ~1-2 min of re-tokenization per run; saves you from debugging ghost bugs.
+
+### DeepSpeed Resume is Not "Just Works"
+
+`save_only_model=True` in `SFTConfig` keeps checkpoints small (~60MB LoRA adapter only). Fast saves, great for frequent checkpointing. But attempting to resume with `trainer.train(resume_from_checkpoint=True)` explodes:
+
+```
+ValueError: Can't find a valid checkpoint at .../checkpoint-500
+```
+
+DeepSpeed's resume path expects `zero_pp_rank_*` optimizer state files, which `save_only_model=True` skipped. You need `save_only_model=False` if you want resumability. With LoRA + ZeRO-3, saves are still small (~430MB per checkpoint) because DeepSpeed only tracks the trainable params' optimizer state, not the frozen base model.
+
+### Silent Multi-Node Hangs
+
+When rank 1 (worker) crashes during a collective operation, rank 0 (head) doesn't crash — it hangs waiting forever inside NCCL. We set `TORCH_NCCL_ASYNC_ERROR_HANDLING=1` to disable NCCL's 10-min timeout (needed for 26B ZeRO-3 all-gather), which also disables rank-failure detection.
+
+Symptoms: training log stops updating, GPU stays at 96% utilization on head, container never exits, agent never fires its "training exited" event. Job stuck in "running" forever, GPU pinned, can't start new work until something intervenes.
+
+**Fix (in our agent):** a 30-second watchdog that polls each worker container's state via SSH. If a worker container transitions out of `running` while the head is still alive, force-clean the head container and mark the job failed. Turns a silent 44h zombie into a clear error within 30 seconds.
+
+### Mixed Rank Output in One Log File
+
+Python's `sys.stdout = Tee(file)` captures Python `print()` calls but misses C/C++ writes from PyTorch/DeepSpeed loaders (they write directly to fd 1/2). On top of that, if every rank's Python Tee points at the same shared NFS `train.log`, output interleaves unpredictably.
+
+**Fix:** shell-level `tee` in the launch script, per-rank:
+
+```bash
+if [ "$NODE_RANK" -eq 0 ]; then
+    RANK_LOG="$OUTPUT_DIR/train.log"
+else
+    RANK_LOG="$OUTPUT_DIR/train-rank${NODE_RANK}.log"
+fi
+exec > >(tee -a "$RANK_LOG") 2>&1
+```
+
+Captures *everything* (Python, C extensions, NCCL debug), keeps ranks separate, survives resumes via append mode.
+
+### Metric Deduplication
+
+Each training step emits multiple log patterns that the agent parses: `[TRAIN] step=N/M loss=X`, `{'loss': '13.4', ...}` dict, and tqdm bars. Our server was naïvely `prisma.trainingMetric.create()`-ing on every one of them, so the loss curve showed 3× the data points for each step. Upsert on `(jobId, step)` with a unique constraint makes this a non-issue.
+
+---
+
 ## Serving with vLLM
 
 After merging the LoRA adapter, we generate a vLLM recipe and deploy:

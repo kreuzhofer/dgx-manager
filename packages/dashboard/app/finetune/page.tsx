@@ -23,6 +23,15 @@ interface Node {
   status: string;
 }
 
+interface Dataset {
+  id: string;
+  name: string;
+  format: string;
+  source: string;
+  path: string | null;
+  huggingfaceId: string | null;
+}
+
 interface FineTuneJob {
   id: string;
   nodeId: string;
@@ -65,7 +74,16 @@ export default function FinetunePage() {
   const [selectedRecipe, setSelectedRecipe] = useState("");
   const [selectedNode, setSelectedNode] = useState("");
   const [dataset, setDataset] = useState("");
+  const [datasets, setDatasets] = useState<Dataset[]>([]);
+  const [manualDataset, setManualDataset] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+
+  // Resume-from-checkpoint UI state
+  interface Checkpoint { step: number; name: string; path: string; createdAt?: string }
+  const [resumingJobId, setResumingJobId] = useState<string | null>(null);
+  const [jobCheckpoints, setJobCheckpoints] = useState<Record<string, Checkpoint[]>>({});
+  const [resumeNodeIds, setResumeNodeIds] = useState<string[]>([]);
+  const [resumeSubmitting, setResumeSubmitting] = useState(false);
 
   // Hyperparameter overrides
   const [learningRate, setLearningRate] = useState("");
@@ -104,10 +122,12 @@ export default function FinetunePage() {
       apiFetch<TrainingRecipe[]>("/api/training-recipes"),
       apiFetch<Node[]>("/api/nodes/idle"),
       apiFetch<FineTuneJob[]>("/api/finetune"),
+      apiFetch<Dataset[]>("/api/datasets"),
     ])
-      .then(([r, n, j]) => {
+      .then(([r, n, j, d]) => {
         setRecipes(r);
         setIdleNodes(n);
+        setDatasets(d);
         if (n.length > 0 && !selectedNode) setSelectedNode(n[0].id);
         setJobs(j);
         // Load metrics for active/completed jobs
@@ -241,10 +261,15 @@ export default function FinetunePage() {
 
   const { connected } = useSSE(handleSSE, loadData);
 
-  // Auto-scroll log viewers
+  // Auto-scroll log viewers, but only while the user is pinned to the bottom.
+  // Each viewer tracks its own follow state via data-autoscroll on the element
+  // (toggled by onScroll below). Once the user scrolls up manually, we stop
+  // following; when they scroll back to the bottom, following resumes.
   useEffect(() => {
     document.querySelectorAll("[data-log-viewer]").forEach((el) => {
-      el.scrollTop = el.scrollHeight;
+      if ((el as HTMLElement).dataset.autoscroll !== "false") {
+        el.scrollTop = el.scrollHeight;
+      }
     });
   }, [logs, viewingLogs]);
 
@@ -294,7 +319,8 @@ export default function FinetunePage() {
         method: "POST",
         body: JSON.stringify(body),
       });
-      setJobs((prev) => [job, ...prev]);
+      // Dedupe: SSE event may have already inserted this job
+      setJobs((prev) => prev.some((j) => j.id === job.id) ? prev : [job, ...prev]);
       setViewingLogs(job.id);
       setDataset("");
     } catch (err) {
@@ -313,7 +339,31 @@ export default function FinetunePage() {
 
   const deleteJob = async (id: string) => {
     if (!confirm("Delete this fine-tune job?")) return;
-    await apiFetch(`/api/finetune/${id}`, { method: "DELETE" });
+
+    // Ask about disk cleanup separately. Fetch usage so the prompt shows the
+    // size, and warn if other jobs share the dir (resume children).
+    let cleanFiles = false;
+    try {
+      const usage = await apiFetch<{ bytes: number; dir: string | null; sharedWith: number }>(
+        `/api/finetune/${id}/disk-usage`
+      );
+      if (usage.dir && usage.bytes > 0) {
+        const fmt = (b: number) =>
+          b < 1024 * 1024 ? `${(b / 1024).toFixed(0)} KB` :
+          b < 1024 * 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} MB` :
+          `${(b / 1024 / 1024 / 1024).toFixed(2)} GB`;
+        const sharedWarning = usage.sharedWith > 0
+          ? `\n\nNOTE: ${usage.sharedWith} other job${usage.sharedWith > 1 ? "s" : ""} share this directory (resume chain). Files will NOT be deleted to protect them.`
+          : "";
+        cleanFiles = confirm(
+          `Also delete output files in ${usage.dir}?\n` +
+          `Size: ${fmt(usage.bytes)}` +
+          sharedWarning + `\n\nOK = delete files\nCancel = keep files`
+        );
+      }
+    } catch { /* ignore — proceed without cleanup */ }
+
+    await apiFetch(`/api/finetune/${id}?cleanFiles=${cleanFiles}`, { method: "DELETE" });
     setJobs((prev) => prev.filter((j) => j.id !== id));
   };
 
@@ -324,6 +374,48 @@ export default function FinetunePage() {
         prev.map((j) => j.id === id ? { ...j, mergeStatus: "running" } : j)
       );
     } catch (err) { alert(String(err)); }
+  };
+
+  const openResume = async (job: FineTuneJob) => {
+    setResumingJobId(job.id);
+    setResumeNodeIds([job.nodeId]);
+    if (!jobCheckpoints[job.id]) {
+      try {
+        const cps = await apiFetch<Checkpoint[]>(`/api/finetune/${job.id}/checkpoints`);
+        setJobCheckpoints((prev) => ({ ...prev, [job.id]: cps }));
+      } catch { /* ignore */ }
+    }
+  };
+
+  const submitResume = async (job: FineTuneJob) => {
+    if (resumeNodeIds.length === 0) {
+      alert("Pick at least one node");
+      return;
+    }
+    setResumeSubmitting(true);
+    try {
+      const newJob = await apiFetch<FineTuneJob>("/api/finetune", {
+        method: "POST",
+        body: JSON.stringify({
+          nodeIds: resumeNodeIds,
+          resumeFromJobId: job.id,
+        }),
+      });
+      // Dedupe: SSE event may have already inserted this job
+      setJobs((prev) => prev.some((j) => j.id === newJob.id) ? prev : [newJob, ...prev]);
+      setResumingJobId(null);
+      setResumeNodeIds([]);
+    } catch (err) {
+      alert(String(err));
+    } finally {
+      setResumeSubmitting(false);
+    }
+  };
+
+  const toggleResumeNode = (nodeId: string) => {
+    setResumeNodeIds((prev) =>
+      prev.includes(nodeId) ? prev.filter((id) => id !== nodeId) : [...prev, nodeId]
+    );
   };
 
   const deployJob = (job: FineTuneJob) => {
@@ -345,9 +437,12 @@ export default function FinetunePage() {
     return `~${hrs}h ${mins % 60}m left`;
   };
 
-  const formatElapsed = (startedAt: string | null) => {
+  const formatElapsed = (startedAt: string | null, completedAt: string | null = null) => {
     if (!startedAt) return "";
-    const ms = Date.now() - new Date(startedAt).getTime();
+    // For finished jobs, freeze the duration at completedAt instead of ticking
+    // up against wallclock. Live jobs (no completedAt) keep growing.
+    const endMs = completedAt ? new Date(completedAt).getTime() : Date.now();
+    const ms = endMs - new Date(startedAt).getTime();
     const mins = Math.floor(ms / 60000);
     const secs = Math.floor((ms % 60000) / 1000);
     if (mins > 60) {
@@ -452,15 +547,39 @@ export default function FinetunePage() {
           <div>
             <label className="block text-xs text-gray-400 mb-1">
               Dataset
-              <span className="ml-1 text-gray-600">(NFS path or HuggingFace ID)</span>
+              {!manualDataset && datasets.length > 0 && (
+                <button onClick={() => { setManualDataset(true); setDataset(""); }} className="ml-2 text-green-500 hover:text-green-400 text-xs">
+                  or enter manually
+                </button>
+              )}
+              {manualDataset && (
+                <button onClick={() => { setManualDataset(false); setDataset(""); }} className="ml-2 text-green-500 hover:text-green-400 text-xs">
+                  or pick from list
+                </button>
+              )}
             </label>
-            <input
-              type="text"
-              value={dataset}
-              onChange={(e) => setDataset(e.target.value)}
-              placeholder="/mnt/tank/data/my-dataset.jsonl"
-              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
-            />
+            {!manualDataset && datasets.length > 0 ? (
+              <select
+                value={dataset}
+                onChange={(e) => setDataset(e.target.value)}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
+              >
+                <option value="">Select a dataset...</option>
+                {datasets.map((d) => (
+                  <option key={d.id} value={d.source === "huggingface" ? d.huggingfaceId! : d.path!}>
+                    {d.name} ({d.format})
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                type="text"
+                value={dataset}
+                onChange={(e) => setDataset(e.target.value)}
+                placeholder="/mnt/tank/data/my-dataset.jsonl or HuggingFace ID"
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
+              />
+            )}
           </div>
         </div>
 
@@ -637,11 +756,18 @@ export default function FinetunePage() {
                         {job.baseModel}
                       </h3>
                       <p className="text-xs text-gray-500 mt-0.5">
+                        <button
+                          onClick={() => navigator.clipboard.writeText(job.id)}
+                          title={`${job.id} (click to copy)`}
+                          className="font-mono text-[10px] text-gray-600 hover:text-gray-300 transition-colors mr-2"
+                        >
+                          {job.id.slice(0, 12)}
+                        </button>
                         {job.node?.name || job.nodeId}
                         {job.node?.ipAddress && ` (${job.node.ipAddress})`}
                         <span className="ml-2 text-gray-600">{job.dataset}</span>
                         {job.startedAt && (
-                          <span className="ml-2">{formatElapsed(job.startedAt)}</span>
+                          <span className="ml-2">{formatElapsed(job.startedAt, job.completedAt)}</span>
                         )}
                       </p>
                     </div>
@@ -665,13 +791,11 @@ export default function FinetunePage() {
                           fetch(`${apiBase}/api/finetune/${job.id}/logs`, { cache: "no-store" })
                             .then(r => r.text())
                             .then(text => {
-                              if (text) {
-                                // File content is the base, SSE content appends after
-                                setLogs(prev => {
-                                  const sseContent = prev[job.id] || "";
-                                  return { ...prev, [job.id]: text + (sseContent.length > text.length ? sseContent.slice(text.length) : "") };
-                                });
-                              }
+                              // Replace the buffer with the file content. The previous
+                              // length-based slice merge produced duplicates because SSE
+                              // events accumulate independently of the file, with overlap.
+                              // Subsequent SSE events will append cleanly from this point.
+                              setLogs(prev => ({ ...prev, [job.id]: text || prev[job.id] || "" }));
                             })
                             .catch(() => {});
                         }
@@ -714,6 +838,14 @@ export default function FinetunePage() {
                         Deploy
                       </button>
                     )}
+                    {(job.status === "failed" || job.status === "stopped") && (
+                      <button
+                        onClick={() => openResume(job)}
+                        className="text-xs px-2 py-1 rounded bg-amber-900/50 hover:bg-amber-800 text-amber-300 transition-colors"
+                      >
+                        Resume
+                      </button>
+                    )}
                     {!isActive && !isStopping && (
                       <button
                         onClick={() => deleteJob(job.id)}
@@ -724,6 +856,63 @@ export default function FinetunePage() {
                     )}
                   </div>
                 </div>
+
+                {/* Resume panel: checkpoints + node selection */}
+                {resumingJobId === job.id && (
+                  <div className="mt-3 p-3 bg-amber-900/10 border border-amber-900/40 rounded">
+                    <div className="flex items-baseline justify-between mb-2">
+                      <h4 className="text-sm font-medium text-amber-300">Resume from checkpoint</h4>
+                      <button
+                        onClick={() => { setResumingJobId(null); setResumeNodeIds([]); }}
+                        className="text-xs text-gray-500 hover:text-gray-300"
+                      >Cancel</button>
+                    </div>
+                    {(() => {
+                      const cps = jobCheckpoints[job.id];
+                      if (!cps) return <p className="text-xs text-gray-500">Loading checkpoints...</p>;
+                      if (cps.length === 0) return (
+                        <p className="text-xs text-red-400">No checkpoints found in {job.outputDir}. Cannot resume.</p>
+                      );
+                      const latest = cps[0];
+                      return (
+                        <>
+                          <div className="text-xs text-gray-400 mb-3">
+                            <p>Will resume from <span className="text-amber-300 font-mono">{latest.name}</span> (step {latest.step.toLocaleString()}{latest.createdAt && `, ${new Date(latest.createdAt).toLocaleString()}`})</p>
+                            {cps.length > 1 && (
+                              <p className="text-gray-600 mt-0.5">{cps.length} checkpoints available — HF Trainer auto-picks the latest.</p>
+                            )}
+                          </div>
+                          <p className="text-xs text-gray-400 mb-1">Pick nodes (head first):</p>
+                          <div className="space-y-1 mb-3">
+                            {idleNodes.map((n) => (
+                              <label key={n.id} className="flex items-center gap-2 text-xs cursor-pointer hover:text-white">
+                                <input
+                                  type="checkbox"
+                                  checked={resumeNodeIds.includes(n.id)}
+                                  onChange={() => toggleResumeNode(n.id)}
+                                  className="accent-amber-500"
+                                />
+                                <span className="font-mono">{n.name}</span>
+                                <span className="text-gray-600">{n.ipAddress}</span>
+                                {resumeNodeIds[0] === n.id && <span className="text-amber-400 text-[10px]">HEAD</span>}
+                              </label>
+                            ))}
+                            {idleNodes.length === 0 && (
+                              <p className="text-xs text-gray-500 italic">No idle nodes available.</p>
+                            )}
+                          </div>
+                          <button
+                            onClick={() => submitResume(job)}
+                            disabled={resumeSubmitting || resumeNodeIds.length === 0 || cps.length === 0}
+                            className="text-xs px-3 py-1.5 rounded bg-amber-700 hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed text-white transition-colors"
+                          >
+                            {resumeSubmitting ? "Resuming..." : `Resume on ${resumeNodeIds.length} node${resumeNodeIds.length === 1 ? "" : "s"}`}
+                          </button>
+                        </>
+                      );
+                    })()}
+                  </div>
+                )}
 
                 {/* Phase-aware progress */}
                 {isActive && phaseInfo && (
@@ -765,32 +954,49 @@ export default function FinetunePage() {
                 {(() => {
                   const m = jobMetrics[job.id];
                   if (!m || m.losses.length < 2) return null;
-                  const maxLoss = Math.max(...m.losses);
-                  const minLoss = Math.min(...m.losses);
+                  const evalValues = m.evalLosses.filter((v): v is number => v != null);
+                  const maxLoss = Math.max(...m.losses, ...evalValues);
+                  const minLoss = Math.min(...m.losses, ...evalValues);
                   const range = maxLoss - minLoss || 1;
                   const w = 300, h = 60, pad = 2;
                   const gw = w - pad * 2, gh = h - pad * 2;
-                  const points = m.losses.map((v, i) => {
-                    const x = pad + (i / (m.losses.length - 1)) * gw;
-                    const y = pad + gh - ((v - minLoss) / range) * gh;
-                    return `${x},${y}`;
-                  });
+                  const yFor = (v: number) => pad + gh - ((v - minLoss) / range) * gh;
+                  const xFor = (i: number) => pad + (i / (m.losses.length - 1)) * gw;
+                  const points = m.losses.map((v, i) => `${xFor(i)},${yFor(v)}`);
                   const linePath = `M${points.join("L")}`;
                   const areaPath = `${linePath}L${pad + gw},${pad + gh}L${pad},${pad + gh}Z`;
                   const lastLoss = m.losses[m.losses.length - 1];
+                  const lastEval = evalValues[evalValues.length - 1];
                   return (
                     <div className="mt-3">
                       <div className="flex justify-between items-baseline mb-0.5">
                         <span className="text-[10px] text-gray-500 uppercase tracking-wide">Loss Curve</span>
                         <span className="text-xs font-mono text-gray-300">
-                          {lastLoss.toFixed(2)}
-                          <span className="text-gray-600 ml-1">({m.losses.length} points)</span>
+                          <span className="text-green-400">train {lastLoss.toFixed(2)}</span>
+                          {lastEval !== undefined && (
+                            <span className="ml-2 text-red-400">eval {lastEval.toFixed(2)}</span>
+                          )}
+                          <span className="text-gray-600 ml-2">({m.losses.length} pts)</span>
                         </span>
                       </div>
                       <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="w-full rounded" style={{ height: `${h}px` }}>
                         <rect x={0} y={0} width={w} height={h} rx={4} fill="rgba(0,0,0,0.2)" />
                         <path d={areaPath} fill="#22c55e" opacity={0.12} />
                         <path d={linePath} fill="none" stroke="#22c55e" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+                        {m.evalLosses.map((v, i) =>
+                          v == null ? null : (
+                            <circle
+                              key={i}
+                              cx={xFor(i)}
+                              cy={yFor(v)}
+                              r={2.5}
+                              fill="#ef4444"
+                              stroke="#1f2937"
+                              strokeWidth={0.5}
+                              vectorEffect="non-scaling-stroke"
+                            />
+                          )
+                        )}
                       </svg>
                     </div>
                   );
@@ -815,6 +1021,12 @@ export default function FinetunePage() {
                 {viewingLogs === job.id && (
                   <pre
                     data-log-viewer
+                    data-autoscroll="true"
+                    onScroll={(e) => {
+                      const el = e.currentTarget;
+                      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 20;
+                      el.dataset.autoscroll = atBottom ? "true" : "false";
+                    }}
                     className="mt-3 bg-black/50 border border-gray-800 rounded p-3 text-xs text-gray-400 font-mono max-h-64 overflow-y-auto whitespace-pre-wrap"
                   >
                     {logs[job.id] || job.logs || "Waiting for logs..."}

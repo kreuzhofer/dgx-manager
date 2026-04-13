@@ -11,5 +11,9 @@
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "werner@kreuzhofer-plugins": true,
+    "superpowers@claude-plugins-official": true
   }
 }

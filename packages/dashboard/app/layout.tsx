@@ -29,7 +29,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <NavLink href="/nodes">Nodes</NavLink>
                 <NavLink href="/deployments">Deployments</NavLink>
                 <NavLink href="/finetune">Fine-tune</NavLink>
+                <NavLink href="/datasets">Datasets</NavLink>
                 <NavLink href="/loadbalancer">Load Balancer</NavLink>
+                <NavLink href="/settings">Settings</NavLink>
               </div>
             </div>
           </div>

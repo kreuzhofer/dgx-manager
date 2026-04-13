@@ -50,6 +50,9 @@ The server APIs for these features are complete, but the dashboard pages are sti
 - Multi-format dataset support: ShareGPT, OpenAI, QA (question/context/answer), Instruct (instruction/input/output)
 - HuggingFace dataset IDs loaded directly (e.g., `b-mc2/sql-create-context`)
 - Dashboard: Job creation form with recipe/node/dataset selection, hyperparameter overrides
+- Multi-node training: DeepSpeed ZeRO-3 across 2+ DGX Spark nodes via torchrun + hostfile
+- InfiniBand/RDMA passthrough for NCCL on both head and worker containers
+- NCCL timeout workaround: `TORCH_NCCL_ASYNC_ERROR_HANDLING=1` (PyTorch bug #124950)
 
 ### Monitoring & Observability
 
@@ -81,21 +84,57 @@ The server APIs for these features are complete, but the dashboard pages are sti
 
 ### Storage abstraction
 
-The current implementation assumes a shared NFS mount (`/mnt/tank`) across all nodes for models, datasets, training scripts, and outputs. Not every deployment will have NFS. Future iterations should:
+All storage paths configurable via `SHARED_STORAGE_PATH` env var — no hardcoded `/mnt/tank`. Future iterations should:
 
-- Make all storage paths configurable (no hardcoded `/mnt/tank` or `/workspace` assumptions)
 - Support alternative shared storage backends (S3/MinIO, Ceph, host-local with rsync)
 - Allow dataset and model transfer via the agent when shared storage is unavailable
 - Provide a setup wizard or configuration file for storage topology
 
-## Phase 4: Dataset Management
+## Phase 3.5: Agent Bootstrap & HTTP Updates ✅
+
+**Goal:** Remove NFS and SSH as hard dependencies for adding nodes and updating agents.
+
+### Join Token Bootstrap
+
+- Server generates single-use join tokens via `POST /api/tokens`
+- Self-contained install script at `GET /api/agent/install.sh` — provisions Docker, nvidia-container-toolkit, Node.js, downloads agent, creates systemd service
+- Agent registers with token on first connect, server auto-creates Node record
+- Node ID persisted to `/opt/dgx-agent/node-id` for subsequent reconnects
+- Three tiers: Full SSH+NFS, SSH only, Agent-only (join token)
+
+### HTTP Agent Updates
+
+- Server builds and serves agent bundle tarball at `GET /api/agent/bundle`
+- `POST /api/nodes/:id/update-agent` sends update command via WebSocket
+- Agent downloads bundle, swaps files atomically, restarts systemd service
+- Works for all nodes regardless of bootstrap method
+
+### Settings Dashboard
+
+- Settings page at `/settings` with token management (create, revoke, list)
+- Install command display with one-click copy
+- Agent bundle version and download link
+
+### Multi-Node SSH Key Exchange
+
+SSH remains the coordination mechanism for multi-node training (torchrun) and vLLM clusters (Ray). To support token-bootstrapped nodes in multi-node jobs:
+
+- [ ] Agent generates/reports SSH public key on registration
+- [ ] Server stores public keys and distributes authorized_keys before multi-node jobs
+- [ ] Pre-flight SSH connectivity check between participating nodes
+- [ ] Clear setup documentation in install script output and Settings page
+
+## Phase 4: Dataset Management (in progress)
 
 **Goal:** First-class support for training data throughout the fine-tuning workflow.
 
-- Upload and manage training datasets through the dashboard
-- Dataset versioning and lineage tracking
-- Format validation and preview (JSONL, Alpaca, ShareGPT, etc.)
-- Direct integration with fine-tuning jobs from Phase 3
+- Upload datasets via dashboard (multipart file upload to shared storage)
+- Register existing NFS paths or HuggingFace dataset IDs
+- Auto-detect format from first JSON line (ShareGPT, OpenAI, QA, Instruct)
+- Dataset preview (first N rows displayed in dashboard)
+- Dataset picker in fine-tune job creation (replaces raw text input)
+- [ ] Dataset versioning and lineage tracking
+- [ ] CSV/Parquet format support
 
 ## Phase 5: Evaluation & Benchmarks 🔜
 
@@ -105,10 +144,13 @@ The current implementation assumes a shared NFS mount (`/mnt/tank`) across all n
   - Gemma 4 E2B: base 4% → fine-tuned 22% exact-match accuracy on SQL generation (5.5x improvement)
   - Key lesson: eval prompt format must match training format (no system prompt, same context layout)
   - Better SQL normalization: handles quote style, chat template artifacts, whitespace
-- Run evaluation suites (lm-eval-harness, custom benchmarks) against deployed models
-- Track quality metrics over time with per-model and per-run history
-- Compare base models against fine-tuned variants
-- Dashboard views for benchmark results and regression detection
+- 26B full-epoch training in progress (8840 steps, ~46h ETA) — pending merge + deploy + eval
+- [ ] Run evaluation suites (lm-eval-harness, custom benchmarks) against deployed models
+- [ ] Track quality metrics over time with per-model and per-run history
+- [ ] Compare base models against fine-tuned variants
+- [ ] Dashboard views for benchmark results and regression detection
+- [ ] Upload fine-tuned models to HuggingFace (requires HF_TOKEN)
+- [ ] Multimodal fine-tuning: Gemma 4 as a visual judge (image+text training)
 
 ## Phase 6: User Auth & Multi-Tenancy
 
@@ -138,14 +180,19 @@ The current implementation assumes a shared NFS mount (`/mnt/tank`) across all n
 | Deployments | ✅ | ✅ | ✅ | ✅ |
 | Load Balancer | ✅ | — | placeholder | ✅ |
 | Models | ✅ | — | placeholder | ✅ |
-| Fine-Tuning | ✅ | ✅ | ✅ | ✅ |
+| Fine-Tuning (single) | ✅ | ✅ | ✅ | ✅ |
+| Fine-Tuning (multi-node) | ✅ | ✅ | ✅ | ✅ |
 | Merge & Deploy | ✅ | ✅ | ✅ | ✅ |
 | Training Metrics | ✅ | ✅ | ✅ | ✅ |
-| Datasets | — | — | — | — |
+| Agent Bootstrap | ✅ | ✅ | ✅ | ✅ |
+| HTTP Agent Updates | ✅ | ✅ | — | ✅ |
+| Settings | ✅ | — | ✅ | ✅ |
+| SSH Key Exchange | — | — | — | — |
+| Datasets | ✅ | — | ✅ | ✅ |
 | Evaluation | partial | — | — | — |
 | Auth & RBAC | — | — | — | — |
 | Multi-Cluster | — | — | — | — |
 
 ---
 
-*Last updated: April 9, 2026*
+*Last updated: April 11, 2026*
