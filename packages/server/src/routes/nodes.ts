@@ -73,15 +73,18 @@ nodesRouter.get("/:id", async (req, res) => {
 // POST /api/nodes
 nodesRouter.post("/", async (req, res) => {
   const { name, ipAddress } = req.body;
-  if (!name || !ipAddress) {
-    return res.status(400).json({ error: "name and ipAddress required" });
+  if (!name) {
+    return res.status(400).json({ error: "name is required" });
   }
 
   const node = await prisma.node.create({
-    data: { name, ipAddress },
+    data: { name, ipAddress: ipAddress || null },
   });
 
-  // Run audit in background
+  // Run audit in background (only for SSH-managed nodes with an IP)
+  if (!ipAddress) {
+    return res.status(201).json(node);
+  }
   auditNode(ipAddress, node.id).then(async (report) => {
     await prisma.node.update({
       where: { id: node.id },
@@ -126,10 +129,14 @@ nodesRouter.post("/:id/provision", async (req, res) => {
     data: { provisionStatus: "provisioning" },
   });
 
+  if (!node.ipAddress) {
+    return res.status(400).json({ error: "Cannot provision a node without an IP address (token-bootstrapped nodes are self-provisioned)" });
+  }
+
   // Provision in background
   provisionNode(node.ipAddress, report.checks, node.id).then(async (log) => {
     // Re-audit after provisioning
-    const newReport = await auditNode(node.ipAddress, node.id);
+    const newReport = await auditNode(node.ipAddress!, node.id);
     await prisma.node.update({
       where: { id: node.id },
       data: {
@@ -171,6 +178,10 @@ nodesRouter.post("/:id/deploy-agent", async (req, res) => {
   const managerHost = process.env.MANAGER_ADVERTISE_HOST || process.env.MANAGER_HOST || "192.168.44.36";
   const managerPort = Number(process.env.PORT || 4000);
 
+  if (!node.ipAddress) {
+    return res.status(400).json({ error: "Cannot deploy agent via SSH without an IP address. Use the install script for token-bootstrapped nodes." });
+  }
+
   const log = await deployAgent(node.ipAddress, node.id, managerHost, managerPort);
 
   // Re-audit to refresh prereq status after deploy
@@ -186,6 +197,26 @@ nodesRouter.post("/:id/deploy-agent", async (req, res) => {
   });
 
   res.json({ status: "agent-deployed", log });
+});
+
+// POST /api/nodes/:id/update-agent — update agent via HTTP bundle (works for all nodes)
+nodesRouter.post("/:id/update-agent", async (req, res) => {
+  const node = await prisma.node.findUnique({ where: { id: req.params.id } });
+  if (!node) return res.status(404).json({ error: "Node not found" });
+
+  const agentHub: AgentHub = req.app.get("agentHub");
+
+  const managerHost = process.env.MANAGER_ADVERTISE_HOST || process.env.MANAGER_HOST || "192.168.44.36";
+  const port = process.env.PORT || "4000";
+  const bundleUrl = `http://${managerHost}:${port}/api/agent/bundle`;
+  const version = getExpectedAgentVersion();
+
+  agentHub.sendToAgent(node.id, {
+    type: "cmd:update",
+    payload: { bundleUrl, version },
+  });
+
+  res.json({ status: "updating", version });
 });
 
 // DELETE /api/nodes/:id
