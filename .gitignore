@@ -37,3 +37,7 @@ next-env.d.ts
 /prisma/*.db
 /prisma/*.db-journal
 **/generated/prisma
+
+# agent bundles (built by scripts/build-agent-bundles.sh)
+packages/server/agent-bundles/
+packages/server/agent-bundle.tar.gz

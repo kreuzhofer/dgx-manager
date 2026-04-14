@@ -99,6 +99,9 @@ export class AgentHub {
             nodeId = msg.payload.nodeId;
             this.agents.set(nodeId!, { ws, nodeId: nodeId! });
             const agentVersion = msg.payload.agentVersion || null;
+            const reportedArch = msg.payload.arch;
+            const archValue =
+              reportedArch === "amd64" || reportedArch === "arm64" ? reportedArch : undefined;
             await prisma.node.update({
               where: { id: nodeId! },
               data: {
@@ -106,6 +109,7 @@ export class AgentHub {
                 gpuModel: msg.payload.gpuModel,
                 vramTotal: msg.payload.vramTotal,
                 agentVersion,
+                ...(archValue ? { arch: archValue } : {}),
                 lastSeen: new Date(),
               },
             });
@@ -115,7 +119,9 @@ export class AgentHub {
           }
 
           case "agent:register-token": {
-            const { token, hostname, gpuModel, vramTotal, agentVersion: tokenAgentVersion } = msg.payload;
+            const { token, hostname, gpuModel, vramTotal, agentVersion: tokenAgentVersion, arch: reportedArch } = msg.payload;
+            const archValue =
+              reportedArch === "amd64" || reportedArch === "arm64" ? reportedArch : null;
 
             // Validate token
             const joinToken = await prisma.joinToken.findUnique({ where: { token } });
@@ -167,6 +173,7 @@ export class AgentHub {
                 gpuModel: gpuModel || null,
                 vramTotal: vramTotal || null,
                 agentVersion: tokenAgentVersion || null,
+                arch: archValue,
                 dockerAvailable: true, // install script ensures Docker is present
                 lastSeen: new Date(),
               },
@@ -186,7 +193,42 @@ export class AgentHub {
             // Send acceptance with nodeId
             ws.send(JSON.stringify({ type: "register:accepted", payload: { nodeId: node.id } }));
 
+            // Tell dashboards a new node record was created (so they can append
+            // it to their list without a reload), then broadcast the usual
+            // online status update.
+            sseBroadcast({ type: "node:created", payload: node });
             sseBroadcast({ type: "node:status", payload: { nodeId, status: "online", agentVersion: tokenAgentVersion } });
+            break;
+          }
+
+          case "agent:self-audit": {
+            if (!nodeId) break;
+            const { systemInfo, checks } = msg.payload as {
+              systemInfo: string;
+              checks: { name: string; status: "green" | "yellow" | "red"; detail: string }[];
+            };
+            const report = { reachable: true, sudoAvailable: true, systemInfo, checks };
+            const dockerGreen = checks.find((c) => c.name === "Docker")?.status === "green";
+            const ollamaGreen = checks.find((c) => c.name === "Ollama")?.status === "green";
+            await prisma.node.update({
+              where: { id: nodeId },
+              data: {
+                provisionStatus: "agent-deployed",
+                provisionLog: JSON.stringify(report),
+                dockerAvailable: dockerGreen,
+                ollamaInstalled: ollamaGreen,
+              },
+            }).catch(() => {});
+            sseBroadcast({
+              type: "node:provision",
+              payload: {
+                nodeId,
+                step: "Self-audit complete",
+                status: "done",
+                provisionStatus: "agent-deployed",
+                report,
+              },
+            });
             break;
           }
 

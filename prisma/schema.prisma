@@ -20,6 +20,7 @@ model Node {
   dockerAvailable Boolean          @default(false)
   ollamaInstalled Boolean          @default(false)
   agentVersion    String?
+  arch            String?
   bootstrapMethod String           @default("ssh")
   lastSeen        DateTime?
   createdAt       DateTime         @default(now())

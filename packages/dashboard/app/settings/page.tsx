@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import OnboardingCommand, { getServerHost } from "@/components/onboarding-command";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 
@@ -14,67 +15,26 @@ interface JoinToken {
   revokedAt: string | null;
   createdAt: string;
   status: "active" | "used" | "expired" | "revoked";
-  fullToken?: string; // Only present immediately after creation
 }
 
 export default function SettingsPage() {
   const [tokens, setTokens] = useState<JoinToken[]>([]);
-  const [settings, setSettings] = useState<Record<string, string>>({});
-  const [newTokenLabel, setNewTokenLabel] = useState("");
-  const [createdToken, setCreatedToken] = useState<{ token: string; id: string } | null>(null);
-  const [copied, setCopied] = useState(false);
   const [agentVersion, setAgentVersion] = useState("...");
-  const [serverHost, setServerHost] = useState("");
+  const serverHost = getServerHost();
 
   const loadTokens = useCallback(async () => {
     const res = await fetch(`${API}/api/tokens`);
     setTokens(await res.json());
   }, []);
 
-  const loadSettings = useCallback(async () => {
-    const res = await fetch(`${API}/api/settings`);
-    setSettings(await res.json());
-  }, []);
-
   useEffect(() => {
     loadTokens();
-    loadSettings();
     fetch(`${API}/api/agent/version`).then(r => r.json()).then(d => setAgentVersion(d.version));
-    // Derive server host from the API URL
-    try {
-      const url = new URL(API);
-      setServerHost(`${url.hostname}:${url.port || "4000"}`);
-    } catch {
-      setServerHost("localhost:4000");
-    }
-  }, [loadTokens, loadSettings]);
-
-  async function createToken() {
-    const res = await fetch(`${API}/api/tokens`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ label: newTokenLabel || null }),
-    });
-    const data = await res.json();
-    setCreatedToken({ token: data.token, id: data.id });
-    setNewTokenLabel("");
-    setCopied(false);
-    loadTokens();
-  }
+  }, [loadTokens]);
 
   async function revokeToken(id: string) {
     await fetch(`${API}/api/tokens/${id}`, { method: "DELETE" });
     loadTokens();
-  }
-
-  function getInstallCommand(token: string) {
-    return `curl -sL http://${serverHost}/api/agent/install.sh | sudo bash -s -- --token ${token}`;
-  }
-
-  async function copyToClipboard(text: string) {
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
   }
 
   const statusColor: Record<string, string> = {
@@ -95,52 +55,10 @@ export default function SettingsPage() {
           Generate tokens to bootstrap new nodes without SSH. Each token can be used once.
         </p>
 
-        {/* Create Token */}
-        <div className="flex gap-3 mb-6">
-          <input
-            type="text"
-            placeholder="Label (optional)"
-            value={newTokenLabel}
-            onChange={(e) => setNewTokenLabel(e.target.value)}
-            className="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
-          />
-          <button
-            onClick={createToken}
-            className="px-4 py-2 bg-green-600 hover:bg-green-500 rounded text-sm font-medium transition-colors"
-          >
-            Generate Token
-          </button>
+        {/* Create Token + Command */}
+        <div className="mb-6">
+          <OnboardingCommand serverHost={serverHost} onCreated={loadTokens} />
         </div>
-
-        {/* Created Token Display */}
-        {createdToken && (
-          <div className="mb-6 p-4 bg-gray-800 rounded border border-green-800">
-            <p className="text-sm text-green-400 font-medium mb-2">Token created! Copy the install command:</p>
-            <div className="bg-gray-950 rounded p-3 font-mono text-xs break-all mb-2">
-              {getInstallCommand(createdToken.token)}
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => copyToClipboard(getInstallCommand(createdToken.token))}
-                className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs transition-colors"
-              >
-                {copied ? "Copied!" : "Copy Command"}
-              </button>
-              <button
-                onClick={() => copyToClipboard(createdToken.token)}
-                className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs transition-colors"
-              >
-                Copy Token Only
-              </button>
-              <button
-                onClick={() => setCreatedToken(null)}
-                className="px-3 py-1 text-gray-500 hover:text-gray-300 text-xs transition-colors"
-              >
-                Dismiss
-              </button>
-            </div>
-          </div>
-        )}
 
         {/* Token List */}
         <table className="w-full text-sm">

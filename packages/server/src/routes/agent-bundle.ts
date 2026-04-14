@@ -7,11 +7,21 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export const agentBundleRouter = Router();
 
-// Paths to the agent bundle tarball and package.json
-// In Docker: __dirname = /app/packages/server/src/routes, bundle at /app/packages/server/agent-bundle.tar.gz
-// Local dev: __dirname = .../packages/server/src/routes, bundle at .../packages/server/agent-bundle.tar.gz
-const BUNDLE_PATH = join(__dirname, "../../agent-bundle.tar.gz");
+// Per-arch bundles live under packages/server/agent-bundles/agent-bundle-<arch>.tar.gz
+// Produced by scripts/build-agent-bundles.sh via docker buildx.
+const BUNDLES_DIR = join(__dirname, "../../agent-bundles");
 const AGENT_PKG_PATH = join(__dirname, "../../../agent/package.json");
+
+const SUPPORTED_ARCHES = ["amd64", "arm64"] as const;
+type Arch = (typeof SUPPORTED_ARCHES)[number];
+
+function managerArch(): Arch {
+  return process.arch === "x64" ? "amd64" : "arm64";
+}
+
+function bundlePath(arch: Arch): string {
+  return join(BUNDLES_DIR, `agent-bundle-${arch}.tar.gz`);
+}
 
 function getAgentVersion(): string {
   try {
@@ -26,14 +36,30 @@ agentBundleRouter.get("/version", (_req, res) => {
   res.json({ version: getAgentVersion() });
 });
 
-// GET /api/agent/bundle — serve the agent tarball
-agentBundleRouter.get("/bundle", (_req, res) => {
-  if (!existsSync(BUNDLE_PATH)) {
-    return res.status(404).json({ error: "Agent bundle not found. Run scripts/build-agent-bundle.sh first." });
+// GET /api/agent/bundle?arch=amd64|arm64 — serve the agent tarball for the requested arch.
+// When arch is omitted, falls back to the manager's own arch (back-compat for pre-multi-arch agents).
+agentBundleRouter.get("/bundle", (req, res) => {
+  const requested = typeof req.query.arch === "string" ? req.query.arch : undefined;
+  let arch: Arch;
+  if (!requested) {
+    arch = managerArch();
+  } else if ((SUPPORTED_ARCHES as readonly string[]).includes(requested)) {
+    arch = requested as Arch;
+  } else {
+    return res.status(400).json({
+      error: `Unsupported arch "${requested}". Supported: ${SUPPORTED_ARCHES.join(", ")}.`,
+    });
+  }
+
+  const path = bundlePath(arch);
+  if (!existsSync(path)) {
+    return res.status(404).json({
+      error: `Agent bundle for ${arch} not found. Run scripts/build-agent-bundles.sh first.`,
+    });
   }
   res.setHeader("Content-Type", "application/gzip");
-  res.setHeader("Content-Disposition", "attachment; filename=agent-bundle.tar.gz");
-  createReadStream(BUNDLE_PATH).pipe(res);
+  res.setHeader("Content-Disposition", `attachment; filename=agent-bundle-${arch}.tar.gz`);
+  createReadStream(path).pipe(res);
 });
 
 // GET /api/agent/install.sh — serve the install script with server URL baked in
@@ -93,7 +119,12 @@ fi
 
 # Detect architecture
 ARCH=\$(uname -m)
-log "Architecture: \$ARCH"
+case "\$ARCH" in
+  x86_64)  BUNDLE_ARCH=amd64 ;;
+  aarch64) BUNDLE_ARCH=arm64 ;;
+  *) fail "Unsupported architecture: \$ARCH (need x86_64 or aarch64)" ;;
+esac
+log "Architecture: \$ARCH (bundle: \$BUNDLE_ARCH)"
 
 # Detect OS
 if [ -f /etc/os-release ]; then
@@ -123,15 +154,24 @@ else
 fi
 
 # Step 3: Install nvidia-container-toolkit
-if dpkg -l nvidia-container-toolkit &>/dev/null 2>&1; then
+if dpkg -l nvidia-container-toolkit 2>/dev/null | grep -q '^ii'; then
   log "nvidia-container-toolkit already installed"
 else
   log "Installing nvidia-container-toolkit..."
-  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-  DIST=\$(. /etc/os-release; echo "\${ID}\${VERSION_ID}")
-  curl -s -L "https://nvidia.github.io/libnvidia-container/\${DIST}/libnvidia-container.list" | \\
-    sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \\
-    tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
+  # Remove any broken list file from a prior failed run (prevents apt-get update failure)
+  rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+  # GPG keyring (use --yes so re-runs don't prompt to overwrite)
+  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \\
+    | gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+
+  # Unified stable apt list (NVIDIA deprecated the per-distro URLs;
+  # newer Ubuntu/Debian versions 404 on those). This list uses \$(ARCH)
+  # which apt resolves per host arch, so it works for amd64 and arm64.
+  curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \\
+    | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \\
+    > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
   apt-get update -qq
   apt-get install -y -qq nvidia-container-toolkit
   nvidia-ctk runtime configure --runtime=docker
@@ -159,10 +199,39 @@ else
   log "Node.js installed: \$(node --version)"
 fi
 
-# Step 5: Download agent bundle
-log "Downloading agent bundle from \${SERVER_URL}..."
+# Step 4b: Install Ollama (binary + systemd unit + drop-in override)
+if systemctl list-unit-files ollama.service &>/dev/null && systemctl is-enabled ollama &>/dev/null; then
+  log "Ollama service already installed"
+else
+  log "Installing Ollama..."
+  curl -fsSL https://ollama.com/install.sh | sh
+  # Drop-in override: run as the agent user, listen on all interfaces, point
+  # models at /mnt/tank when the NFS share is mounted (so the cache is shared
+  # across the cluster); otherwise fall back to Ollama's default path.
+  mkdir -p /etc/systemd/system/ollama.service.d
+  OVERRIDE=/etc/systemd/system/ollama.service.d/override.conf
+  {
+    echo "[Service]"
+    echo "User=\${AGENT_USER}"
+    echo "Environment=HOME=/home/\${AGENT_USER}"
+    echo "Environment=OLLAMA_HOST=0.0.0.0"
+    echo "Environment=OLLAMA_MAX_LOADED_MODELS=0"
+    if mountpoint -q /mnt/tank; then
+      echo "Environment=OLLAMA_MODELS=/mnt/tank/models/ollama"
+      mkdir -p /mnt/tank/models/ollama
+      chown -R "\${AGENT_USER}":"\${AGENT_USER}" /mnt/tank/models/ollama 2>/dev/null || true
+    fi
+  } > "\$OVERRIDE"
+  systemctl daemon-reload
+  systemctl enable ollama
+  systemctl restart ollama
+  log "Ollama installed and started"
+fi
+
+# Step 5: Download agent bundle (arch-specific)
+log "Downloading \${BUNDLE_ARCH} agent bundle from \${SERVER_URL}..."
 BUNDLE_TMP=\$(mktemp)
-HTTP_CODE=\$(curl -sL -o "\$BUNDLE_TMP" -w "%{http_code}" "\${SERVER_URL}/api/agent/bundle")
+HTTP_CODE=\$(curl -sL -o "\$BUNDLE_TMP" -w "%{http_code}" "\${SERVER_URL}/api/agent/bundle?arch=\${BUNDLE_ARCH}")
 if [ "\$HTTP_CODE" != "200" ]; then
   fail "Failed to download agent bundle (HTTP \$HTTP_CODE). Is the server running at \${SERVER_URL}?"
 fi

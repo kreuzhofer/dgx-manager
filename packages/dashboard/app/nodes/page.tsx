@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
 import { useSSE, type SseEvent } from "@/lib/sse";
+import OnboardingCommand, { getServerHost } from "@/components/onboarding-command";
 
 interface PrereqCheck {
   name: string;
@@ -26,6 +27,7 @@ interface Node {
   provisionLog: string | null;
   gpuModel: string | null;
   agentVersion: string | null;
+  arch: string | null;
   dockerAvailable: boolean;
   ollamaInstalled: boolean;
   createdAt: string;
@@ -60,10 +62,44 @@ const provisionBadge: Record<string, string> = {
 export default function NodesPage() {
   const [nodes, setNodes] = useState<Node[]>([]);
   const [expectedVersion, setExpectedVersion] = useState<string | null>(null);
-  const [name, setName] = useState("");
-  const [ipAddress, setIpAddress] = useState("");
-  const [adding, setAdding] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
   const [upgrading, setUpgrading] = useState<Record<string, boolean>>({});
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [savingRename, setSavingRename] = useState(false);
+  const serverHost = getServerHost();
+
+  const startRename = (node: Node) => {
+    setRenamingId(node.id);
+    setRenameDraft(node.name);
+    setRenameError(null);
+  };
+
+  const cancelRename = () => {
+    setRenamingId(null);
+    setRenameDraft("");
+    setRenameError(null);
+  };
+
+  const saveRename = async (nodeId: string) => {
+    const newName = renameDraft.trim();
+    if (!newName) return;
+    setSavingRename(true);
+    setRenameError(null);
+    try {
+      const updated = await apiFetch<Node>(`/api/nodes/${nodeId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name: newName }),
+      });
+      setNodes((prev) => prev.map((n) => (n.id === nodeId ? { ...n, name: updated.name } : n)));
+      cancelRename();
+    } catch (err) {
+      setRenameError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingRename(false);
+    }
+  };
 
   // Real-time provision steps per node
   const [liveSteps, setLiveSteps] = useState<Record<string, ProvisionStep[]>>({});
@@ -104,7 +140,7 @@ export default function NodesPage() {
   const upgradeAgent = async (nodeId: string) => {
     setUpgrading((prev) => ({ ...prev, [nodeId]: true }));
     try {
-      await apiFetch(`/api/nodes/${nodeId}/deploy-agent`, { method: "POST" });
+      await apiFetch(`/api/nodes/${nodeId}/update-agent`, { method: "POST" });
     } catch (err) {
       alert(String(err));
     } finally {
@@ -178,28 +214,19 @@ export default function NodesPage() {
         )
       );
     }
+    if (event.type === "node:updated") {
+      const { nodeId, name } = event.payload as { nodeId: string; name: string };
+      setNodes((prev) => prev.map((n) => (n.id === nodeId ? { ...n, name } : n)));
+    }
+    if (event.type === "node:created") {
+      const created = event.payload as unknown as Node;
+      setNodes((prev) =>
+        prev.some((n) => n.id === created.id) ? prev : [created, ...prev]
+      );
+    }
   }, []);
 
   const { connected } = useSSE(handleSSE, loadNodes);
-
-  const addNode = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!name || !ipAddress) return;
-    setAdding(true);
-    try {
-      const node = await apiFetch<Node>("/api/nodes", {
-        method: "POST",
-        body: JSON.stringify({ name, ipAddress }),
-      });
-      setNodes((prev) => [node, ...prev]);
-      setName("");
-      setIpAddress("");
-    } catch (err) {
-      alert(String(err));
-    } finally {
-      setAdding(false);
-    }
-  };
 
   const provision = async (nodeId: string) => {
     setNodes((prev) =>
@@ -209,7 +236,16 @@ export default function NodesPage() {
   };
 
   const deleteNode = async (nodeId: string) => {
-    if (!confirm("Delete this node and stop all its deployments?")) return;
+    if (
+      !confirm(
+        "Delete this node?\n\n" +
+          "• All active deployments and fine-tune jobs will be stopped\n" +
+          "• The agent will uninstall itself (service, /opt/dgx-agent, systemd unit, sudoers entry)\n" +
+          "• Installed software (Docker, Ollama, CUDA) stays on the machine\n" +
+          "• The node record is removed from the database"
+      )
+    )
+      return;
     await apiFetch(`/api/nodes/${nodeId}`, { method: "DELETE" });
     setNodes((prev) => prev.filter((n) => n.id !== nodeId));
   };
@@ -226,49 +262,30 @@ export default function NodesPage() {
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold">Node Management</h1>
-        <span
-          className={`text-xs px-2 py-1 rounded ${
-            connected ? "bg-green-900 text-green-300" : "bg-red-900 text-red-300"
-          }`}
-        >
-          {connected ? "Live" : "Disconnected"}
-        </span>
-      </div>
-
-      {/* Add Node Form */}
-      <form
-        onSubmit={addNode}
-        className="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-6 flex gap-4 items-end"
-      >
-        <div className="flex-1">
-          <label className="block text-xs text-gray-400 mb-1">Name</label>
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="dgx-spark-01"
-            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
-          />
-        </div>
-        <div className="flex-1">
-          <label className="block text-xs text-gray-400 mb-1">IP Address</label>
-          <input
-            type="text"
-            value={ipAddress}
-            onChange={(e) => setIpAddress(e.target.value)}
-            placeholder="192.168.1.100"
-            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
-          />
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold">Node Management</h1>
+          <span
+            className={`text-xs px-2 py-1 rounded ${
+              connected ? "bg-green-900 text-green-300" : "bg-red-900 text-red-300"
+            }`}
+          >
+            {connected ? "Live" : "Disconnected"}
+          </span>
         </div>
         <button
-          type="submit"
-          disabled={adding}
-          className="bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white px-4 py-2 rounded text-sm font-medium transition-colors"
+          onClick={() => setShowOnboarding(true)}
+          className="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded text-sm font-medium transition-colors"
         >
-          {adding ? "Adding..." : "Add Node"}
+          Add Node
         </button>
-      </form>
+      </div>
+
+      {showOnboarding && (
+        <OnboardingDialog
+          serverHost={serverHost}
+          onClose={() => setShowOnboarding(false)}
+        />
+      )}
 
       {/* Node List */}
       <div className="space-y-4">
@@ -287,7 +304,52 @@ export default function NodesPage() {
               <div className="flex items-center justify-between mb-3">
                 <div>
                   <div className="flex items-center gap-2">
-                    <h3 className="font-semibold text-lg">{node.name}</h3>
+                    {renamingId === node.id ? (
+                      <form
+                        onSubmit={(e) => { e.preventDefault(); saveRename(node.id); }}
+                        className="flex items-center gap-2"
+                      >
+                        <input
+                          autoFocus
+                          value={renameDraft}
+                          onChange={(e) => setRenameDraft(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Escape") cancelRename(); }}
+                          disabled={savingRename}
+                          className="bg-gray-800 border border-gray-700 rounded px-2 py-0.5 text-lg font-semibold focus:outline-none focus:border-green-500 w-48"
+                        />
+                        <button
+                          type="submit"
+                          disabled={savingRename || !renameDraft.trim()}
+                          className="text-[10px] px-2 py-0.5 rounded bg-green-600 hover:bg-green-500 disabled:bg-gray-600 text-white font-medium"
+                        >
+                          {savingRename ? "Saving..." : "Save"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelRename}
+                          disabled={savingRename}
+                          className="text-[10px] px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-300"
+                        >
+                          Cancel
+                        </button>
+                        {renameError && (
+                          <span className="text-[10px] text-red-400">{renameError}</span>
+                        )}
+                      </form>
+                    ) : (
+                      <>
+                        <h3 className="font-semibold text-lg">{node.name}</h3>
+                        <button
+                          type="button"
+                          onClick={() => startRename(node)}
+                          title="Rename node"
+                          className="text-gray-500 hover:text-gray-200 text-xs px-1 leading-none"
+                          aria-label="Rename node"
+                        >
+                          &#9998;
+                        </button>
+                      </>
+                    )}
                     <span
                       className={`text-[10px] px-2 py-0.5 rounded font-medium ${
                         provisionBadge[node.provisionStatus] || "bg-gray-700 text-gray-300"
@@ -316,23 +378,19 @@ export default function NodesPage() {
                       </span>
                     )}
                   </div>
-                  <p className="text-xs text-gray-500 mt-0.5">
-                    {node.ipAddress}
+                  <p className="text-xs text-gray-500 mt-0.5 flex items-center gap-2">
+                    <span>{node.ipAddress}</span>
                     {node.gpuModel && (
-                      <span className="ml-2 text-gray-400">{node.gpuModel}</span>
+                      <span className="text-gray-400">{node.gpuModel}</span>
+                    )}
+                    {node.arch && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-400 font-mono">
+                        {node.arch}
+                      </span>
                     )}
                   </p>
                 </div>
                 <div className="flex gap-2">
-                  {node.status !== "online" && report && !isProvisioning && (
-                    <button
-                      onClick={() => upgradeAgent(node.id)}
-                      disabled={upgrading[node.id]}
-                      className="bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white px-3 py-1 rounded text-xs font-medium transition-colors"
-                    >
-                      {upgrading[node.id] ? "Deploying..." : "Deploy Agent"}
-                    </button>
-                  )}
                   {isOutdated(node) && node.status === "online" && (
                     <button
                       onClick={() => upgradeAgent(node.id)}
@@ -425,6 +483,70 @@ export default function NodesPage() {
           <p>No nodes yet. Add a DGX Spark above to get started.</p>
         </div>
       )}
+    </div>
+  );
+}
+
+function OnboardingDialog({
+  serverHost,
+  onClose,
+}: {
+  serverHost: string;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-gray-900 border border-gray-800 rounded-lg p-6 max-w-2xl w-full shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold">Onboard a new DGX node</h2>
+          <button
+            onClick={onClose}
+            className="text-gray-500 hover:text-gray-300 text-lg leading-none"
+            aria-label="Close"
+          >
+            &times;
+          </button>
+        </div>
+
+        <p className="text-sm text-gray-400 mb-2">
+          Before generating a token, make sure the target node has:
+        </p>
+        <ul className="text-sm text-gray-300 space-y-2 mb-5 pl-5 list-disc">
+          <li>
+            <span className="font-medium">NVIDIA GPU drivers installed</span> —{" "}
+            <code className="text-green-400">nvidia-smi</code> must work on the node.
+          </li>
+          <li>
+            <span className="font-medium">Network access to this manager</span> at{" "}
+            <code className="text-green-400">{serverHost}</code>.
+          </li>
+          <li>
+            <span className="font-medium">Passwordless SSH from this manager to the node</span> —
+            copy the manager&apos;s public key to the agent user on the target, e.g.{" "}
+            <code className="text-green-400">ssh-copy-id user@node-ip</code>. Verify with{" "}
+            <code className="text-green-400">ssh user@node-ip true</code> (no prompt).
+          </li>
+          <li>
+            <span className="font-medium">Passwordless sudo on the node</span> — add a
+            visudo entry on the target, e.g.{" "}
+            <code className="text-green-400">user ALL=(ALL) NOPASSWD: ALL</code> in{" "}
+            <code className="text-green-400">/etc/sudoers.d/user</code>.
+          </li>
+        </ul>
+
+        <OnboardingCommand serverHost={serverHost} />
+
+        <p className="text-xs text-gray-500 mt-4">
+          Run the command on the target node. It will install the agent and register
+          with this manager. The node will appear in the list once connected.
+        </p>
+      </div>
     </div>
   );
 }

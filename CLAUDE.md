@@ -28,11 +28,19 @@ The server has REST routes at `/api/*` and an inference proxy at `/lb/` for roun
 **Always use Docker Compose to run the app:**
 
 ```bash
+# One-time host setup: register QEMU binfmt handlers so we can cross-build
+# the amd64 agent bundle from an arm64 manager (and vice versa).
+docker run --privileged --rm tonistiigi/binfmt --install all
+
+# Build per-arch agent bundles (amd64 + arm64) before every compose build.
+./scripts/build-agent-bundles.sh
+
 # Start (set your machine's IP and SSH user)
 MANAGER_ADVERTISE_HOST=192.168.44.36 SSH_USER=daniel docker compose up -d
 
 # Rebuild after code changes (non-disruptive — won't kill active deployments)
-MANAGER_ADVERTISE_HOST=192.168.44.36 SSH_USER=daniel docker compose up -d --build
+./scripts/build-agent-bundles.sh && \
+  MANAGER_ADVERTISE_HOST=192.168.44.36 SSH_USER=daniel docker compose up -d --build
 
 # Stop (WARNING: removes docker network, may disrupt active Ray clusters)
 docker compose down
@@ -68,7 +76,7 @@ npm run db:studio        # Open Prisma Studio GUI
 - `ws/agent-hub.ts` — Manages agent WebSocket connections, processes metrics
 - `ws/dashboard-hub.ts` — Broadcasts updates to connected dashboards
 - `ssh/provisioner.ts` — Audits prerequisites, auto-installs packages on nodes
-- `ssh/agent-deployer.ts` — Deploys agent as systemd service on remote nodes
+- `routes/agent-bundle.ts` — Serves per-arch agent tarballs + generates the token install script
 - `proxy/inference-proxy.ts` — Round-robin request routing to deployments
 
 ### Dashboard (`packages/dashboard/`)

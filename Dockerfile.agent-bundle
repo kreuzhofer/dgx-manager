@@ -1,0 +1,22 @@
+FROM node:22-slim AS builder
+
+WORKDIR /app
+
+COPY package*.json tsconfig.base.json ./
+COPY packages/agent/package.json ./packages/agent/
+COPY packages/server/package.json ./packages/server/
+COPY packages/dashboard/package.json ./packages/dashboard/
+
+RUN npm install --workspaces --include-workspace-root
+
+COPY packages/agent/ ./packages/agent/
+
+RUN npx tsc -p packages/agent/tsconfig.json && \
+    mkdir -p /bundle && \
+    cp -r packages/agent/dist /bundle/dist && \
+    cp packages/agent/package.json /bundle/package.json && \
+    cp -r node_modules /bundle/node_modules && \
+    tar -czf /agent-bundle.tar.gz -C /bundle .
+
+FROM scratch AS export
+COPY --from=builder /agent-bundle.tar.gz /agent-bundle.tar.gz

@@ -4,7 +4,6 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { prisma } from "../prisma.js";
 import { auditNode, provisionNode } from "../ssh/provisioner.js";
-import { deployAgent } from "../ssh/agent-deployer.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import { metricsBuffer } from "../metrics-buffer.js";
 import type { AgentHub } from "../ws/agent-hub.js";
@@ -114,6 +113,32 @@ nodesRouter.post("/", async (req, res) => {
   res.status(201).json(node);
 });
 
+// PATCH /api/nodes/:id — rename a node
+nodesRouter.patch("/:id", async (req, res) => {
+  const { name } = req.body || {};
+  if (typeof name !== "string" || name.trim().length === 0) {
+    return res.status(400).json({ error: "name is required" });
+  }
+  const trimmed = name.trim();
+  try {
+    const node = await prisma.node.update({
+      where: { id: req.params.id },
+      data: { name: trimmed },
+    });
+    sseBroadcast({ type: "node:updated", payload: { nodeId: node.id, name: node.name } });
+    res.json(node);
+  } catch (e: unknown) {
+    const code = (e as { code?: string }).code;
+    if (code === "P2002") {
+      return res.status(409).json({ error: `A node named "${trimmed}" already exists` });
+    }
+    if (code === "P2025") {
+      return res.status(404).json({ error: "Node not found" });
+    }
+    throw e;
+  }
+});
+
 // POST /api/nodes/:id/provision
 nodesRouter.post("/:id/provision", async (req, res) => {
   const node = await prisma.node.findUnique({ where: { id: req.params.id } });
@@ -170,45 +195,25 @@ nodesRouter.post("/:id/provision", async (req, res) => {
   res.json({ status: "provisioning" });
 });
 
-// POST /api/nodes/:id/deploy-agent
-nodesRouter.post("/:id/deploy-agent", async (req, res) => {
-  const node = await prisma.node.findUnique({ where: { id: req.params.id } });
-  if (!node) return res.status(404).json({ error: "Node not found" });
-
-  const managerHost = process.env.MANAGER_ADVERTISE_HOST || process.env.MANAGER_HOST || "192.168.44.36";
-  const managerPort = Number(process.env.PORT || 4000);
-
-  if (!node.ipAddress) {
-    return res.status(400).json({ error: "Cannot deploy agent via SSH without an IP address. Use the install script for token-bootstrapped nodes." });
-  }
-
-  const log = await deployAgent(node.ipAddress, node.id, managerHost, managerPort);
-
-  // Re-audit to refresh prereq status after deploy
-  const report = await auditNode(node.ipAddress, node.id);
-  await prisma.node.update({
-    where: { id: node.id },
-    data: {
-      provisionStatus: "agent-deployed",
-      provisionLog: JSON.stringify(report),
-      dockerAvailable: report.checks.find((c) => c.name === "Docker")?.status === "green",
-      ollamaInstalled: report.checks.find((c) => c.name === "Ollama")?.status === "green",
-    },
-  });
-
-  res.json({ status: "agent-deployed", log });
-});
-
-// POST /api/nodes/:id/update-agent — update agent via HTTP bundle (works for all nodes)
+// POST /api/nodes/:id/update-agent — push the latest agent bundle via WebSocket.
+// The agent self-updates: downloads the arch-appropriate bundle over HTTP, swaps
+// /opt/dgx-agent, and restarts via systemd. No SSH, no NFS.
 nodesRouter.post("/:id/update-agent", async (req, res) => {
   const node = await prisma.node.findUnique({ where: { id: req.params.id } });
   if (!node) return res.status(404).json({ error: "Node not found" });
 
   const agentHub: AgentHub = req.app.get("agentHub");
+  if (!agentHub.isAgentOnline(node.id)) {
+    return res.status(400).json({
+      error: "Agent is offline — cannot push an update. Re-run the install script on the node.",
+    });
+  }
 
   const managerHost = process.env.MANAGER_ADVERTISE_HOST || process.env.MANAGER_HOST || "192.168.44.36";
   const port = process.env.PORT || "4000";
-  const bundleUrl = `http://${managerHost}:${port}/api/agent/bundle`;
+  const archQuery =
+    node.arch === "amd64" || node.arch === "arm64" ? `?arch=${node.arch}` : "";
+  const bundleUrl = `http://${managerHost}:${port}/api/agent/bundle${archQuery}`;
   const version = getExpectedAgentVersion();
 
   agentHub.sendToAgent(node.id, {
@@ -216,7 +221,7 @@ nodesRouter.post("/:id/update-agent", async (req, res) => {
     payload: { bundleUrl, version },
   });
 
-  res.json({ status: "updating", version });
+  res.json({ status: "updating", version, bundleUrl });
 });
 
 // DELETE /api/nodes/:id
@@ -248,6 +253,18 @@ nodesRouter.delete("/:id", async (req, res) => {
       type: "cmd:finetune:cancel",
       payload: { jobId: job.id },
     });
+  }
+
+  // Tell the agent to uninstall itself if it's online. The agent spawns a
+  // detached cleanup script (systemctl stop/disable, rm /opt/dgx-agent, drop
+  // the systemd unit and sudoers entry) and closes the WebSocket. Installed
+  // software (Docker, Ollama, etc.) stays on the machine.
+  if (agentHub.isAgentOnline(node.id)) {
+    agentHub.sendToAgent(node.id, { type: "cmd:deprovision", payload: {} });
+    // Small grace window so the agent can ack + launch its cleanup before we
+    // drop its DB record (prevents a spurious reconnect attempt with a now-
+    // deleted nodeId).
+    await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
   // Clean up DB: delete related records then the node

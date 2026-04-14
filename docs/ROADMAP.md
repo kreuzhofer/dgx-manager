@@ -124,6 +124,25 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 - [ ] Pre-flight SSH connectivity check between participating nodes
 - [ ] Clear setup documentation in install script output and Settings page
 
+## Phase 3.6: Heterogeneous Hardware Support (in progress)
+
+**Goal:** Let the cluster host nodes beyond DGX Spark (arm64 + Grace Blackwell) — specifically commodity amd64 machines with consumer Blackwell cards (RTX 5090-class, 32 GB).
+
+- Per-architecture agent bundles built via `docker buildx` + QEMU (`scripts/build-agent-bundles.sh`)
+- `Node.arch` tracked in DB; agent reports `process.arch` on registration; dashboard shows an arch badge
+- Install script detects `uname -m` and downloads `agent-bundle-{amd64,arm64}.tar.gz`
+- Agent self-audit runs on reconnect and populates `provisionLog` with prereq checks (matches the SSH-audit format), so token-onboarded nodes show the same badges as SSH-onboarded ones
+- Install script now provisions Ollama + systemd drop-in (`OLLAMA_HOST=0.0.0.0`, `OLLAMA_MODELS=/mnt/tank/models/ollama` when NFS is mounted) to match what `provisionNode` did for SSH nodes
+- Node rename UI (`PATCH /api/nodes/:id`) for post-onboarding cleanup
+- `node:created` SSE event so new nodes appear in the UI without a reload
+- Onboarding dialog shows a live health-check panel (agent connected, hostname, arch, GPU, Docker, metrics flowing, agent version) once the token is consumed
+
+### Remaining
+
+- [ ] **Consumer-GPU recipe repo** — a second vLLM recipe repo (working title `consumer-gpu-vllm-docker`) with curated recipes targeting 32 GB single-GPU amd64 hosts (Nemotron-3-Nano-NVFP4, Qwen3-Coder-Next int4, GLM-4.7-Flash-AWQ, merged finetunes). Slim `Dockerfile` without fastsafetensors/cubin patches, single-node-only `run-recipe.sh`, no cluster plumbing. `VLLM_REPO_PATH` baked per-arch into the agent's systemd unit at install time so each node points at the appropriate repo.
+- [ ] **VRAM admission guard** — compare `recipe.vram_required` against `node.vramTotal` at deploy time and reject with a clear error, to prevent wasting a build cycle on models that can't fit.
+- [ ] **Heterogeneous cluster guard** — scheduler refuses to form multi-node training/vLLM clusters that mix arches or GPU classes.
+
 ## Phase 4: Dataset Management (in progress)
 
 **Goal:** First-class support for training data throughout the fine-tuning workflow.
@@ -185,9 +204,11 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 | Merge & Deploy | ✅ | ✅ | ✅ | ✅ |
 | Training Metrics | ✅ | ✅ | ✅ | ✅ |
 | Agent Bootstrap | ✅ | ✅ | ✅ | ✅ |
-| HTTP Agent Updates | ✅ | ✅ | — | ✅ |
+| HTTP Agent Updates | ✅ | ✅ | ✅ | ✅ |
 | Settings | ✅ | — | ✅ | ✅ |
 | SSH Key Exchange | — | — | — | — |
+| Heterogeneous Hardware | ✅ | ✅ | ✅ | ✅ |
+| Consumer-GPU Recipes | — | — | — | — |
 | Datasets | ✅ | — | ✅ | ✅ |
 | Evaluation | partial | — | — | — |
 | Auth & RBAC | — | — | — | — |
@@ -195,4 +216,4 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 
 ---
 
-*Last updated: April 11, 2026*
+*Last updated: April 14, 2026*

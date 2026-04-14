@@ -1,6 +1,7 @@
 import WebSocket from "ws";
 import { readFileSync, writeFileSync, existsSync } from "fs";
-import { execSync } from "child_process";
+import { execSync, spawn } from "child_process";
+import { hostname as osHostname } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
@@ -9,12 +10,15 @@ import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContai
 import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth, getOllamaModels } from "./runtime/ollama.js";
 import { discoverTrainingRecipes } from "./training-recipes.js";
 import { startFinetuneJob, stopFinetuneJob, mergeLoraAdapter, reattachFinetuneJobs } from "./runtime/finetune.js";
+import { selfAudit } from "./self-audit.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_DIR = join(__dirname, "..");
 const AGENT_VERSION: string = JSON.parse(
   readFileSync(join(AGENT_DIR, "package.json"), "utf-8")
 ).version;
+const AGENT_ARCH: string =
+  process.arch === "x64" ? "amd64" : process.arch === "arm64" ? "arm64" : process.arch;
 
 const MANAGER_URL = process.env.MANAGER_URL || "ws://localhost:4000/ws/agent";
 const JOIN_TOKEN = process.env.JOIN_TOKEN || "";
@@ -66,10 +70,11 @@ function connect() {
         type: "agent:register",
         payload: {
           nodeId,
-          hostname: process.env.HOSTNAME || "unknown",
+          hostname: osHostname() || "unknown",
           gpuModel: metrics.gpuModel,
           vramTotal: metrics.vramTotal,
           agentVersion: AGENT_VERSION,
+          arch: AGENT_ARCH,
         },
       }));
     } else if (JOIN_TOKEN) {
@@ -78,10 +83,11 @@ function connect() {
         type: "agent:register-token",
         payload: {
           token: JOIN_TOKEN,
-          hostname: process.env.HOSTNAME || "unknown",
+          hostname: osHostname() || "unknown",
           gpuModel: metrics.gpuModel,
           vramTotal: metrics.vramTotal,
           agentVersion: AGENT_VERSION,
+          arch: AGENT_ARCH,
         },
       }));
       // Wait for register:accepted before continuing setup
@@ -125,6 +131,15 @@ function connect() {
 
     // Reattach to any running finetune containers (survives agent restart)
     reattachFinetuneJobs(sendMsg);
+
+    // Self-audit: report local prereq status so the dashboard can render the
+    // same checklist we'd get from an SSH audit. Runs once per connection.
+    try {
+      const audit = selfAudit();
+      sendMsg("agent:self-audit", { systemInfo: audit.systemInfo, checks: audit.checks });
+    } catch (err) {
+      console.error("Self-audit failed:", err);
+    }
 
     // Discover and report available vLLM recipes
     const recipes = discoverRecipes();
@@ -693,6 +708,52 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         sendMsg("agent:update-status", { status: "failed", error: String(err) });
         // Clean up staging
         try { execSync("sudo rm -rf /opt/dgx-agent-new && rm -f /tmp/agent-bundle.tar.gz"); } catch { /* */ }
+      }
+      break;
+    }
+
+    case "cmd:deprovision": {
+      console.log("[deprovision] Received deprovision command — uninstalling agent");
+      sendMsg("agent:update-status", { status: "deprovisioning", version: AGENT_VERSION });
+
+      // Write a detached cleanup script. It needs to run AFTER this process
+      // dies (it's going to `systemctl stop` us), so we spawn it with
+      // `detached: true` + `.unref()` so it re-parents to init and survives.
+      const script = `#!/bin/bash
+set +e
+# Wait briefly so the server can persist the delete before we vanish.
+sleep 2
+sudo systemctl stop dgx-agent
+sudo systemctl disable dgx-agent
+sudo rm -f /etc/systemd/system/dgx-agent.service
+sudo rm -f /etc/sudoers.d/dgx-agent
+sudo systemctl daemon-reload
+sudo rm -rf /opt/dgx-agent /opt/dgx-agent-old /opt/dgx-agent-new
+rm -f /tmp/dgx-deprovision.sh
+`;
+      try {
+        writeFileSync("/tmp/dgx-deprovision.sh", script, { mode: 0o755 });
+        // Spawn via `systemd-run` in its own transient unit so the cleanup
+        // escapes dgx-agent.service's cgroup. Otherwise `systemctl stop
+        // dgx-agent` would kill our bash child (default KillMode=control-group)
+        // before it could `disable` the unit and `rm` the files.
+        const child = spawn(
+          "sudo",
+          [
+            "systemd-run",
+            "--unit=dgx-deprovision",
+            "--slice=system.slice",
+            "--collect",
+            "bash",
+            "/tmp/dgx-deprovision.sh",
+          ],
+          { detached: true, stdio: "ignore" }
+        );
+        child.unref();
+        // Close WS so the server sees us go cleanly.
+        ws?.close();
+      } catch (err) {
+        console.error(`[deprovision] Failed to launch cleanup: ${err}`);
       }
       break;
     }
