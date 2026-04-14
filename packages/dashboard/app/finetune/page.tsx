@@ -331,6 +331,11 @@ export default function FinetunePage() {
   };
 
   const stopJob = async (id: string) => {
+    const job = jobs.find((j) => j.id === id);
+    const label = job
+      ? `${job.baseModel} on ${job.node?.name || job.nodeId} (${id.slice(0, 12)})`
+      : id.slice(0, 12);
+    if (!confirm(`Stop this fine-tune job?\n\n${label}\n\nTraining will be aborted and the latest checkpoint is whatever was last saved.`)) return;
     await apiFetch(`/api/finetune/${id}/stop`, { method: "POST" });
     setJobs((prev) =>
       prev.map((j) => (j.id === id ? { ...j, status: "stopping" } : j))

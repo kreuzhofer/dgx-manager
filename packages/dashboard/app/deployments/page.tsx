@@ -214,7 +214,7 @@ export default function DeploymentsPage() {
           method: "POST",
           body: JSON.stringify({ nodeId: selectedNode, config }),
         });
-        setDeployments((prev) => [result, ...prev]);
+        setDeployments((prev) => prev.some((d) => d.id === result.id) ? prev : [result, ...prev]);
         setRuntimeMode("vllm");
         setFinetuneModel(null);
         setFinetuneJobId(null);
@@ -251,7 +251,7 @@ export default function DeploymentsPage() {
         method: "POST",
         body: JSON.stringify(body),
       });
-      setDeployments((prev) => [deployment, ...prev]);
+      setDeployments((prev) => prev.some((d) => d.id === deployment.id) ? prev : [deployment, ...prev]);
       setSelectedRecipe("");
       setSelectedOllamaModel("");
       setTensorParallel("");
@@ -275,6 +275,9 @@ export default function DeploymentsPage() {
   };
 
   const stopDeployment = async (id: string) => {
+    const d = deployments.find((x) => x.id === id);
+    const label = d ? `${d.model?.name || d.modelId} on ${d.node?.name || d.nodeId}` : id.slice(0, 12);
+    if (!confirm(`Stop this deployment?\n\n${label}\n\nInference will be unavailable until it's redeployed.`)) return;
     await apiFetch(`/api/deployments/${id}`, { method: "DELETE" });
     setDeployments((prev) =>
       prev.map((d) => (d.id === id ? { ...d, status: "stopping" } : d))
@@ -282,6 +285,9 @@ export default function DeploymentsPage() {
   };
 
   const restartDeployment = async (id: string) => {
+    const d = deployments.find((x) => x.id === id);
+    const label = d ? `${d.model?.name || d.modelId} on ${d.node?.name || d.nodeId}` : id.slice(0, 12);
+    if (!confirm(`Restart this deployment?\n\n${label}\n\nInference will be briefly unavailable during the restart.`)) return;
     await apiFetch(`/api/deployments/${id}/restart`, { method: "POST" });
     setDeployments((prev) =>
       prev.map((d) => (d.id === id ? { ...d, status: "restarting" } : d))
