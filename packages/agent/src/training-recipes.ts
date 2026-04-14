@@ -137,6 +137,8 @@ export function discoverTrainingRecipes(): TrainingRecipe[] {
 
   for (const entry of readdirSync(recipesDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
+    // Convention: dirs starting with "_" are disabled (e.g. _disabled_...)
+    if (entry.name.startsWith("_")) continue;
 
     const recipeYaml = join(recipesDir, entry.name, "recipe.yaml");
     if (!existsSync(recipeYaml)) continue;
