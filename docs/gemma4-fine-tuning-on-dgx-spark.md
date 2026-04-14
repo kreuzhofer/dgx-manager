@@ -6,7 +6,7 @@
 
 ## TL;DR
 
-We fine-tuned Gemma 4 E2B, E4B, and 26B-A4B models on NVIDIA DGX Spark (GB10, 128GB unified memory) using LoRA with DeepSpeed ZeRO. The 26B model requires multi-node training across 2 DGX Spark nodes. After merging the LoRA adapter back into the base model, we serve it with vLLM. On a SQL generation benchmark, the E2B model improved from 4% to 22% exact-match accuracy after one epoch of fine-tuning.
+We fine-tuned Gemma 4 E2B, E4B, and 26B-A4B models on NVIDIA DGX Spark (GB10, 128GB unified memory) using LoRA with DeepSpeed ZeRO. The 26B model requires multi-node training across 2 DGX Spark nodes. After merging the LoRA adapter back into the base model, we serve it with vLLM. On a SQL generation benchmark (`b-mc2/sql-create-context`, 100 held-out examples, exact-match accuracy), the E4B model jumped from 23% to **90%** after one epoch — and the E2B went from 4% to 22%. The 26B full-epoch run is in progress.
 
 This post documents every workaround, patch, and architectural decision we made — because the official tooling doesn't cover any of this.
 
@@ -276,19 +276,28 @@ vLLM's `gpu_memory_utilization` is a **reservation**, not actual usage. It pre-a
 
 Dataset: [b-mc2/sql-create-context](https://huggingface.co/datasets/b-mc2/sql-create-context) (78K examples)
 
-**Gemma 4 E2B** (1 full epoch, single-node):
-| | Accuracy (50 examples) |
+**Gemma 4 E2B** (1 full epoch, single-node, 50 examples):
+| | Accuracy |
 |---|---|
 | Base model | 4% |
 | Fine-tuned | 22% |
-| **Improvement** | **+18pp (5.5x)** |
+| **Improvement** | **+18pp (5.5×)** |
+
+**Gemma 4 E4B** (1 full epoch, single-node, 100 examples):
+| | Accuracy |
+|---|---|
+| Base model | 23% |
+| Fine-tuned | **90%** |
+| **Improvement** | **+67pp (3.9×)** |
+
+E4B is the sweet spot for this dataset: the base model already has meaningful SQL awareness (23%), and one epoch of LoRA on `b-mc2/sql-create-context` pushes it to near-perfect exact-match accuracy. E2B's lift is proportionally larger (5.5×) but its absolute ceiling is much lower.
 
 Key lesson: the eval prompt format must exactly match the training format. Adding a system prompt or "Schema:"/"Question:" prefixes that weren't in the training data destroys accuracy.
 
 **Gemma 4 26B-A4B-it** (training in progress):
-- Multi-node across 2 DGX Spark nodes
-- ZeRO-3 parameter partitioning
-- Expected ~23 hours for 1 full epoch
+- Multi-node across 2 DGX Spark nodes, ZeRO-3 parameter partitioning
+- ~46h for 1 full epoch of 9331 steps
+- Eval loss trajectory so far: step 500 = 2.14 → step 1000 = 2.02 → step 2000 = 1.96 (monotonically decreasing)
 
 ---
 
