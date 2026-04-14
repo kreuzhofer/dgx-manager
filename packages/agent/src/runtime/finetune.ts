@@ -165,10 +165,14 @@ export function reattachFinetuneJobs(
                   : undefined;
                 sendMsg(msgType, {
                   jobId: jobIdPrefix, phase: progress.phase, phaseProgress: progress.phaseProgress,
-                  step: progress.step, totalSteps: progress.totalSteps, loss: progress.loss, etaSeconds,
+                  step: progress.step, totalSteps: progress.totalSteps, loss: progress.loss,
+                  lr: progress.lr, evalLoss: progress.evalLoss, etaSeconds,
                 });
-              } else if (progress.loss !== undefined) {
-                sendMsg(msgType, { jobId: jobIdPrefix, phase: progress.phase, phaseProgress: -1, loss: progress.loss });
+              } else if (progress.loss !== undefined || progress.evalLoss !== undefined) {
+                sendMsg(msgType, {
+                  jobId: jobIdPrefix, phase: progress.phase, phaseProgress: -1,
+                  loss: progress.loss, lr: progress.lr, evalLoss: progress.evalLoss,
+                });
               }
             }
           }
