@@ -57,13 +57,25 @@ The server APIs for these features are complete, but the dashboard pages are sti
 ### Monitoring & Observability
 
 - Phase-aware progress tracking: container → downloading → loading → tokenizing → training → eval → saving
-- Real-time loss curve visualization (SVG chart, live-updating via SSE)
-- Training metrics persisted to DB (TrainingMetric table: step, loss, lr, evalLoss)
+- Real-time loss curve visualization (SVG chart, live-updating via SSE) — eval points overlaid on training loss in the same chart
+- Training metrics persisted to DB with `@@unique(jobId, step)` — upsert on write prevents the 3× duplicates the agent's three parser patterns used to produce
+- Eval phase detected at the START of evaluation (via `on_prediction_step`) instead of end — UI flips to "evaluating" immediately
 - `[TRAIN]` and `[EVAL]` callbacks for explicit progress reporting through Docker pipes
 - Smoothed ETA estimation (20-sample rolling average of iteration speed)
-- Log file persistence: `train.log` written via Python Tee, survives page refresh and agent restart
-- Agent reattaches to running training containers after restart (tails train.log)
+- **Per-rank shell-level `tee` in `lib/setup_logging.sh`** — captures EVERYTHING (Python + C/C++ extensions from PyTorch and DeepSpeed loaders), one log file per rank to avoid garbled NFS interleaving
+- Log file persistence survives page refresh, agent restart, and container restart
+- Agent reattaches to running training containers after restart (tails train.log) — reattach handler forwards the same fields as the live path (`evalLoss`, `lr`)
 - Deployment log persistence to NFS files
+
+### Production Resilience
+
+- **Resume from checkpoint** — `POST /api/finetune { resumeFromJobId }` inherits the previous job's outputDir + config and passes `--resume_from_checkpoint true` to `trainer.train()`. Works with DeepSpeed when `save_only_model=False` (full ZeRO optimizer state saved alongside the LoRA adapter).
+- **Configurable save/eval cadence** — `save_steps`, `eval_steps`, `save_total_limit`, `save_only_model`, `eval_fraction` all passable via the API config (not hardcoded per recipe).
+- **Multi-node watchdog** — 30s poll of each worker container's state. If a worker exits while head is still running (typical symptom of a rank crashing inside NCCL while `TORCH_NCCL_ASYNC_ERROR_HANDLING=1` disables the timeout), force-clean the head and mark job failed. Turns silent multi-day zombies into clear errors.
+- **Force-cleanup path** — cluster worker IPs persisted to `$outputDir/.cluster-workers.json`, reloaded on reattach. `stopFinetuneJob` always confirms `agent:finetune:complete` to the server so jobs never get stuck in "stopping".
+- **Worker log capture** — detached workers now redirect stdout/stderr to `$outputDir/worker-{ip}.log` so rank>0 crashes are debuggable.
+- **Delete with cleanup** — `DELETE /api/finetune/:id?cleanFiles=true` removes the outputDir unless another job shares it (resume chain). Dashboard two-step confirm shows size + warning.
+- **Confirm prompts** — destructive Stop/Restart actions on fine-tune jobs and deployments require explicit confirm with context (model, node, consequences).
 
 ### Merge & Deploy
 
@@ -159,17 +171,22 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 
 **Goal:** Measure and track model quality across deployments and fine-tuning runs.
 
-- SQL evaluation script — implemented and validated
-  - Gemma 4 E2B: base 4% → fine-tuned 22% exact-match accuracy on SQL generation (5.5x improvement)
+- SQL evaluation script — implemented and validated on `b-mc2/sql-create-context`
+  - **Gemma 4 E2B**: base 4% → fine-tuned 22% exact-match accuracy (+18pp, 5.5× ratio) on 50 examples
+  - **Gemma 4 E4B**: base 23% → fine-tuned **90%** exact-match accuracy (+67pp, 3.9× ratio) on 100 examples
   - Key lesson: eval prompt format must match training format (no system prompt, same context layout)
   - Better SQL normalization: handles quote style, chat template artifacts, whitespace
-- 26B full-epoch training in progress (8840 steps, ~46h ETA) — pending merge + deploy + eval
+- **Gemma 4 26B-A4B-it full-epoch training in progress**
+  - 9331 steps total on 2 DGX Spark nodes (ZeRO-3), ~46h training + ~3h eval overhead
+  - Eval loss trajectory (so far): 500→2.14, 1000→2.02, 1500→2.02, 2000→1.96, 2500→1.99, 3000→1.94, 3500→1.93
+  - Pending: merge + deploy + SQL eval once 9331 steps complete
 - [ ] Run evaluation suites (lm-eval-harness, custom benchmarks) against deployed models
 - [ ] Track quality metrics over time with per-model and per-run history
-- [ ] Compare base models against fine-tuned variants
+- [ ] Compare base models against fine-tuned variants in the dashboard (currently only per-job chart)
 - [ ] Dashboard views for benchmark results and regression detection
 - [ ] Upload fine-tuned models to HuggingFace (requires HF_TOKEN)
 - [ ] Multimodal fine-tuning: Gemma 4 as a visual judge (image+text training)
+- [ ] **External-facing write-up (blog / LinkedIn post)** — distinct from `docs/gemma4-fine-tuning-on-dgx-spark.md` (which is the deep technical reference). Audience-focused "so what" framing: what the DGX Manager project says about the author's skills to a hiring manager / CTO / practitioner network. Pending audience + platform decisions.
 
 ## Phase 6: User Auth & Multi-Tenancy
 
@@ -210,7 +227,8 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 | Heterogeneous Hardware | ✅ | ✅ | ✅ | ✅ |
 | Consumer-GPU Recipes | — | — | — | — |
 | Datasets | ✅ | — | ✅ | ✅ |
-| Evaluation | partial | — | — | — |
+| Evaluation | ✅ | — | partial (in-chart) | ✅ |
+| Resume from Checkpoint | ✅ | ✅ | ✅ | ✅ |
 | Auth & RBAC | — | — | — | — |
 | Multi-Cluster | — | — | — | — |
 
