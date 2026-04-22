@@ -353,8 +353,12 @@ export function isLaunchInProgress(deploymentId: string): boolean {
 }
 
 /**
- * Ensure cluster worker nodes have a Docker image at least as recent as the head's.
- * Compares creation timestamps — only copies if worker image is older.
+ * Ensure every cluster worker node runs the exact same Docker image as the
+ * head. We compare image IDs (content-addressed SHA256), not creation
+ * timestamps — a worker can have a newer-but-incompatible image (e.g. a
+ * build with a different Ray version), and date-based comparison would skip
+ * the sync and the workers would fail to join the head's Ray cluster due to
+ * version mismatch. Forcing exact-ID match head→workers is the only safe rule.
  */
 export function syncContainerImage(
   containerName: string,
@@ -363,10 +367,10 @@ export function syncContainerImage(
 ): void {
   if (workerIps.length === 0) return;
 
-  let localCreated: string;
+  let localId: string;
   try {
-    localCreated = execSync(
-      `docker images ${containerName}:latest --format '{{.CreatedAt}}'`,
+    localId = execSync(
+      `docker images ${containerName}:latest --format '{{.ID}}'`,
       { timeout: 5000, encoding: "utf-8" }
     ).trim();
   } catch {
@@ -374,50 +378,46 @@ export function syncContainerImage(
     return;
   }
 
-  if (!localCreated) {
+  if (!localId) {
     onLog?.(`Image ${containerName} not found locally\n`);
     return;
   }
 
-  const localTime = new Date(localCreated).getTime();
-  const staleWorkers: string[] = [];
+  const mismatchedWorkers: string[] = [];
 
   for (const ip of workerIps) {
     try {
-      const remoteCreated = execSync(
-        `ssh -o BatchMode=yes -o ConnectTimeout=5 ${SSH_USER}@${ip} "docker images ${containerName}:latest --format '{{.CreatedAt}}'"`,
+      const remoteId = execSync(
+        `ssh -o BatchMode=yes -o ConnectTimeout=5 ${SSH_USER}@${ip} "docker images ${containerName}:latest --format '{{.ID}}'"`,
         { timeout: 10_000, encoding: "utf-8" }
       ).trim();
 
-      if (!remoteCreated) {
+      if (!remoteId) {
         onLog?.(`Image missing on ${ip}, will copy\n`);
-        staleWorkers.push(ip);
-      } else {
-        const remoteTime = new Date(remoteCreated).getTime();
-        if (remoteTime < localTime) {
-          onLog?.(`Image on ${ip} is older (${remoteCreated} < ${localCreated}), will copy\n`);
-          staleWorkers.push(ip);
-        }
+        mismatchedWorkers.push(ip);
+      } else if (remoteId !== localId) {
+        onLog?.(`Image on ${ip} differs from head (${remoteId} != ${localId}), will copy\n`);
+        mismatchedWorkers.push(ip);
       }
     } catch {
       onLog?.(`Cannot check image on ${ip}, will copy\n`);
-      staleWorkers.push(ip);
+      mismatchedWorkers.push(ip);
     }
   }
 
-  if (staleWorkers.length === 0) {
-    onLog?.(`All workers have up-to-date ${containerName} image\n`);
+  if (mismatchedWorkers.length === 0) {
+    onLog?.(`All workers match head's ${containerName} image (${localId})\n`);
     return;
   }
 
-  onLog?.(`Syncing ${containerName} to ${staleWorkers.length} worker(s)...\n`);
+  onLog?.(`Syncing ${containerName} (${localId}) to ${mismatchedWorkers.length} worker(s)...\n`);
   try {
-    const copyTargets = staleWorkers.join(",");
+    const copyTargets = mismatchedWorkers.join(",");
     execSync(
       `${join(VLLM_REPO_PATH, "build-and-copy.sh")} -t ${containerName} -c ${copyTargets} --copy-parallel`,
       { cwd: VLLM_REPO_PATH, timeout: 600_000, stdio: "pipe" }
     );
-    onLog?.(`Image synced to ${staleWorkers.join(", ")}\n`);
+    onLog?.(`Image synced to ${mismatchedWorkers.join(", ")}\n`);
   } catch (err) {
     onLog?.(`Warning: image sync failed: ${err}\n`);
   }
