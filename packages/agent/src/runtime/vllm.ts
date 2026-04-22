@@ -415,11 +415,18 @@ export function syncContainerImage(
     const copyTargets = mismatchedWorkers.join(",");
     execSync(
       `${join(VLLM_REPO_PATH, "build-and-copy.sh")} -t ${containerName} -c ${copyTargets} --copy-parallel`,
-      { cwd: VLLM_REPO_PATH, timeout: 600_000, stdio: "pipe" }
+      // 30 min: multi-GB Docker image save+scp+load over LAN can take
+      // 15-20 min. Previous 10 min timed out silently and the launch
+      // proceeded with mismatched images, hanging on Ray placement group.
+      { cwd: VLLM_REPO_PATH, timeout: 1_800_000, stdio: "pipe" }
     );
     onLog?.(`Image synced to ${mismatchedWorkers.join(", ")}\n`);
   } catch (err) {
-    onLog?.(`Warning: image sync failed: ${err}\n`);
+    // Hard fail: a workers-image-mismatch in cluster mode = guaranteed
+    // Ray-version-mismatch = silent placement-group hang. Better to
+    // surface the failure than to launch and wait forever.
+    onLog?.(`ERROR: image sync failed, aborting cluster launch: ${err}\n`);
+    throw new Error(`Cluster image sync to workers failed: ${err}`);
   }
 }
 
