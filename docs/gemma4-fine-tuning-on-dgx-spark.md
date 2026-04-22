@@ -6,7 +6,7 @@
 
 ## TL;DR
 
-We fine-tuned Gemma 4 E2B, E4B, and 26B-A4B models on NVIDIA DGX Spark (GB10, 128GB unified memory) using LoRA with DeepSpeed ZeRO. The 26B model requires multi-node training across 2 DGX Spark nodes. After merging the LoRA adapter back into the base model, we serve it with vLLM. On a SQL generation benchmark (`b-mc2/sql-create-context`, 100 held-out examples, exact-match accuracy), the E4B model jumped from 23% to **90%** after one epoch — and the E2B went from 4% to 22%. The 26B full-epoch run is in progress.
+We fine-tuned Gemma 4 E2B, E4B, and 26B-A4B models on NVIDIA DGX Spark (GB10, 128GB unified memory) using LoRA with DeepSpeed ZeRO. The 26B model requires multi-node training across 2 DGX Spark nodes. After merging the LoRA adapter back into the base model, we serve it with vLLM. On a SQL generation benchmark (`b-mc2/sql-create-context`, 100 held-out examples, exact-match accuracy), the E4B model jumped from 23% to **90%** after one epoch and the E2B went from 4% to 22%. The 26B-A4B-it run *looked* healthy during training (monotonically decreasing eval loss) but came in **worse than base** at inference — root-caused to a MoE-targeting bug in PEFT's `target_modules` walk. With the fix (PEFT `target_parameters` reaching the fused expert tensors), the 26B-A4B-base hits 38% → **46%** in 50 steps, and surprisingly *peaks* there — see Results.
 
 This post documents every workaround, patch, and architectural decision we made — because the official tooling doesn't cover any of this.
 
@@ -294,10 +294,105 @@ E4B is the sweet spot for this dataset: the base model already has meaningful SQ
 
 Key lesson: the eval prompt format must exactly match the training format. Adding a system prompt or "Schema:"/"Question:" prefixes that weren't in the training data destroys accuracy.
 
-**Gemma 4 26B-A4B-it** (training in progress):
-- Multi-node across 2 DGX Spark nodes, ZeRO-3 parameter partitioning
-- ~46h for 1 full epoch of 9331 steps
-- Eval loss trajectory so far: step 500 = 2.14 → step 1000 = 2.02 → step 2000 = 1.96 (monotonically decreasing)
+**Gemma 4 26B-A4B-it** (1 full epoch, 2 DGX Spark nodes, ~46h): **SQL eval came in worse than base**, and the reason wasn't the training run — it was the LoRA config.
+
+Eval loss decreased monotonically throughout training (step 500 = 2.14 → step 1000 = 2.02 → step 2000 = 1.96 → step 3500 = 1.93), so from the training dashboard everything looked healthy. The regression only showed up at inference time.
+
+**Gemma 4 26B-A4B-base** (with the MoE-targeting fix from the next section, 100 examples). Each row is a separate run, identical config except `max_steps`:
+
+| Steps | Base | Tuned | Improvement |
+|---:|---:|---:|---:|
+| 50 | 38% | **46%** | **+8pp** |
+| 50 (rerun) | 38% | 46% | +8pp |
+| 500 | 38% | 42% | +4pp |
+| 1 epoch (~9.3K steps) | 38% | 40% | +2pp |
+
+The peak is at 50 steps, then accuracy *decays* with more training. The loss curves are still monotonically decreasing — eval loss at the full epoch is the lowest we've seen — so the model is genuinely learning the data distribution; it's just learning past the point where exact-match SQL phrasing matches the test set's specific style. We didn't expect to see this with LoRA (parameters are frozen, only adapters update), so the takeaway is: train loss / eval loss alone aren't a sufficient signal — task-specific eval needs to run at multiple checkpoints, not just at the end.
+
+Net result: the `target_parameters` fix takes 26B-A4B-base from "broken" (worse than base, IT model) to "working" (+8pp at 50 steps). 50 steps is the right operating point for this task on this model.
+
+### The bug: `target_modules` never hit the MoE path
+
+Diagnosis was fully static — we inspected the saved adapter's safetensors header and compared the wrapped module paths against the base model's `model.safetensors.index.json`. Summary:
+
+| | Count |
+|---|---|
+| Modules wrapped by the adapter | 394 |
+| ├─ Language layers × 7 projections (`q/k/v/o/gate/up/down_proj`) | 30 × 7 = 210 |
+| └─ Vision-tower layers × 7 projections | 27 × 7 = 184 |
+| MoE expert / router modules wrapped | **0** |
+
+Gemma 4 26B-A4B uses a *shared-expert* pattern: each of the 30 language layers has **both** a dense MLP (`mlp.{gate,up,down}_proj`) and an MoE block next to it:
+
+```
+model.language_model.layers.N.mlp.{gate,up,down}_proj.weight   # dense shared expert
+model.language_model.layers.N.experts.gate_up_proj             # fused 3D: [num_experts, 2*inter, hidden]
+model.language_model.layers.N.experts.down_proj                # fused 3D
+model.language_model.layers.N.router.proj.weight               # router gate
+model.language_model.layers.N.router.{scale, per_expert_scale}
+```
+
+PEFT's LoRA target matcher is `module_name.endswith(f".{target}")` plus "is this an `nn.Linear`?". That rejects every MoE module:
+
+- `experts.gate_up_proj` / `experts.down_proj` are **fused 3D tensors**, not `nn.Linear`, and the name `gate_up_proj` doesn't end with `.gate_proj` or `.up_proj` anyway.
+- `router.proj.weight` ends with `.proj`, not in our target list.
+
+So the MoE path — which carries the bulk of the 26B's parameters and most of the active compute on GB10 — saw **zero gradient updates**. We only adapted attention, the dense shared-expert MLP, and (wastefully, for a text task) the entire 27-layer vision tower.
+
+### Why that makes results *worse than base*
+
+If the MoE experts had simply stayed untouched, you'd expect accuracy roughly equal to base. But the dense path *did* shift toward SQL output style, which changes the activations flowing into the router. A router that was calibrated on the original distribution now selects different experts — experts whose weights were trained on a different input regime. The inputs into the experts and the outputs coming out no longer match what the rest of the model expects. The downstream mismatch compounds across 30 layers and you get answers that are *less* coherent than the base model's.
+
+On E2B/E4B this failure mode doesn't exist: those are fully dense, LoRA covers everything, no routing to mis-align.
+
+### Sanity checks that ruled out easier explanations
+
+- **Prompt format parity.** Training (`lib/dataset.py:67-88`) and eval (`scripts/evaluate.py:66-72,180`) both use the same single-user-turn `{context}\n\n{question}` via `apply_chat_template`. Identical.
+- **Merge key remap.** `fix_clippable_linear_keys()` handles ClippableLinear's flattened `.linear.weight` keys correctly, and the "copy any missing key from base" fallback did not fire on MoE keys for this run (because we never saved MoE deltas to begin with). The merge isn't the culprit — but the fallback is fragile enough that we're going to add per-overwrite logging so a silent expert-key mismatch can't hide in a future run.
+
+### What full fine-tuning would cost (and why we're not doing it next)
+
+For the record, full FT of 26B-A4B in the obvious configuration (bf16 weights + grads, AdamW fp32 states, fp32 master weights for mixed precision):
+
+| Component | Size |
+|---|---|
+| Weights (bf16) | ~52 GB |
+| Gradients (bf16) | ~52 GB |
+| AdamW states (fp32, 2 moments × 4 B × 26 B) | ~208 GB |
+| FP32 master weights | ~104 GB |
+| **Subtotal** | **~416 GB** |
+| Activations (seq 2048, bs 1, grad checkpointing) | ~15–30 GB per rank |
+
+"A4B" (active 4B) is a compute optimization — the memory class is still 26B, since you hold and update every parameter. Sharding across DGX Sparks at ~100 GB usable per node (after OS / NFS page cache / container overhead) needs **4–5 Sparks** with ZeRO-3, or **3–4 Sparks** with 8-bit AdamW. The current 2-Spark LoRA setup cannot hold full FT.
+
+The cheaper, more targeted fix is a proper MoE-aware LoRA: custom PEFT dispatch that wraps `experts.gate_up_proj` and `experts.down_proj` as per-expert low-rank deltas on the fused 3D tensors, while leaving the router frozen. This is the next step; full FT is the fallback if MoE-LoRA also disappoints.
+
+### The fix: PEFT `target_parameters` (no custom dispatch needed)
+
+PEFT 0.16+ added `target_parameters=` to `LoraConfig`, exactly for this case. It bypasses the `nn.Linear`-or-bust `target_modules` walk and applies LoRA to fused `nn.Parameter` tensors directly. Two-line change to the recipe:
+
+```python
+attn_targets = ["q_proj", "k_proj", "v_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj"]      # dense path (unchanged)
+moe_param_targets = ["experts.gate_up_proj",              # NEW — fused 3D
+                     "experts.down_proj"]                  # NEW — fused 3D
+
+model = get_peft_model(model, LoraConfig(
+    r=16, lora_alpha=16,
+    target_modules=attn_targets,
+    target_parameters=moe_param_targets,                  # ← reaches the experts
+    lora_dropout=0.0, bias="none", task_type="CAUSAL_LM"))
+
+# Freeze the router — fine-tuning routing weights destabilizes which experts
+# see which tokens, creating a feedback loop with the LoRA updates.
+for name, p in model.named_parameters():
+    if ".gate.weight" in name or "router" in name:
+        p.requires_grad = False
+```
+
+Trainable jumps from ~30M (0.12%) to ~505M (1.9%) — the experts are now in the LoRA. Combined with `target_modules` covering the attention + dense MLP, this gives full coverage of the model's compute path, the router stays frozen so token→expert routing remains stable, and the IT-vs-base mismatch we hit earlier is sidestepped by training against the BASE model directly. Per-checkpoint SQL eval results are in the Results section above.
+
+The bug was not in PEFT or in our code — it's a hidden requirement of the `target_modules` API: it silently does nothing for `nn.Parameter` tensors. PEFT only flags this when *all* targets miss; partial misses (attention hits, MoE misses) look successful from the trainable-parameter count alone unless you compare against the model's expected total. We added a hard sanity check at training start: if `trainable% < 0.5%` we abort with an explanation. Cheap insurance.
 
 ---
 
