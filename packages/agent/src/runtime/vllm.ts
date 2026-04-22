@@ -94,7 +94,7 @@ command: |
 export function launchRecipe(
   deploymentId: string,
   recipeFile: string,
-  options?: { port?: number; gpuMem?: number; maxModelLen?: number; tensorParallel?: number; pipelineParallel?: number; clusterNodes?: string[]; skipSetup?: boolean },
+  options?: { port?: number; gpuMem?: number; maxModelLen?: number; tensorParallel?: number; pipelineParallel?: number; clusterNodes?: string[]; clusterNodeFastIps?: (string | null)[]; skipSetup?: boolean },
   onLog?: (line: string) => void,
   onExit?: (code: number | null) => void
 ): number {
@@ -128,11 +128,14 @@ export function launchRecipe(
   if (options?.tensorParallel) args.push("--tp", String(options.tensorParallel));
   if (options?.pipelineParallel) args.push("--", "-pp", String(options.pipelineParallel));
 
-  // For cluster mode, ensure workers have a recent enough Docker image.
-  // run-recipe.sh --setup skips copying if the image name exists on the worker,
-  // even if it's outdated. We check creation dates and copy if stale.
+  // For cluster mode, ensure workers have an image identical to the head's
+  // (see syncContainerImage). Prefer each worker's fast-fabric IP when known
+  // — image transfer is multi-GB and the management network is typically
+  // 1 GbE while the fast network is 10/100 GbE. Falls back to mgmt IP per-node.
   if (isCluster) {
-    const workerIps = options!.clusterNodes!.slice(1);
+    const mgmtWorkers = options!.clusterNodes!.slice(1);
+    const fastWorkers = (options?.clusterNodeFastIps ?? []).slice(1);
+    const workerIps = mgmtWorkers.map((mgmt, i) => fastWorkers[i] || mgmt);
     let containerName = "vllm-node";
     try {
       const recipeContent = readFileSync(join(VLLM_REPO_PATH, recipeFile), "utf-8");

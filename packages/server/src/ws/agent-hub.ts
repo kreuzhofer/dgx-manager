@@ -102,6 +102,11 @@ export class AgentHub {
             const reportedArch = msg.payload.arch;
             const archValue =
               reportedArch === "amd64" || reportedArch === "arm64" ? reportedArch : undefined;
+            // fastIpAddress: explicitly null clears (interface went away),
+            // string overwrites, undefined leaves prior value untouched.
+            const fastIp = msg.payload.fastIpAddress;
+            const fastIpUpdate =
+              fastIp === undefined ? {} : { fastIpAddress: typeof fastIp === "string" ? fastIp : null };
             await prisma.node.update({
               where: { id: nodeId! },
               data: {
@@ -110,6 +115,7 @@ export class AgentHub {
                 vramTotal: msg.payload.vramTotal,
                 agentVersion,
                 ...(archValue ? { arch: archValue } : {}),
+                ...fastIpUpdate,
                 lastSeen: new Date(),
               },
             });
@@ -119,7 +125,7 @@ export class AgentHub {
           }
 
           case "agent:register-token": {
-            const { token, hostname, gpuModel, vramTotal, agentVersion: tokenAgentVersion, arch: reportedArch } = msg.payload;
+            const { token, hostname, gpuModel, vramTotal, agentVersion: tokenAgentVersion, arch: reportedArch, fastIpAddress } = msg.payload;
             const archValue =
               reportedArch === "amd64" || reportedArch === "arm64" ? reportedArch : null;
 
@@ -167,6 +173,7 @@ export class AgentHub {
               data: {
                 name: nodeName,
                 ipAddress: remoteIp,
+                fastIpAddress: typeof fastIpAddress === "string" ? fastIpAddress : null,
                 status: "online",
                 provisionStatus: "agent-deployed",
                 bootstrapMethod: "token",

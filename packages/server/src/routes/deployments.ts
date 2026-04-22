@@ -187,6 +187,7 @@ deploymentsRouter.post("/", async (req, res) => {
 
   // For cluster, create ClusterNode records and resolve IPs
   let clusterNodeIps: string[] | undefined;
+  let clusterNodeFastIps: (string | null)[] | undefined;
   if (isCluster) {
     const nodes = await prisma.node.findMany({
       where: { id: { in: nodeIds } },
@@ -205,8 +206,12 @@ deploymentsRouter.post("/", async (req, res) => {
       });
     }
 
-    // Ordered: head first, then workers
+    // Ordered: head first, then workers. clusterNodeIps stays the
+    // management network (used for Ray inter-node and as default for ssh);
+    // clusterNodeFastIps is the per-node fast-fabric IP when known so the
+    // agent can route bulk transfers (image sync, etc.) over it.
     clusterNodeIps = nodeIds.map((id: string) => nodeMap.get(id)?.ipAddress).filter(Boolean);
+    clusterNodeFastIps = nodeIds.map((id: string) => nodeMap.get(id)?.fastIpAddress ?? null);
   }
 
   // Send deploy command to head agent
@@ -221,6 +226,7 @@ deploymentsRouter.post("/", async (req, res) => {
       recipeFile: isOllama ? undefined : recipeFile,
       config: config || {},
       clusterNodes: clusterNodeIps,
+      clusterNodeFastIps,
     },
   });
 

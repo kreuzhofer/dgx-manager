@@ -11,6 +11,9 @@ model Node {
   id              String           @id @default(cuid())
   name            String           @unique
   ipAddress       String?
+  // Optional fast-fabric IP (e.g. 192.168.100.x) used for bulk node↔node
+  // transfers like image sync. Falls back to ipAddress when null.
+  fastIpAddress   String?
   agentPort       Int              @default(8089)
   status          String           @default("new")
   provisionStatus String           @default("pending")

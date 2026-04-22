@@ -23,6 +23,44 @@ const AGENT_ARCH: string =
 const MANAGER_URL = process.env.MANAGER_URL || "ws://localhost:4000/ws/agent";
 const JOIN_TOKEN = process.env.JOIN_TOKEN || "";
 const NODE_ID_FILE = join(AGENT_DIR, "node-id");
+// Subnets in priority order (left wins) considered as the "fast" inter-node
+// fabric. Override at deploy time with FAST_NET_SUBNETS=10.0.0.0/8,...
+const FAST_NET_SUBNETS = (process.env.FAST_NET_SUBNETS || "192.168.100.0/24")
+  .split(",").map((s) => s.trim()).filter(Boolean);
+
+/**
+ * Detect this node's IP on the fast inter-node fabric (e.g. 192.168.100.x),
+ * if any. Returns null if no interface matches the configured subnets.
+ * Used by the server to route bulk node↔node transfers (image sync, model
+ * copy) over the fast network instead of the management network.
+ */
+function detectFastIp(): string | null {
+  try {
+    const out = execSync("ip -4 -o addr show", { timeout: 3000, encoding: "utf-8" });
+    // Parse lines like: `5: enp1s0    inet 192.168.100.42/24 brd ...`
+    const candidates: string[] = [];
+    for (const line of out.split("\n")) {
+      const m = line.match(/inet\s+(\d+\.\d+\.\d+\.\d+)\/(\d+)/);
+      if (!m) continue;
+      candidates.push(m[1]);
+    }
+    for (const subnet of FAST_NET_SUBNETS) {
+      const [base, maskStr] = subnet.split("/");
+      const mask = parseInt(maskStr, 10);
+      const baseInt = ipToInt(base);
+      const maskInt = mask === 0 ? 0 : (~0 << (32 - mask)) >>> 0;
+      const subnetVal = (baseInt & maskInt) >>> 0;
+      for (const ip of candidates) {
+        if (((ipToInt(ip) & maskInt) >>> 0) === subnetVal) return ip;
+      }
+    }
+  } catch { /* fall through */ }
+  return null;
+}
+
+function ipToInt(ip: string): number {
+  return ip.split(".").reduce((acc, oct) => ((acc << 8) + parseInt(oct, 10)) >>> 0, 0);
+}
 const METRICS_INTERVAL = 5_000;
 const HEALTH_CHECK_INTERVAL = 15_000;
 const RECONNECT_BASE = 1_000;
@@ -65,6 +103,10 @@ function connect() {
 
     // Register — use token flow if no nodeId persisted
     const metrics = await collectMetrics();
+    const fastIpAddress = detectFastIp();
+    if (fastIpAddress) {
+      console.log(`Detected fast-fabric IP: ${fastIpAddress}`);
+    }
     if (nodeId) {
       ws!.send(JSON.stringify({
         type: "agent:register",
@@ -75,6 +117,7 @@ function connect() {
           vramTotal: metrics.vramTotal,
           agentVersion: AGENT_VERSION,
           arch: AGENT_ARCH,
+          fastIpAddress,
         },
       }));
     } else if (JOIN_TOKEN) {
@@ -88,6 +131,7 @@ function connect() {
           vramTotal: metrics.vramTotal,
           agentVersion: AGENT_VERSION,
           arch: AGENT_ARCH,
+          fastIpAddress,
         },
       }));
       // Wait for register:accepted before continuing setup
@@ -444,11 +488,14 @@ function emitDeploymentProgress(deploymentId: string, progress: ReturnType<typeo
 function handleCommand(msg: { type: string; payload: Record<string, unknown> }) {
   switch (msg.type) {
     case "cmd:deploy": {
-      const { deploymentId, recipeFile, config, clusterNodes, runtime, modelName, modelType } = msg.payload as {
+      const { deploymentId, recipeFile, config, clusterNodes, clusterNodeFastIps, runtime, modelName, modelType } = msg.payload as {
         deploymentId: string;
         recipeFile?: string;
         config?: Record<string, unknown>;
         clusterNodes?: string[];
+        // Per-cluster-node fast-fabric IP, ordered head-first matching
+        // clusterNodes. Element is null when that node didn't report a fast IP.
+        clusterNodeFastIps?: (string | null)[];
         runtime?: string;
         modelName?: string;
         modelType?: "chat" | "embedding";
@@ -507,6 +554,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             tensorParallel: config?.tensorParallel as number,
             pipelineParallel: config?.pipelineParallel as number,
             clusterNodes,
+            clusterNodeFastIps,
           },
           (line) => {
             // Collapse tqdm carriage-return updates so the log viewer doesn't
