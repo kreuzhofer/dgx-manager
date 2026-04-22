@@ -667,6 +667,22 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
       break;
     }
 
+    case "cmd:rescan-recipes": {
+      // Re-scan local recipe directories on demand. Without this, recipes
+      // added to the NFS share after agent startup stay invisible until
+      // the agent reconnects.
+      try {
+        const recipes = discoverRecipes();
+        sendMsg("agent:recipes", { recipes });
+        const trainingRecipes = discoverTrainingRecipes();
+        sendMsg("agent:training-recipes", { recipes: trainingRecipes });
+        console.log(`[rescan] vllm=${recipes.length} training=${trainingRecipes.length}`);
+      } catch (err) {
+        console.error(`[rescan] failed: ${err}`);
+      }
+      break;
+    }
+
     case "cmd:update": {
       const { bundleUrl, version } = msg.payload as { bundleUrl: string; version: string };
       console.log(`[update] Updating agent to v${version} from ${bundleUrl}`);
