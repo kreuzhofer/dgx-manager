@@ -413,8 +413,16 @@ export function syncContainerImage(
   onLog?.(`Syncing ${containerName} (${localId}) to ${mismatchedWorkers.length} worker(s)...\n`);
   try {
     const copyTargets = mismatchedWorkers.join(",");
+    // --no-build is critical: without it, build-and-copy.sh REBUILDS the
+    // image from source (rebuilding vLLM + flashinfer wheels) before
+    // copying. That re-build can produce a different binary than what's
+    // currently running on the head — we hit
+    // "ImportError: vllm/_C.abi3.so: undefined symbol: ...
+    //  getCurrentCUDABlasHandleEv" because the rebuilt vLLM wheel ABI
+    // didn't match the libtorch in the resulting image. We want to
+    // propagate the EXACT image that's already validated on the head.
     execSync(
-      `${join(VLLM_REPO_PATH, "build-and-copy.sh")} -t ${containerName} -c ${copyTargets} --copy-parallel`,
+      `${join(VLLM_REPO_PATH, "build-and-copy.sh")} -t ${containerName} -c ${copyTargets} --copy-parallel --no-build`,
       // 30 min: multi-GB Docker image save+scp+load over LAN can take
       // 15-20 min. Previous 10 min timed out silently and the launch
       // proceeded with mismatched images, hanging on Ray placement group.
