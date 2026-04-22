@@ -377,6 +377,13 @@ export class AgentHub {
             break;
           }
 
+          case "agent:deployment:progress": {
+            // In-flight phase progress (e.g. HF download %). No DB persistence
+            // — this is ephemeral state, just rebroadcast for the UI.
+            sseBroadcast({ type: "deployment:progress", payload: msg.payload });
+            break;
+          }
+
           case "agent:finetune:progress": {
             let { jobId, phase, phaseProgress, step, totalSteps, loss, lr, evalLoss, etaSeconds, log } = msg.payload;
             // Resolve truncated job IDs from reattached containers (12 chars → full cuid)

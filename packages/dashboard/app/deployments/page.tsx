@@ -48,6 +48,29 @@ interface Deployment {
   clusterNodes?: ClusterNodeInfo[];
 }
 
+/**
+ * Append `chunk` to `existing` while honoring `\r` carriage returns: a `\r`
+ * rewinds back to the start of the current (last) line and the following
+ * content overwrites it. Used to collapse tqdm-style progress updates into a
+ * single in-place updating line in the log viewer.
+ */
+function applyCarriageReturns(existing: string, chunk: string): string {
+  if (!chunk.includes("\r")) return existing + chunk;
+  let buf = existing;
+  // Process character-by-character is wasteful — instead split on \r and
+  // apply rewind+overwrite per segment.
+  const parts = chunk.split("\r");
+  // First part is appended (no rewind before the first \r)
+  buf += parts[0];
+  for (let i = 1; i < parts.length; i++) {
+    // Rewind to the start of the current line
+    const lastNl = buf.lastIndexOf("\n");
+    buf = lastNl === -1 ? "" : buf.slice(0, lastNl + 1);
+    buf += parts[i];
+  }
+  return buf;
+}
+
 const statusStyles: Record<string, string> = {
   pending: "bg-gray-700 text-gray-300",
   starting: "bg-blue-900 text-blue-300",
@@ -92,7 +115,15 @@ export default function DeploymentsPage() {
   // Log viewer
   const [viewingLogs, setViewingLogs] = useState<string | null>(null);
   const [logs, setLogs] = useState<Record<string, string>>({});
-  // Log viewer state
+  // Per-deployment in-flight progress (e.g. HF download). Cleared on phase
+  // change away from the matching phase.
+  const [progress, setProgress] = useState<Record<string, {
+    phase: string;
+    phaseProgress: number;
+    current?: number;
+    total?: number;
+    eta?: string;
+  }>>({});
 
   const loadData = useCallback(() => {
     Promise.all([
@@ -143,6 +174,16 @@ export default function DeploymentsPage() {
             : d
         )
       );
+      // Drop stale progress when the phase changes away from the one we were
+      // tracking — otherwise a 99% download bar lingers across the loading phase.
+      setProgress((prev) => {
+        const cur = prev[deploymentId];
+        if (cur && cur.phase !== status) {
+          const { [deploymentId]: _, ...rest } = prev;
+          return rest;
+        }
+        return prev;
+      });
       if (error) {
         setLogs((prev) => ({
           ...prev,
@@ -158,9 +199,27 @@ export default function DeploymentsPage() {
     }
     if (event.type === "deployment:log") {
       const { deploymentId, log } = event.payload as { deploymentId: string; log: string };
-      setLogs((prev) => ({
+      setLogs((prev) => {
+        // Honor `\r` carriage returns: rewind to start of current line and
+        // overwrite. The agent already collapses within a single chunk, but
+        // the very first \r in a chunk may follow content from a prior chunk,
+        // so we apply the same rewind here.
+        const existing = prev[deploymentId] || "";
+        const next = applyCarriageReturns(existing, log);
+        return { ...prev, [deploymentId]: next };
+      });
+    }
+    if (event.type === "deployment:progress") {
+      const p = event.payload as {
+        deploymentId: string; phase: string; phaseProgress: number;
+        current?: number; total?: number; eta?: string;
+      };
+      setProgress((prev) => ({
         ...prev,
-        [deploymentId]: (prev[deploymentId] || "") + log,
+        [p.deploymentId]: {
+          phase: p.phase, phaseProgress: p.phaseProgress,
+          current: p.current, total: p.total, eta: p.eta,
+        },
       }));
     }
     if (event.type === "deployment:created") {
@@ -736,6 +795,30 @@ export default function DeploymentsPage() {
                     )}
                   </div>
                 </div>
+
+                {/* In-flight phase progress (e.g. HF download) — only on head node */}
+                {!isWorker && progress[d.id] && (
+                  <div className="mt-3">
+                    <div className="flex items-center justify-between text-xs text-gray-400 mb-1">
+                      <span className="font-medium text-gray-300">
+                        {progress[d.id].phase === "downloading" ? "Downloading model" : progress[d.id].phase}
+                      </span>
+                      <span className="tabular-nums">
+                        {progress[d.id].phaseProgress.toFixed(0)}%
+                        {progress[d.id].current != null && progress[d.id].total != null && (
+                          <> · {progress[d.id].current}/{progress[d.id].total} files</>
+                        )}
+                        {progress[d.id].eta && <> · ETA {progress[d.id].eta}</>}
+                      </span>
+                    </div>
+                    <div className="h-1.5 bg-gray-800 rounded overflow-hidden">
+                      <div
+                        className="h-full bg-cyan-500 transition-all duration-300"
+                        style={{ width: `${Math.min(100, Math.max(0, progress[d.id].phaseProgress))}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
 
                 {/* Cluster nodes detail — only on head node */}
                 {!isWorker && d.clusterMode && d.clusterNodes && d.clusterNodes.length > 0 && (

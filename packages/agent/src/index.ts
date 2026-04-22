@@ -356,6 +356,72 @@ function sendMsg(type: string, payload: Record<string, unknown>) {
   }
 }
 
+/**
+ * Parse huggingface_hub's tqdm progress for the multi-file fetch:
+ *   "Fetching 56 files:   2%|▏         | 1/56 [00:00<00:24,  2.21it/s]"
+ * Returns null if the line isn't a recognizable progress line.
+ *
+ * Per-file lines like "model-00001-of-00010.safetensors:  12%|..." also exist
+ * but are too granular to surface at the row level — we only parse the
+ * aggregate "Fetching N files" line.
+ */
+const FETCHING_RE = /Fetching\s+(\d+)\s+files:\s+(\d+(?:\.\d+)?)%\|[^|]*\|\s*(\d+)\/(\d+)\s*\[([^<\]]+)<([^,\]]+)/;
+function parseFetchingProgress(line: string): {
+  percent: number;
+  current: number;
+  total: number;
+  elapsed: string;
+  eta: string;
+} | null {
+  const m = line.match(FETCHING_RE);
+  if (!m) return null;
+  return {
+    percent: parseFloat(m[2]),
+    current: parseInt(m[3], 10),
+    total: parseInt(m[4], 10),
+    elapsed: m[5].trim(),
+    eta: m[6].trim(),
+  };
+}
+
+/**
+ * Collapse `\r`-only carriage returns to a sane single-line representation.
+ * tqdm rewrites the same line in a terminal using `\r`; when streamed verbatim
+ * to a browser pre-block they accumulate as one ever-growing line. Within a
+ * single chunk we keep only the FINAL segment between `\n` boundaries so the
+ * dashboard sees one updating line, not 50 concatenated ones.
+ */
+function collapseCarriageReturns(chunk: string): string {
+  if (!chunk.includes("\r")) return chunk;
+  // Split on \n to preserve real line boundaries, collapse \r within each line
+  return chunk.split("\n").map((segment) => {
+    if (!segment.includes("\r")) return segment;
+    const parts = segment.split("\r").filter((s) => s.length > 0);
+    return parts[parts.length - 1] || "";
+  }).join("\n");
+}
+
+// Per-deployment throttle for progress emissions. tqdm fires many times a
+// second; we cap to ~1/sec to keep the WS quiet without losing fidelity.
+const lastProgressEmit = new Map<string, number>();
+function emitDeploymentProgress(deploymentId: string, progress: ReturnType<typeof parseFetchingProgress>) {
+  if (!progress) return;
+  const now = Date.now();
+  const last = lastProgressEmit.get(deploymentId) || 0;
+  // Always emit the first tick, the 100% tick, and at most one per second between
+  if (now - last < 1000 && progress.percent < 100) return;
+  lastProgressEmit.set(deploymentId, now);
+  sendMsg("agent:deployment:progress", {
+    deploymentId,
+    phase: "downloading",
+    phaseProgress: progress.percent,
+    current: progress.current,
+    total: progress.total,
+    elapsed: progress.elapsed,
+    eta: progress.eta,
+  });
+}
+
 function handleCommand(msg: { type: string; payload: Record<string, unknown> }) {
   switch (msg.type) {
     case "cmd:deploy": {
@@ -424,7 +490,15 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             clusterNodes,
           },
           (line) => {
-            sendMsg("agent:deployment:log", { deploymentId, log: line });
+            // Collapse tqdm carriage-return updates so the log viewer doesn't
+            // accumulate one massive line per `Fetching ... files:` tick.
+            const cleaned = collapseCarriageReturns(line);
+            sendMsg("agent:deployment:log", { deploymentId, log: cleaned });
+
+            // Parse aggregate download progress (huggingface_hub multi-file
+            // tqdm) and emit a throttled progress event for the UI bar.
+            const progress = parseFetchingProgress(line);
+            if (progress) emitDeploymentProgress(deploymentId, progress);
 
             // Detect deployment phase from log output
             const phase = detectPhase(line);
