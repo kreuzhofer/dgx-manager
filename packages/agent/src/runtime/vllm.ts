@@ -388,7 +388,7 @@ export function syncContainerImage(
   for (const ip of workerIps) {
     try {
       const remoteId = execSync(
-        `ssh -o BatchMode=yes -o ConnectTimeout=5 ${SSH_USER}@${ip} "docker images ${containerName}:latest --format '{{.ID}}'"`,
+        `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 ${SSH_USER}@${ip} "docker images ${containerName}:latest --format '{{.ID}}'"`,
         { timeout: 10_000, encoding: "utf-8" }
       ).trim();
 
