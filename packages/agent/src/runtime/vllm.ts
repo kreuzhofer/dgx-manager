@@ -336,6 +336,23 @@ export function getTrackedDeployments(): TrackedDeployment[] {
 }
 
 /**
+ * True if a launch subprocess for this deployment is still alive in the
+ * current agent process. Used during WS-only reconnects to distinguish a
+ * still-in-progress launch (download/build/loading) from a truly orphaned
+ * tracked deployment after a full agent restart.
+ */
+export function isLaunchInProgress(deploymentId: string): boolean {
+  const inst = running.get(deploymentId);
+  if (!inst) return false;
+  // killed/exited child has process.exitCode set or process.killed true
+  const proc = inst.process as ChildProcess & { exitCode?: number | null };
+  if (inst.stopping) return false;
+  if (proc.killed) return false;
+  if (proc.exitCode != null) return false;
+  return true;
+}
+
+/**
  * Ensure cluster worker nodes have a Docker image at least as recent as the head's.
  * Compares creation timestamps — only copies if worker image is older.
  */

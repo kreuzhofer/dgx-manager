@@ -6,7 +6,7 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
 import { discoverRecipes } from "./recipes.js";
-import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, isStopping, getTrackedDeployments, reattachLogs, generateLocalModelRecipe } from "./runtime/vllm.js";
+import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, isStopping, getTrackedDeployments, reattachLogs, generateLocalModelRecipe, isLaunchInProgress } from "./runtime/vllm.js";
 import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth, getOllamaModels } from "./runtime/ollama.js";
 import { discoverTrainingRecipes } from "./training-recipes.js";
 import { startFinetuneJob, stopFinetuneJob, mergeLoraAdapter, reattachFinetuneJobs } from "./runtime/finetune.js";
@@ -103,12 +103,31 @@ function connect() {
 
   /** Setup tasks that run after successful registration (either nodeId or token flow). */
   function postRegistrationSetup() {
-    // Reconcile tracked deployments after restart
+    // Reconcile tracked deployments after restart.
+    //
+    // Important: this runs on every WS reconnect, not just after a full agent
+    // process restart. A WS-only reconnect (e.g. server container redeploy)
+    // leaves the in-process `running` map intact — the launch subprocess and
+    // its log forwarder are still alive. In that case we must NOT report
+    // "failed" just because no docker container exists yet; the subprocess
+    // could simply still be downloading or building. Reporting "failed" in
+    // that window flips the deployment to failed in the DB while bytes are
+    // still streaming to disk.
+    //
+    // Decision tree for each tracked deployment on reconnect:
+    //   1. Launch subprocess still alive in this process → in-progress, do
+    //      nothing. The existing log/phase stream will drive status.
+    //   2. Container running → "running" (post-restart reattach).
+    //   3. Container not running AND subprocess dead → "failed".
     const tracked = getTrackedDeployments();
     if (tracked.length > 0) {
       console.log(`Reconciling ${tracked.length} tracked deployment(s)`);
       const containerUp = isVllmContainerRunning();
       for (const t of tracked) {
+        if (isLaunchInProgress(t.deploymentId)) {
+          console.log(`[reconcile] ${t.deploymentId}: launch subprocess still alive, leaving status to existing log stream`);
+          continue;
+        }
         sendMsg("agent:deployment:status", {
           deploymentId: t.deploymentId,
           status: containerUp ? "running" : "failed",
