@@ -544,6 +544,18 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
       try {
         sendMsg("agent:deployment:status", { deploymentId, status: "starting" });
         let lastPhase = "starting";
+        // Auto-skip the model-download phase when the recipe's `model:` field
+        // is a local path (e.g. `/workspace/outputs/.../merged`). Without
+        // this, run-recipe.sh's hf-download step interprets the path as a
+        // HuggingFace repo id ("Repo id must be in the form 'repo_name' or
+        // 'namespace/repo_name'") and the deploy fails before vLLM starts.
+        // cmd:finetune:deploy already does this; cmd:deploy now matches.
+        let recipeModelIsLocal = false;
+        try {
+          const recipeContent = readFileSync(`${process.env.VLLM_REPO_PATH || `${process.env.SHARED_STORAGE || "/mnt/tank"}/src/github/spark-vllm-docker`}/${recipeFile}`, "utf-8");
+          const m = recipeContent.match(/^model:\s*(.+)$/m);
+          if (m && m[1].trim().startsWith("/")) recipeModelIsLocal = true;
+        } catch { /* if we can't read the recipe, fall back to default behavior */ }
         const port = launchRecipe(
           deploymentId,
           recipeFile,
@@ -555,6 +567,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             pipelineParallel: config?.pipelineParallel as number,
             clusterNodes,
             clusterNodeFastIps,
+            skipSetup: recipeModelIsLocal,
           },
           (line) => {
             // Collapse tqdm carriage-return updates so the log viewer doesn't
