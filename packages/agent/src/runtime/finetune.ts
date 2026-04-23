@@ -144,6 +144,20 @@ export function reattachFinetuneJobs(
         const speedSmoother = new SpeedSmoother(20);
         let currentPhase: TrainingPhase = isMerge ? "loading" : "training";
 
+        // Completion-detection state. Without this, when the agent is
+        // restarted mid-training (e.g. cmd:update), the original execProc
+        // that fires `agent:finetune:complete` on container exit is lost.
+        // The reattached log stream then runs forever even after training
+        // succeeds — DB stays at status=starting, /merge endpoint is
+        // gated, deploy is gated. We fix that by watching the log for
+        // the script's own success marker and emitting the completion
+        // event ourselves. Idempotent — we only fire once.
+        let completionEmitted = false;
+        const successMarker = isMerge
+          ? /Merged model saved to (\S+)/i
+          : /LoRA adapter saved to (\S+)/i;
+        const failureMarker = /(Traceback \(most recent call last\)|RuntimeError|FAILED|train\.py FAILED|merge\.py FAILED)/i;
+
         const handleReattach = (data: Buffer) => {
           const text = data.toString();
           sendMsg(msgType, { jobId: jobIdPrefix, log: text });
@@ -175,6 +189,27 @@ export function reattachFinetuneJobs(
                 });
               }
             }
+
+            if (completionEmitted) continue;
+            const ok = line.match(successMarker);
+            if (ok) {
+              completionEmitted = true;
+              const outputPath = ok[1] || undefined;
+              const completeMsg = isMerge ? "agent:finetune:merge-complete" : "agent:finetune:complete";
+              const payload = isMerge
+                ? { jobId: jobIdPrefix, status: "completed", mergedPath: outputPath ?? null }
+                : { jobId: jobIdPrefix, status: "completed", outputPath };
+              console.log(`[finetune][reattach] ${completeMsg} for ${jobIdPrefix} (output=${outputPath})`);
+              sendMsg(completeMsg, payload);
+            } else if (failureMarker.test(line)) {
+              completionEmitted = true;
+              const completeMsg = isMerge ? "agent:finetune:merge-complete" : "agent:finetune:complete";
+              const payload = isMerge
+                ? { jobId: jobIdPrefix, status: "failed", error: "training failed (detected via reattached log)" }
+                : { jobId: jobIdPrefix, status: "failed", error: "training failed (detected via reattached log)" };
+              console.log(`[finetune][reattach] ${completeMsg} (failed) for ${jobIdPrefix}`);
+              sendMsg(completeMsg, payload);
+            }
           }
         };
 
@@ -190,6 +225,13 @@ export function reattachFinetuneJobs(
         const workerIps = outputDir ? loadClusterWorkers(outputDir) : undefined;
 
         running.set(jobIdPrefix, { jobId: jobIdPrefix, containerName, execProcess: logProc, aborted: false, workerIps });
+
+        // Cover the case where the success marker was already in the log
+        // BEFORE the agent restarted: tail starts at -n 5 so we'd see only
+        // the very last lines. If the saved-marker happens to be in those
+        // 5 lines we'll catch it; otherwise the operator needs to re-trigger
+        // (the log was already flushed). For training runs the saved
+        // marker is the LAST line emitted, so -n 5 covers the typical case.
       }
     }
   } catch (err) {
