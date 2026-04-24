@@ -24,6 +24,7 @@ export interface TrainingRecipe {
     train: string;
     launch: string;
     ds_config?: string;
+    merge?: string;
   };
   defaults: Record<string, unknown>;
   hardware: { min_nodes: number; gpus_per_node: number; vram_estimate_mb: number };
@@ -170,6 +171,7 @@ export function discoverTrainingRecipes(): TrainingRecipe[] {
           train: (scripts.train as string) || "train.py",
           launch: (scripts.launch as string) || "launch.sh",
           ds_config: scripts.ds_config as string | undefined,
+          merge: scripts.merge as string | undefined,
         },
         defaults,
         hardware: {

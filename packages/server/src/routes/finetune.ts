@@ -275,6 +275,15 @@ finetuneRouter.post("/:id/merge", async (req, res) => {
   const agentHub: AgentHub = req.app.get("agentHub");
   const mergedOutputDir = `${SHARED_STORAGE}/outputs/${job.id}/merged`;
 
+  // Recipe may specify a custom merge script (e.g. Qwen 3.6 needs a hand-
+  // rolled merge because the generic PEFT path strips the multimodal
+  // wrapper). Path is repo-relative; agent resolves it against the recipes
+  // repo root. Falls back to the generic scripts/merge.py.
+  const recipe = job.recipeFile
+    ? agentHub.getTrainingRecipes().find((r) => r.file === job.recipeFile)
+    : undefined;
+  const mergeScript = recipe?.scripts.merge || "scripts/merge.py";
+
   agentHub.sendToAgent(job.nodeId, {
     type: "cmd:finetune:merge",
     payload: {
@@ -282,6 +291,7 @@ finetuneRouter.post("/:id/merge", async (req, res) => {
       baseModel: job.baseModel,
       adapterPath: job.outputDir ? `${job.outputDir}/lora_adapter` : job.outputPath!,
       mergedOutputDir,
+      mergeScript,
     },
   });
 

@@ -4,8 +4,8 @@
  */
 
 import { spawn, execSync, ChildProcess } from "child_process";
-import { existsSync, readFileSync, writeFileSync } from "fs";
-import { join } from "path";
+import { existsSync, readFileSync, writeFileSync, createWriteStream, mkdirSync } from "fs";
+import { dirname, join } from "path";
 import { SHARED_STORAGE, WORKSPACE, toContainerPath, toHostPath } from "../env.js";
 import { getTrainingRepoPath, type TrainingRecipe } from "../training-recipes.js";
 
@@ -907,20 +907,33 @@ export async function mergeLoraAdapter(
   baseModel: string,
   adapterPath: string,
   mergedOutputDir: string,
-  callbacks: FinetuneCallbacks
+  callbacks: FinetuneCallbacks,
+  mergeScriptRelative?: string
 ): Promise<void> {
   const containerName = `dgx-merge-${jobId.slice(0, 12)}`;
   const containerImage = "nvcr.io/nvidia/pytorch:25.11-py3";
-  const mergeScript = `${WORKSPACE}/src/github/dgx-manager-fine-tune-recipes/scripts/merge.py`;
+  // Recipes may supply their own merge script (e.g. merge_qwen3moe.py for
+  // Qwen 3.6, which needs hand-rolled per-expert LoRA composition to
+  // preserve the multimodal wrapper the generic PEFT path strips).
+  // Path is repo-relative, falling back to the generic merge.py.
+  const mergeScript = `${WORKSPACE}/src/github/dgx-manager-fine-tune-recipes/${mergeScriptRelative || "scripts/merge.py"}`;
 
   // Translate NFS paths to container paths
   const containerAdapterPath = toContainerPath(adapterPath);
   const containerOutputDir = toContainerPath(mergedOutputDir);
 
+  // Persist merge stdout/stderr to disk so failures are diagnosable after
+  // the fact (mirrors the train.log file that setup_logging writes during
+  // training). Lives next to the job's lora_adapter/ dir.
+  const mergeLogPath = join(dirname(mergedOutputDir), "merge.log");
+  try { mkdirSync(dirname(mergeLogPath), { recursive: true }); } catch { /* */ }
+  const logStream = createWriteStream(mergeLogPath, { flags: "a" });
+  const tee = (s: string) => { callbacks.onLog(s); try { logStream.write(s); } catch { /* */ } };
+
   try {
     try { execSync(`docker rm -f ${containerName}`, { timeout: 15_000, stdio: "ignore" }); } catch { /* */ }
 
-    callbacks.onLog(`Starting merge container...\n`);
+    tee(`[agent] Starting merge container (script=${mergeScriptRelative || "scripts/merge.py"})\n`);
     callbacks.onProgress("loading", 0);
 
     const dockerArgs = [
@@ -951,17 +964,20 @@ export async function mergeLoraAdapter(
     execSync(`docker ${dockerArgs.join(" ")}`, { timeout: 120_000 });
 
     // Install merge deps
-    callbacks.onLog("Installing merge dependencies...\n");
+    tee("[agent] Installing merge dependencies...\n");
     try {
-      execSync(`docker exec ${containerName} pip install -q peft transformers accelerate safetensors`, { timeout: 300_000, stdio: "ignore" });
+      execSync(`docker exec ${containerName} pip install -q peft transformers accelerate safetensors huggingface_hub`, { timeout: 300_000, stdio: "ignore" });
     } catch (err) {
+      tee(`[agent] Failed to install merge deps: ${err}\n`);
       callbacks.onComplete("failed", undefined, `Failed to install merge deps: ${err}`);
+      try { logStream.end(); } catch { /* */ }
       try { execSync(`docker rm -f ${containerName}`, { timeout: 15_000, stdio: "ignore" }); } catch { /* */ }
       return;
     }
-    callbacks.onLog("Dependencies installed.\n");
+    tee("[agent] Dependencies installed.\n");
 
-    callbacks.onLog(`\nRunning merge: ${baseModel} + ${containerAdapterPath} → ${containerOutputDir}\n\n`);
+    tee(`[agent] Running merge: ${baseModel} + ${containerAdapterPath} -> ${containerOutputDir}\n`);
+    tee(`[agent] Script: ${mergeScript}\n\n`);
 
     const mergeProc = spawn("docker", [
       "exec", containerName,
@@ -973,7 +989,7 @@ export async function mergeLoraAdapter(
 
     mergeProc.stdout?.on("data", (data: Buffer) => {
       const text = data.toString();
-      callbacks.onLog(text);
+      tee(text);
       const l = text.toLowerCase();
       if (l.includes("loading base model")) callbacks.onProgress("loading", 0.1);
       if (l.includes("base model loaded")) callbacks.onProgress("loading", 0.4);
@@ -983,26 +999,31 @@ export async function mergeLoraAdapter(
       if (l.includes("model saved")) callbacks.onProgress("saving", 0.9);
       if (l.includes("saving tokenizer")) callbacks.onProgress("saving", 0.95);
     });
-    mergeProc.stderr?.on("data", (data: Buffer) => callbacks.onLog(data.toString()));
+    mergeProc.stderr?.on("data", (data: Buffer) => tee(data.toString()));
 
     await new Promise<void>((resolve, reject) => {
       mergeProc.on("exit", (code) => {
+        tee(`\n[agent] Merge process exited with code ${code}\n`);
         // Make output files world-readable
         try {
           execSync(`docker exec ${containerName} chmod -R a+rw ${containerOutputDir}`, { timeout: 30_000, stdio: "ignore" });
         } catch { /* best effort */ }
 
         if (code === 0) {
+          tee(`[agent] Merged model saved to ${mergedOutputDir}\n`);
           callbacks.onProgress("saving", 1.0);
           callbacks.onComplete("completed", mergedOutputDir);
         } else {
           callbacks.onComplete("failed", undefined, `Merge failed with exit code ${code}`);
         }
+        try { logStream.end(); } catch { /* */ }
         try { execSync(`docker rm -f ${containerName}`, { timeout: 15_000, stdio: "ignore" }); } catch { /* */ }
         resolve();
       });
     });
   } catch (err) {
+    tee(`[agent] Merge error: ${err}\n`);
+    try { logStream.end(); } catch { /* */ }
     callbacks.onComplete("failed", undefined, `Merge error: ${err}`);
     try { execSync(`docker rm -f ${containerName}`, { timeout: 15_000, stdio: "ignore" }); } catch { /* */ }
   }

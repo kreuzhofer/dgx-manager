@@ -260,6 +260,7 @@ function connect() {
           temp: m.temperature,
           netInterfaces: m.netInterfaces,
           rdmaInterfaces: m.rdmaInterfaces,
+          diskDevices: m.diskDevices,
         },
       }));
     }, METRICS_INTERVAL);
@@ -750,11 +751,11 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
     }
 
     case "cmd:finetune:merge": {
-      const { jobId, baseModel, adapterPath, mergedOutputDir } = msg.payload as {
-        jobId: string; baseModel: string; adapterPath: string; mergedOutputDir: string;
+      const { jobId, baseModel, adapterPath, mergedOutputDir, mergeScript } = msg.payload as {
+        jobId: string; baseModel: string; adapterPath: string; mergedOutputDir: string; mergeScript?: string;
       };
 
-      console.log(`[finetune] Merging job ${jobId}: ${baseModel} + ${adapterPath}`);
+      console.log(`[finetune] Merging job ${jobId}: ${baseModel} + ${adapterPath} (script=${mergeScript || "scripts/merge.py"})`);
       mergeLoraAdapter(jobId, baseModel, adapterPath, mergedOutputDir, {
         onLog: (line) => {
           sendMsg("agent:finetune:merge-progress", { jobId, log: line });
@@ -768,7 +769,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             jobId, status, mergedPath: outputPath ?? null, error: error ?? undefined,
           });
         },
-      });
+      }, mergeScript);
       break;
     }
 

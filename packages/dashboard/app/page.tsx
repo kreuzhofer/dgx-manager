@@ -18,6 +18,12 @@ interface NetInterfaceSample {
   txBytesPerSec: number;
 }
 
+interface DiskDeviceSample {
+  name: string;
+  readBytesPerSec: number;
+  writeBytesPerSec: number;
+}
+
 interface MetricSample {
   timestamp: number;
   gpuUtil: number;
@@ -27,6 +33,7 @@ interface MetricSample {
   activeRequests: number | null;
   netInterfaces?: NetInterfaceSample[];
   rdmaInterfaces?: NetInterfaceSample[];
+  diskDevices?: DiskDeviceSample[];
 }
 
 interface Node {
@@ -100,6 +107,7 @@ export default function OverviewPage() {
           activeRequests: payload.activeRequests ?? null,
           netInterfaces: payload.netInterfaces as MetricSample["netInterfaces"],
           rdmaInterfaces: payload.rdmaInterfaces as MetricSample["rdmaInterfaces"],
+          diskDevices: payload.diskDevices as MetricSample["diskDevices"],
         });
       }
       // Update node status to online

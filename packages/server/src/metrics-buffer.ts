@@ -4,6 +4,12 @@ export interface NetInterfaceSample {
   txBytesPerSec: number;
 }
 
+export interface DiskDeviceSample {
+  name: string;
+  readBytesPerSec: number;
+  writeBytesPerSec: number;
+}
+
 export interface MetricSample {
   timestamp: number;
   gpuUtil: number;
@@ -13,6 +19,7 @@ export interface MetricSample {
   activeRequests: number | null;
   netInterfaces?: NetInterfaceSample[];
   rdmaInterfaces?: NetInterfaceSample[];
+  diskDevices?: DiskDeviceSample[];
 }
 
 const MAX_SAMPLES = 720; // 1 hour at 5s intervals

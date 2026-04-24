@@ -13,6 +13,12 @@ export interface RdmaInterface {
   txBytesPerSec: number;
 }
 
+export interface DiskDevice {
+  name: string;
+  readBytesPerSec: number;
+  writeBytesPerSec: number;
+}
+
 export interface GpuMetrics {
   gpuModel: string;
   vramTotal: number;
@@ -21,6 +27,7 @@ export interface GpuMetrics {
   temperature: number | null;
   netInterfaces: NetInterface[];
   rdmaInterfaces: RdmaInterface[];
+  diskDevices: DiskDevice[];
 }
 
 export async function collectMetrics(): Promise<GpuMetrics> {
@@ -52,6 +59,7 @@ export async function collectMetrics(): Promise<GpuMetrics> {
       temperature: parts[4] && parts[4] !== "[N/A]" ? parseFloat(parts[4]) : null,
       netInterfaces: collectNetworkMetrics(),
       rdmaInterfaces: collectRdmaMetrics(),
+      diskDevices: collectDiskMetrics(),
     };
   } catch {
     return {
@@ -62,6 +70,7 @@ export async function collectMetrics(): Promise<GpuMetrics> {
       temperature: null,
       netInterfaces: collectNetworkMetrics(),
       rdmaInterfaces: collectRdmaMetrics(),
+      diskDevices: collectDiskMetrics(),
     };
   }
 }
@@ -153,6 +162,57 @@ function collectRdmaMetrics(): RdmaInterface[] {
       } catch { /* port not readable */ }
     }
   } catch { /* no IB devices */ }
+
+  return results;
+}
+
+// --- Disk I/O monitoring ---
+
+// Match whole-device names only: nvme0n1, sda, md0 — partitions like nvme0n1p1
+// or sda1 are excluded, as are loop*, ram*, dm-*.
+const DISK_DEVICE_RE = /^(nvme\d+n\d+|sd[a-z]+|md\d+)$/;
+const prevDiskCounters = new Map<string, { sectorsRead: number; sectorsWritten: number; time: number }>();
+
+/** Read /proc/diskstats and compute per-device read/write bytes per second. */
+function collectDiskMetrics(): DiskDevice[] {
+  const now = Date.now();
+  const results: DiskDevice[] = [];
+
+  let raw: string;
+  try {
+    raw = readFileSync("/proc/diskstats", "utf-8");
+  } catch {
+    return results;
+  }
+
+  for (const line of raw.split("\n")) {
+    // Fields: major minor name reads_completed reads_merged sectors_read
+    //         ms_reading writes_completed writes_merged sectors_written ...
+    const fields = line.trim().split(/\s+/);
+    if (fields.length < 10) continue;
+
+    const name = fields[2];
+    if (!DISK_DEVICE_RE.test(name)) continue;
+
+    const sectorsRead = parseInt(fields[5], 10);
+    const sectorsWritten = parseInt(fields[9], 10);
+    if (Number.isNaN(sectorsRead) || Number.isNaN(sectorsWritten)) continue;
+
+    const prev = prevDiskCounters.get(name);
+    if (prev) {
+      const elapsed = (now - prev.time) / 1000;
+      if (elapsed > 0) {
+        // /proc/diskstats sectors are 512 bytes regardless of physical block size.
+        results.push({
+          name,
+          readBytesPerSec: Math.round(((sectorsRead - prev.sectorsRead) * 512) / elapsed),
+          writeBytesPerSec: Math.round(((sectorsWritten - prev.sectorsWritten) * 512) / elapsed),
+        });
+      }
+    }
+
+    prevDiskCounters.set(name, { sectorsRead, sectorsWritten, time: now });
+  }
 
   return results;
 }

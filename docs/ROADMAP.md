@@ -176,10 +176,16 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
   - **Gemma 4 E4B**: base 23% → fine-tuned **90%** exact-match accuracy (+67pp, 3.9× ratio) on 100 examples
   - Key lesson: eval prompt format must match training format (no system prompt, same context layout)
   - Better SQL normalization: handles quote style, chat template artifacts, whitespace
-- **Gemma 4 26B-A4B-it full-epoch training in progress**
-  - 9331 steps total on 2 DGX Spark nodes (ZeRO-3), ~46h training + ~3h eval overhead
-  - Eval loss trajectory (so far): 500→2.14, 1000→2.02, 1500→2.02, 2000→1.96, 2500→1.99, 3000→1.94, 3500→1.93
-  - Pending: merge + deploy + SQL eval once 9331 steps complete
+- **Gemma 4 26B-A4B-it LoRA run — SQL eval worse than base** (investigated 2026-04-22, no re-run yet)
+  - 1 full epoch, 9331 steps, 2 DGX Spark nodes (ZeRO-3), ~46h. Eval loss monotonically decreased (500→2.14 … 3500→1.93) so training *looked* fine.
+  - Root cause (static analysis of adapter safetensors + base model index — no retrain needed): LoRA `target_modules=q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj` **never matched any MoE expert or router weight**. Adapter wrapped 394 modules: 30 language layers × 7 dense/attention projections + 27 vision-tower layers × 7 projections. Zero MoE modules.
+  - Why: Gemma 4 26B-A4B uses a shared-expert pattern — every language layer has *both* a dense MLP (`mlp.{gate,up,down}_proj`, `nn.Linear`, matched) *and* an MoE block with fused 3D tensors (`experts.gate_up_proj`, `experts.down_proj`) plus `router.proj` / `router.scale` / `router.per_expert_scale`. None of those are `nn.Linear` and none end with `.gate_proj` / `.up_proj`, so PEFT's endswith matcher skips them. The MoE path (bulk of the 26B params, most of the active compute on the GB10) got zero gradient. The shared-dense path learned to emit SQL, but routing into the un-adapted experts produces a distribution mismatch → worse than base at inference.
+  - Also: adapter capacity was partially wasted on the 27-layer vision tower (text-only SQL task).
+  - Prompt format parity *was* verified OK — same `{context}\n\n{question}` single-user-turn in training (`lib/dataset.py:67-88`) and eval (`scripts/evaluate.py:66-72,180`). Not the cause.
+  - Full fine-tuning memory estimate (bf16 + AdamW fp32): ~416 GB for params+grads+optimizer+fp32-master; needs **4–5 Sparks** with ZeRO-3 (+ ~20-30 GB activations/overhead per rank), or 3–4 Sparks with 8-bit AdamW. "A4B" is a compute optimization, not a memory one — full FT of 26B-A4B sits in the full 26B memory class. Current 2-Spark setup cannot hold it.
+  - [ ] Next: re-run 26B LoRA with `target_modules` restricted to attention only (`q_proj,k_proj,v_proj,o_proj`) and scoped to `model.language_model.layers` (exclude vision tower). Cheap sanity check — if ≥ base, confirms the dense-MLP adaptation drove the regression via MoE-routing drift.
+  - [ ] After that: write a proper MoE-aware LoRA dispatch — wrap `experts.gate_up_proj` / `experts.down_proj` as per-expert low-rank deltas on the fused 3D tensors, leave `router.*` frozen. Standard PEFT can't do this out of the box.
+  - [ ] Harden `fix_clippable_linear_keys()` in `lib/patches.py:119-172` — the "copy any missing key from base" fallback is fragile for MoE; make it log *every* overwrite so a silent expert-key mismatch can't hide.
 - [ ] Run evaluation suites (lm-eval-harness, custom benchmarks) against deployed models
 - [ ] Track quality metrics over time with per-model and per-run history
 - [ ] Compare base models against fine-tuned variants in the dashboard (currently only per-job chart)

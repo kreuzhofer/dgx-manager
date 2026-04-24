@@ -10,6 +10,12 @@ interface NetInterfaceSample {
   txBytesPerSec: number;
 }
 
+interface DiskDeviceSample {
+  name: string;
+  readBytesPerSec: number;
+  writeBytesPerSec: number;
+}
+
 interface MetricSample {
   timestamp: number;
   gpuUtil: number;
@@ -19,6 +25,7 @@ interface MetricSample {
   activeRequests: number | null;
   netInterfaces?: NetInterfaceSample[];
   rdmaInterfaces?: NetInterfaceSample[];
+  diskDevices?: DiskDeviceSample[];
 }
 
 interface NodeDeployment {
@@ -135,6 +142,19 @@ export function NodeCard({
     }),
   }));
 
+  // Disk devices — combined read+write throughput in MB/s (bytes-based, unlike net)
+  const diskNames = new Set<string>();
+  for (const s of displayHistory) {
+    for (const d of s.diskDevices || []) diskNames.add(d.name);
+  }
+  const diskData = Array.from(diskNames).map((name) => ({
+    name,
+    data: displayHistory.map((s) => {
+      const d = s.diskDevices?.find((dd) => dd.name === name);
+      return d ? (d.readBytesPerSec + d.writeBytesPerSec) / 1_000_000 : 0; // MB/s
+    }),
+  }));
+
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors">
       {/* Header */}
@@ -243,6 +263,22 @@ export function NodeCard({
               currentValue={`${iface.data.length > 0 ? (iface.data[iface.data.length - 1] > 1000 ? (iface.data[iface.data.length - 1] / 1000).toFixed(1) + " Gbps" : iface.data[iface.data.length - 1].toFixed(0) + " Mbps") : "0 Mbps"}`}
             />
           ))}
+          {diskData.map((disk) => {
+            const last = disk.data.length > 0 ? disk.data[disk.data.length - 1] : 0;
+            const display = last >= 1000
+              ? `${(last / 1000).toFixed(2)} GB/s`
+              : `${last.toFixed(1)} MB/s`;
+            return (
+              <Sparkline
+                key={`disk-${disk.name}`}
+                data={disk.data}
+                max={Math.max(...disk.data, 100)}
+                color="#f59e0b"
+                label={`${disk.name} (disk)`}
+                currentValue={display}
+              />
+            );
+          })}
         </div>
       ) : (
         <p className="text-xs text-gray-500 italic">No metrics yet</p>
