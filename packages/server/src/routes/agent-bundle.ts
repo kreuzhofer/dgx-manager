@@ -149,8 +149,17 @@ if command -v docker &>/dev/null; then
 else
   log "Installing Docker..."
   curl -fsSL https://get.docker.com | sh
-  usermod -aG docker "\$AGENT_USER"
   log "Docker installed"
+fi
+# Always ensure the agent user is in the docker group (idempotent).
+# Skipping this when Docker was pre-installed leaves the user unable
+# to run docker without sudo, which breaks ssh-in diagnostics — seen
+# on a node that had Docker pre-baked from the factory image.
+if id -nG "\$AGENT_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+  log "User \$AGENT_USER already in docker group"
+else
+  usermod -aG docker "\$AGENT_USER"
+  log "Added \$AGENT_USER to docker group (will take effect on next login)"
 fi
 
 # Step 3: Install nvidia-container-toolkit

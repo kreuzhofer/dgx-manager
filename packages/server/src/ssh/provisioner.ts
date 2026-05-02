@@ -70,6 +70,19 @@ export async function auditNode(host: string, nodeId?: string): Promise<Provisio
       }),
     },
     {
+      // Independent of "Docker" install — Docker can be present (factory
+      // image) while the SSH user is missing from the docker group, in
+      // which case `docker ps` fails with EACCES on the socket and ssh-in
+      // diagnostics are blocked.
+      name: "Docker group",
+      cmd: "id -nG \"$USER\" | tr ' ' '\\n' | grep -qx docker && echo member",
+      eval: (r) => ({
+        name: "Docker group",
+        status: r.stdout.includes("member") ? "green" : sudoAvailable ? "yellow" : "red",
+        detail: r.stdout.includes("member") ? "User in docker group" : sudoAvailable ? "User not in docker group — can auto-install" : "User not in docker group — need sudo",
+      }),
+    },
+    {
       name: "nvidia-container-toolkit",
       cmd: "dpkg -l nvidia-container-toolkit 2>/dev/null | grep -q ^ii && echo installed",
       eval: (r) => ({
@@ -145,6 +158,9 @@ export async function provisionNode(host: string, checks: PrereqCheck[], nodeId?
     switch (item.name) {
       case "Docker":
         r = await sshExec(host, "curl -fsSL https://get.docker.com | sudo sh && sudo usermod -aG docker $USER", { timeout: 120_000 });
+        break;
+      case "Docker group":
+        r = await sshExec(host, "sudo usermod -aG docker $USER", { timeout: 30_000 });
         break;
       case "nvidia-container-toolkit":
         r = await sshExec(host, [

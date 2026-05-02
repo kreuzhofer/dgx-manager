@@ -107,6 +107,12 @@ export class AgentHub {
             const fastIp = msg.payload.fastIpAddress;
             const fastIpUpdate =
               fastIp === undefined ? {} : { fastIpAddress: typeof fastIp === "string" ? fastIp : null };
+            // ipAddress: refresh from the WebSocket source on every reconnect.
+            // The node's management IP can change (DHCP lease, netplan edit,
+            // NIC swap), and stale values break the SSH-based audit/provision
+            // flows since they target whatever IP we have on file.
+            const remoteIp = (ws as unknown as { _socket?: { remoteAddress?: string } })._socket?.remoteAddress?.replace("::ffff:", "");
+            const ipUpdate = remoteIp ? { ipAddress: remoteIp } : {};
             await prisma.node.update({
               where: { id: nodeId! },
               data: {
@@ -116,6 +122,7 @@ export class AgentHub {
                 agentVersion,
                 ...(archValue ? { arch: archValue } : {}),
                 ...fastIpUpdate,
+                ...ipUpdate,
                 lastSeen: new Date(),
               },
             });
