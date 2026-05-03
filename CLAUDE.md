@@ -119,6 +119,46 @@ Do this BEFORE committing. If you edited multiple agent files in one session, bu
 - Dashboard uses App Router with `@/*` path alias
 
 
+## Testing
+
+The repo uses **Vitest** + **fast-check** + **supertest**, configured at the root in `vitest.config.ts`.
+
+```bash
+npm test                # run all tests once (use this before claiming any change is done)
+npm run test:watch      # TDD loop
+npm run test:ui         # vitest UI in browser
+npx vitest run path/to/file.test.ts   # focus a single file
+npx vitest run -t "substring"          # focus tests by name substring
+```
+
+### Layout
+
+- **Unit + property tests** live next to source as `<name>.test.ts`.
+- **Integration tests** that need a real Prisma DB live under `packages/<pkg>/src/__tests__/integration/`. Each suite gets a per-test SQLite via `mkdtempSync` + `DATABASE_URL=file:/tmp/...` (set BEFORE importing prisma) and applies the schema via `npx prisma db push --force-reset`. Wipe between tests in FK-dependency order — see `wipeAll()` in `deployments.vram-admission.test.ts` for the canonical pattern.
+- **HTTP routes** are tested via supertest against an Express app that mounts only the router under test, with a stub `agentHub` injected via `app.set("agentHub", …)`. No WebSocket, no port binding.
+
+### When to use what
+
+- **Property test** (`it.prop` from `@fast-check/vitest`) for any pure helper whose correctness is best stated as an invariant over an input space rather than a fixture. Always include a plain-English doc comment above the property describing the invariant — the test should read like a spec.
+- **Unit test** for parsers, formatters, and other pure functions where the input space is small and named cases are clearer than properties.
+- **Integration test** for HTTP behavior, multi-step flows, or anything where the pure-helper / DB-coupled split matters (e.g. admission checks).
+- **Refactor pure logic out** of route files / IO-heavy modules so it can be unit-tested without mocks. The `packages/server/src/admission/vram.ts` split is the example to follow: a pure `computeVramShortfall` for property tests, a Prisma-coupled `checkVllmVramAdmission` for integration tests.
+
+### Risk-tier expectations
+
+- **Low risk** (refactors, log-message tweaks, comment changes): run the existing tests; add one only if a regression would silently degrade behavior.
+- **Medium risk** (new endpoints, new config knobs, validation changes): one integration test for the happy path + one for the error path; unit/property test any pure helper added.
+- **High risk** (admission control, multi-node coordination, anything affecting data persistence or money): property tests for the invariant + integration test for the failure mode + a hand-picked test mirroring the original incident if there was one.
+
+### Don't claim done without `npm test` green
+
+Principle 1 ("Test-Driven Development") is now enforceable: every change should leave `npm test` passing. If a test cannot be added (e.g. genuinely environmental behavior on a real DGX), say so explicitly in the PR description and explain what manual verification was done instead.
+
+### AI agent + Prisma destructive ops
+
+Prisma 7 refuses `db push --force-reset` and similar destructive operations when invoked by an AI agent unless `PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION` is set with an explicit user-consent string. The integration test sets this on a per-test basis with a fixed consent record — see `deployments.vram-admission.test.ts`. Do **not** set this env var globally; only inside test setup that operates against a per-suite SQLite file.
+
+
 ## Development Principles
 
 1. **Test-Driven Development**: Write or update tests first. Do not claim completion unless tests run and pass, or explicitly state why they could not be run.

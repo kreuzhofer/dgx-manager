@@ -53,7 +53,7 @@ function ensureRepo(): boolean {
  * Minimal YAML parser for recipe files.
  * Handles flat key: value and simple nested maps used by recipes.
  */
-function parseRecipeYaml(text: string): Record<string, unknown> {
+export function parseRecipeYaml(text: string): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   let currentMap: Record<string, unknown> | null = null;
   let currentMapKey: string | null = null;

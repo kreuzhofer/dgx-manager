@@ -4,6 +4,7 @@ import { prisma } from "../prisma.js";
 import { SHARED_STORAGE } from "../env.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import type { AgentHub } from "../ws/agent-hub.js";
+import { checkVllmVramAdmission, vramShortfallMessage } from "../admission/vram.js";
 
 export const deploymentsRouter = Router();
 
@@ -97,21 +98,13 @@ deploymentsRouter.post("/", async (req, res) => {
 
   let vramEstimate = 0;
 
-  // VRAM-based admission check for solo deployments
+  // Compute VRAM the deployment would request, for the response body and
+  // for the admission check. For Ollama it's based on the model's listed
+  // size; for vLLM (solo or cluster) it's based on gpu_memory_utilization.
   if (!isCluster) {
-    // Get node's latest metrics
     const node = await prisma.node.findUnique({ where: { id: headNodeId } });
-    const latestMetric = await prisma.metricSnapshot.findFirst({
-      where: { nodeId: headNodeId },
-      orderBy: { timestamp: "desc" },
-    });
     const vramTotal = node?.vramTotal || 128000;
-    const vramUsed = latestMetric?.vramUsed || 0;
-    const vramAvailable = vramTotal - vramUsed;
-
-    // Estimate VRAM needed for this deployment
     if (isOllama) {
-      // Parse size from ollama model list (e.g. "20GB" → 20000 MB)
       const agentHub: AgentHub = req.app.get("agentHub");
       const ollamaModel = agentHub.getOllamaModels().find((m) => m.name === modelName);
       if (ollamaModel?.size) {
@@ -119,25 +112,19 @@ deploymentsRouter.post("/", async (req, res) => {
         vramEstimate = sizeMatch ? Math.round(parseFloat(sizeMatch[1]) * 1024 * 1.1) : 0; // +10% overhead
       }
     } else {
-      // vLLM: estimate from gpu_memory_utilization
       const agentHub: AgentHub = req.app.get("agentHub");
       const recipe = agentHub.getRecipes().find((r) => r.file === recipeFile);
       const gpuMemUtil = (config?.gpuMem as number) || (recipe?.defaults?.gpu_memory_utilization as number) || 0.85;
       vramEstimate = Math.round(vramTotal * gpuMemUtil);
     }
 
-    // Check port conflict for vLLM
+    // Auto-bump the port if it's already in use on this node.
     if (!isOllama) {
       const requestedPort = (config?.port as number) || 8000;
       const portConflict = await prisma.deployment.findFirst({
-        where: {
-          nodeId: headNodeId,
-          port: requestedPort,
-          status: { in: activeStatuses },
-        },
+        where: { nodeId: headNodeId, port: requestedPort, status: { in: activeStatuses } },
       });
       if (portConflict) {
-        // Auto-increment port
         const usedPorts = await prisma.deployment.findMany({
           where: { nodeId: headNodeId, status: { in: activeStatuses }, port: { not: null } },
           select: { port: true },
@@ -149,16 +136,23 @@ deploymentsRouter.post("/", async (req, res) => {
         config.port = nextPort;
       }
     }
+  }
 
-    // Check if there's enough VRAM (5% safety margin)
-    const safetyMargin = vramTotal * 0.05;
-    if (vramEstimate > 0 && vramEstimate > vramAvailable - safetyMargin) {
+  // Pre-flight VRAM admission check — for vLLM only, applies to both solo
+  // and cluster deployments. Refuses upfront with a per-node breakdown of
+  // what's holding the memory; the user decides what to stop. We never
+  // auto-evict.
+  if (!isOllama) {
+    const agentHub: AgentHub = req.app.get("agentHub");
+    const recipe = agentHub.getRecipes().find((r) => r.file === recipeFile);
+    const gpuMemUtil = (config?.gpuMem as number) || (recipe?.defaults?.gpu_memory_utilization as number) || 0.85;
+    const checkNodeIds = isCluster ? (nodeIds as string[]) : [headNodeId];
+    const shortfalls = await checkVllmVramAdmission(checkNodeIds, gpuMemUtil);
+    if (shortfalls.length > 0) {
       return res.status(409).json({
-        error: `Not enough VRAM: need ~${Math.round(vramEstimate / 1024)}GB, only ${Math.round(vramAvailable / 1024)}GB available`,
-        vramEstimate,
-        vramAvailable,
-        vramTotal,
-        vramUsed,
+        error: `Not enough VRAM on ${shortfalls.length} of ${checkNodeIds.length} node(s): ${vramShortfallMessage(shortfalls)}`,
+        shortfalls,
+        gpuMemoryUtilization: gpuMemUtil,
       });
     }
   }
@@ -292,13 +286,52 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
   if (!deployment) return res.status(404).json({ error: "Deployment not found" });
 
   const agentHub: AgentHub = req.app.get("agentHub");
-  const config = deployment.config ? JSON.parse(deployment.config) : {};
+  const savedConfig = deployment.config ? JSON.parse(deployment.config) : {};
+
+  // Merge any caller-supplied overrides over the saved config so the restart
+  // path can be used to fix bad settings (e.g. lower max_model_len after an
+  // OOM) without having to delete + re-create the deployment. recipeFile,
+  // runtime, modelName, modelType are intentionally NOT overridable here —
+  // those identify the deployment.
+  const overrides = (req.body && typeof req.body === "object" && req.body.config && typeof req.body.config === "object")
+    ? req.body.config as Record<string, unknown>
+    : {};
+  const RESERVED = new Set(["recipeFile", "runtime", "modelName", "modelType"]);
+  for (const k of Object.keys(overrides)) {
+    if (RESERVED.has(k)) delete overrides[k];
+  }
+  const config = { ...savedConfig, ...overrides };
 
   const clusterNodeIps = deployment.clusterMode
     ? deployment.clusterNodes.map((cn) => cn.node.ipAddress)
     : undefined;
+  const clusterNodeFastIps = deployment.clusterMode
+    ? deployment.clusterNodes.map((cn) => cn.node.fastIpAddress ?? null)
+    : undefined;
 
   const isOllamaRestart = config.runtime === "ollama";
+
+  // Same pre-flight VRAM check as the deploy POST. Excludes the deployment
+  // being restarted from the conflict list (it's about to be relaunched, so
+  // its own VRAM usage shouldn't count against itself).
+  if (!isOllamaRestart) {
+    const agentHub: AgentHub = req.app.get("agentHub");
+    const recipe = config.recipeFile
+      ? agentHub.getRecipes().find((r) => r.file === config.recipeFile)
+      : undefined;
+    const gpuMemUtil = (config.gpuMem as number) || (recipe?.defaults?.gpu_memory_utilization as number) || 0.85;
+    const checkNodeIds = deployment.clusterMode
+      ? deployment.clusterNodes.map((cn) => cn.nodeId)
+      : [deployment.nodeId];
+    const shortfalls = await checkVllmVramAdmission(checkNodeIds, gpuMemUtil, deployment.id);
+    if (shortfalls.length > 0) {
+      return res.status(409).json({
+        error: `Not enough VRAM on ${shortfalls.length} of ${checkNodeIds.length} node(s): ${vramShortfallMessage(shortfalls)}`,
+        shortfalls,
+        gpuMemoryUtilization: gpuMemUtil,
+      });
+    }
+  }
   agentHub.sendToAgent(deployment.nodeId, {
     type: "cmd:deploy",
     payload: {
@@ -309,12 +342,18 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
       recipeFile: isOllamaRestart ? undefined : config.recipeFile,
       config,
       clusterNodes: clusterNodeIps,
+      clusterNodeFastIps,
     },
   });
 
   await prisma.deployment.update({
     where: { id: req.params.id },
-    data: { status: "restarting" },
+    data: {
+      status: "restarting",
+      // Persist the merged config so future restarts (or the agent's own
+      // reconciliation) see the updated overrides.
+      ...(Object.keys(overrides).length > 0 ? { config: JSON.stringify(config) } : {}),
+    },
   });
 
   res.json({ status: "restarting" });

@@ -112,6 +112,18 @@ export default function DeploymentsPage() {
   const [gpuMem, setGpuMem] = useState("");
   const [deploying, setDeploying] = useState(false);
 
+  // Per-deployment edit-before-restart form state. When a deployment ID is
+  // present in editingRestart, the row expands to show editable settings
+  // pre-filled from the deployment's saved config; clicking "Restart with
+  // these settings" posts the overrides to /restart.
+  const [editingRestart, setEditingRestart] = useState<Record<string, {
+    port?: string;
+    maxModelLen?: string;
+    tensorParallel?: string;
+    pipelineParallel?: string;
+    gpuMem?: string;
+  }>>({});
+
   // Log viewer
   const [viewingLogs, setViewingLogs] = useState<string | null>(null);
   const [logs, setLogs] = useState<Record<string, string>>({});
@@ -251,10 +263,16 @@ export default function DeploymentsPage() {
 
   const { connected } = useSSE(handleSSE, loadData);
 
-  // Auto-scroll all visible log viewers
+  // Auto-scroll log viewers ONLY when the user is already pinned to the tail.
+  // If they've scrolled up to read something, leave their position alone.
+  // Threshold is generous (~40 px) so small browser-rounding doesn't push the
+  // user out of "follow tail" mode.
   useEffect(() => {
-    document.querySelectorAll("[data-log-viewer]").forEach((el) => {
-      el.scrollTop = el.scrollHeight;
+    document.querySelectorAll<HTMLElement>("[data-log-viewer]").forEach((el) => {
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (distanceFromBottom <= 40) {
+        el.scrollTop = el.scrollHeight;
+      }
     });
   }, [logs, viewingLogs]);
 
@@ -327,7 +345,7 @@ export default function DeploymentsPage() {
       }
       setIdleNodes((prev) => prev.filter((n) => !usedIds.has(n.id)));
     } catch (err) {
-      alert(String(err));
+      alert(`Deploy failed:\n\n${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setDeploying(false);
     }
@@ -343,14 +361,60 @@ export default function DeploymentsPage() {
     );
   };
 
-  const restartDeployment = async (id: string) => {
+  const restartDeployment = async (id: string, overrides?: Record<string, unknown>) => {
+    try {
+      await apiFetch(`/api/deployments/${id}/restart`, {
+        method: "POST",
+        body: overrides && Object.keys(overrides).length > 0 ? JSON.stringify({ config: overrides }) : undefined,
+      });
+      setDeployments((prev) =>
+        prev.map((d) => (d.id === id ? { ...d, status: "restarting" } : d))
+      );
+      // Collapse the inline editor on success
+      setEditingRestart((prev) => {
+        const { [id]: _, ...rest } = prev;
+        return rest;
+      });
+    } catch (err) {
+      // Surface the error so it's visible on mobile too — apiFetch throws on
+      // non-2xx (e.g. 409 from the VRAM admission check) and without this the
+      // click looks silently broken.
+      alert(`Restart failed:\n\n${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const beginEditRestart = (id: string) => {
     const d = deployments.find((x) => x.id === id);
-    const label = d ? `${d.model?.name || d.modelId} on ${d.node?.name || d.nodeId}` : id.slice(0, 12);
-    if (!confirm(`Restart this deployment?\n\n${label}\n\nInference will be briefly unavailable during the restart.`)) return;
-    await apiFetch(`/api/deployments/${id}/restart`, { method: "POST" });
-    setDeployments((prev) =>
-      prev.map((d) => (d.id === id ? { ...d, status: "restarting" } : d))
-    );
+    let cfg: Record<string, unknown> = {};
+    try { cfg = d?.config ? JSON.parse(d.config) : {}; } catch { /* */ }
+    setEditingRestart((prev) => ({
+      ...prev,
+      [id]: {
+        port: cfg.port != null ? String(cfg.port) : "",
+        maxModelLen: cfg.maxModelLen != null ? String(cfg.maxModelLen) : "",
+        tensorParallel: cfg.tensorParallel != null ? String(cfg.tensorParallel) : "",
+        pipelineParallel: cfg.pipelineParallel != null ? String(cfg.pipelineParallel) : "",
+        gpuMem: cfg.gpuMem != null ? String(cfg.gpuMem) : "",
+      },
+    }));
+  };
+
+  const cancelEditRestart = (id: string) => {
+    setEditingRestart((prev) => {
+      const { [id]: _, ...rest } = prev;
+      return rest;
+    });
+  };
+
+  const submitEditRestart = (id: string) => {
+    const fields = editingRestart[id] || {};
+    const overrides: Record<string, unknown> = {};
+    if (fields.port) overrides.port = parseInt(fields.port);
+    if (fields.maxModelLen) overrides.maxModelLen = parseInt(fields.maxModelLen);
+    if (fields.tensorParallel) overrides.tensorParallel = parseInt(fields.tensorParallel);
+    if (fields.pipelineParallel) overrides.pipelineParallel = parseInt(fields.pipelineParallel);
+    if (fields.gpuMem) overrides.gpuMem = parseFloat(fields.gpuMem);
+    return restartDeployment(id, overrides);
   };
 
   const deleteDeployment = async (id: string) => {
@@ -778,10 +842,10 @@ export default function DeploymentsPage() {
                         {(d.status === "stopped" || d.status === "failed" || d.status === "evicted") && (
                           <>
                             <button
-                              onClick={() => restartDeployment(d.id)}
+                              onClick={() => editingRestart[d.id] ? cancelEditRestart(d.id) : beginEditRestart(d.id)}
                               className="text-xs px-2 py-1 rounded bg-blue-900/50 hover:bg-blue-800 text-blue-300 transition-colors"
                             >
-                              Restart
+                              {editingRestart[d.id] ? "Cancel" : "Restart"}
                             </button>
                             <button
                               onClick={() => deleteDeployment(d.id)}
@@ -795,6 +859,81 @@ export default function DeploymentsPage() {
                     )}
                   </div>
                 </div>
+
+                {/* Edit-and-restart form — appears when "Edit & restart" is clicked
+                    on a stopped/failed/evicted deployment. Pre-filled from the
+                    deployment's saved config; blank fields keep saved values. */}
+                {editingRestart[d.id] && (
+                  <div className="mt-3 p-3 bg-gray-800/50 rounded border border-blue-700/40">
+                    <p className="text-[10px] text-gray-400 mb-2">
+                      Edit settings then restart. Blank fields keep the saved value.
+                    </p>
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                      <div>
+                        <label className="block text-[10px] text-gray-500 mb-0.5">Port</label>
+                        <input
+                          type="number"
+                          value={editingRestart[d.id].port ?? ""}
+                          onChange={(e) => setEditingRestart((p) => ({ ...p, [d.id]: { ...p[d.id], port: e.target.value } }))}
+                          className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-blue-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-gray-500 mb-0.5">Tensor Parallel</label>
+                        <input
+                          type="number"
+                          value={editingRestart[d.id].tensorParallel ?? ""}
+                          onChange={(e) => setEditingRestart((p) => ({ ...p, [d.id]: { ...p[d.id], tensorParallel: e.target.value } }))}
+                          className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-blue-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-gray-500 mb-0.5">Pipeline Parallel</label>
+                        <input
+                          type="number"
+                          value={editingRestart[d.id].pipelineParallel ?? ""}
+                          onChange={(e) => setEditingRestart((p) => ({ ...p, [d.id]: { ...p[d.id], pipelineParallel: e.target.value } }))}
+                          className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-blue-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-gray-500 mb-0.5">Max Model Length</label>
+                        <input
+                          type="number"
+                          value={editingRestart[d.id].maxModelLen ?? ""}
+                          onChange={(e) => setEditingRestart((p) => ({ ...p, [d.id]: { ...p[d.id], maxModelLen: e.target.value } }))}
+                          className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-blue-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-gray-500 mb-0.5">GPU Memory Util</label>
+                        <input
+                          type="number"
+                          step="0.05"
+                          min="0.1"
+                          max="0.99"
+                          value={editingRestart[d.id].gpuMem ?? ""}
+                          onChange={(e) => setEditingRestart((p) => ({ ...p, [d.id]: { ...p[d.id], gpuMem: e.target.value } }))}
+                          className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-blue-500"
+                        />
+                      </div>
+                    </div>
+                    <div className="mt-2 flex justify-end gap-2">
+                      <button
+                        onClick={() => cancelEditRestart(d.id)}
+                        className="text-xs px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={() => submitEditRestart(d.id)}
+                        className="text-xs px-3 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white transition-colors"
+                      >
+                        Restart
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 {/* In-flight phase progress (e.g. HF download) — only on head node */}
                 {!isWorker && progress[d.id] && (

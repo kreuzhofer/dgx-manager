@@ -370,36 +370,53 @@ export function syncContainerImage(
 ): void {
   if (workerIps.length === 0) return;
 
-  let localId: string;
+  // Compare by RootFS layer digests rather than image IDs. `docker save |
+  // docker load` regenerates the manifest config locally on the receiving
+  // side, producing a different IMAGE ID even when the layers are byte-
+  // identical. Layer digests, on the other hand, are content-addressable
+  // sha256s and survive the save/load round-trip — they're the only stable
+  // identity we can compare across nodes without a registry. Without this,
+  // every cluster launch wastes minutes re-syncing the same image.
+  // We also keep the short ID alongside (truncated layer-list hash) just for
+  // a friendlier identifier in log messages.
+  const layerCmd = (image: string) =>
+    `docker image inspect ${image}:latest --format '{{json .RootFS.Layers}}'`;
+  const shortHash = (s: string) => {
+    // Cheap stable short id derived from the layer JSON. Not security-grade —
+    // just human-readable parity for the "they match" / "they differ" log line.
+    let h = 0; for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+    return (h >>> 0).toString(16).padStart(8, "0");
+  };
+
+  let localLayers: string;
   try {
-    localId = execSync(
-      `docker images ${containerName}:latest --format '{{.ID}}'`,
-      { timeout: 5000, encoding: "utf-8" }
-    ).trim();
+    localLayers = execSync(layerCmd(containerName), { timeout: 5000, encoding: "utf-8" }).trim();
   } catch {
     onLog?.(`Image ${containerName} not found locally, --setup will build it\n`);
     return;
   }
 
-  if (!localId) {
+  if (!localLayers || localLayers === "null") {
     onLog?.(`Image ${containerName} not found locally\n`);
     return;
   }
+  const localShort = shortHash(localLayers);
 
   const mismatchedWorkers: string[] = [];
 
   for (const ip of workerIps) {
     try {
-      const remoteId = execSync(
-        `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 ${SSH_USER}@${ip} "docker images ${containerName}:latest --format '{{.ID}}'"`,
+      const remoteLayers = execSync(
+        `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 ${SSH_USER}@${ip} "${layerCmd(containerName)}"`,
         { timeout: 10_000, encoding: "utf-8" }
       ).trim();
 
-      if (!remoteId) {
+      if (!remoteLayers || remoteLayers === "null") {
         onLog?.(`Image missing on ${ip}, will copy\n`);
         mismatchedWorkers.push(ip);
-      } else if (remoteId !== localId) {
-        onLog?.(`Image on ${ip} differs from head (${remoteId} != ${localId}), will copy\n`);
+      } else if (remoteLayers !== localLayers) {
+        const remoteShort = shortHash(remoteLayers);
+        onLog?.(`Image on ${ip} differs from head (layers ${remoteShort} != ${localShort}), will copy\n`);
         mismatchedWorkers.push(ip);
       }
     } catch {
@@ -409,11 +426,11 @@ export function syncContainerImage(
   }
 
   if (mismatchedWorkers.length === 0) {
-    onLog?.(`All workers match head's ${containerName} image (${localId})\n`);
+    onLog?.(`All workers match head's ${containerName} image (layers ${localShort})\n`);
     return;
   }
 
-  onLog?.(`Syncing ${containerName} (${localId}) to ${mismatchedWorkers.length} worker(s)...\n`);
+  onLog?.(`Syncing ${containerName} (layers ${localShort}) to ${mismatchedWorkers.length} worker(s)...\n`);
   try {
     const copyTargets = mismatchedWorkers.join(",");
     // --no-build is critical: without it, build-and-copy.sh REBUILDS the
