@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
 import { useSSE, type SseEvent } from "@/lib/sse";
+import { LogViewer } from "@/components/log-viewer";
 
 interface Recipe {
   file: string;
@@ -262,19 +263,6 @@ export default function DeploymentsPage() {
   }, []);
 
   const { connected } = useSSE(handleSSE, loadData);
-
-  // Auto-scroll log viewers ONLY when the user is already pinned to the tail.
-  // If they've scrolled up to read something, leave their position alone.
-  // Threshold is generous (~40 px) so small browser-rounding doesn't push the
-  // user out of "follow tail" mode.
-  useEffect(() => {
-    document.querySelectorAll<HTMLElement>("[data-log-viewer]").forEach((el) => {
-      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-      if (distanceFromBottom <= 40) {
-        el.scrollTop = el.scrollHeight;
-      }
-    });
-  }, [logs, viewingLogs]);
 
   const deploy = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -642,14 +630,22 @@ export default function DeploymentsPage() {
                   <label className="block text-[10px] text-gray-500 mb-0.5">GPU Memory Util</label>
                   <input
                     type="number"
-                    step="0.05"
-                    min="0.1"
-                    max="0.99"
+                    step="any"
+                    min="0"
                     value={gpuMem}
                     onChange={(e) => setGpuMem(e.target.value)}
                     placeholder={String(selectedRecipeData.defaults.gpu_memory_utilization ?? "")}
                     className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-green-500"
                   />
+                  <p className="text-[10px] text-gray-500 mt-0.5">
+                    {(() => {
+                      const def = selectedRecipeData.defaults.gpu_memory_utilization;
+                      if (typeof def === "number" && def > 1) {
+                        return `GB (recipe default ${def}); leave blank to use the default`;
+                      }
+                      return `fraction 0–1 (recipe default ${def ?? "0.85"}); leave blank to use the default`;
+                    })()}
+                  </p>
                 </div>
               </div>
             </div>
@@ -909,9 +905,8 @@ export default function DeploymentsPage() {
                         <label className="block text-[10px] text-gray-500 mb-0.5">GPU Memory Util</label>
                         <input
                           type="number"
-                          step="0.05"
-                          min="0.1"
-                          max="0.99"
+                          step="any"
+                          min="0"
                           value={editingRestart[d.id].gpuMem ?? ""}
                           onChange={(e) => setEditingRestart((p) => ({ ...p, [d.id]: { ...p[d.id], gpuMem: e.target.value } }))}
                           className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-blue-500"
@@ -992,12 +987,7 @@ export default function DeploymentsPage() {
 
                 {/* Log viewer */}
                 {viewingLogs === d.id && (
-                  <pre
-                    data-log-viewer
-                    className="mt-3 bg-black/50 border border-gray-800 rounded p-3 text-xs text-gray-400 font-mono max-h-64 overflow-y-auto whitespace-pre-wrap"
-                  >
-                    {logs[d.id] || "Waiting for logs..."}
-                  </pre>
+                  <LogViewer content={logs[d.id] || "Waiting for logs..."} />
                 )}
               </div>
             );

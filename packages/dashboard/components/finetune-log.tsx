@@ -1,28 +1,18 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { LogViewer } from "./log-viewer";
 
 interface FinetuneLogProps {
   jobId: string;
   logs: string;
 }
 
-export function FinetuneLog({ jobId, logs }: FinetuneLogProps) {
-  const ref = useRef<HTMLPreElement>(null);
-
-  useEffect(() => {
-    if (ref.current) {
-      ref.current.scrollTop = ref.current.scrollHeight;
-    }
-  }, [logs]);
-
-  return (
-    <pre
-      ref={ref}
-      data-log-viewer
-      className="mt-3 bg-black/50 border border-gray-800 rounded p-3 text-xs text-gray-400 font-mono max-h-64 overflow-y-auto whitespace-pre-wrap"
-    >
-      {logs || "Waiting for logs..."}
-    </pre>
-  );
+/**
+ * Thin shim around the shared LogViewer for backwards compatibility with
+ * existing call sites. Tail-follow + "⬇ Follow" button behavior lives in
+ * LogViewer; this component just preserves the named API and the
+ * "Waiting for logs..." placeholder.
+ */
+export function FinetuneLog({ jobId: _jobId, logs }: FinetuneLogProps) {
+  return <LogViewer content={logs || "Waiting for logs..."} />;
 }

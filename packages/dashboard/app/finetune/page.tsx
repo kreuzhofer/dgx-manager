@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
 import { useSSE, type SseEvent } from "@/lib/sse";
+import { LogViewer } from "@/components/log-viewer";
 
 interface TrainingRecipe {
   file: string;
@@ -260,18 +261,6 @@ export default function FinetunePage() {
   }, []);
 
   const { connected } = useSSE(handleSSE, loadData);
-
-  // Auto-scroll log viewers, but only while the user is pinned to the bottom.
-  // Each viewer tracks its own follow state via data-autoscroll on the element
-  // (toggled by onScroll below). Once the user scrolls up manually, we stop
-  // following; when they scroll back to the bottom, following resumes.
-  useEffect(() => {
-    document.querySelectorAll("[data-log-viewer]").forEach((el) => {
-      if ((el as HTMLElement).dataset.autoscroll !== "false") {
-        el.scrollTop = el.scrollHeight;
-      }
-    });
-  }, [logs, viewingLogs]);
 
   const selectedRecipeData = recipes.find((r) => r.file === selectedRecipe);
 
@@ -1024,18 +1013,7 @@ export default function FinetunePage() {
 
                 {/* Log viewer */}
                 {viewingLogs === job.id && (
-                  <pre
-                    data-log-viewer
-                    data-autoscroll="true"
-                    onScroll={(e) => {
-                      const el = e.currentTarget;
-                      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 20;
-                      el.dataset.autoscroll = atBottom ? "true" : "false";
-                    }}
-                    className="mt-3 bg-black/50 border border-gray-800 rounded p-3 text-xs text-gray-400 font-mono max-h-64 overflow-y-auto whitespace-pre-wrap"
-                  >
-                    {logs[job.id] || job.logs || "Waiting for logs..."}
-                  </pre>
+                  <LogViewer content={logs[job.id] || job.logs || "Waiting for logs..."} />
                 )}
               </div>
             );
