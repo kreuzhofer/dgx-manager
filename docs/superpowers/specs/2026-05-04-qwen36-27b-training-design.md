@@ -55,7 +55,7 @@ recipes/qwen3.6-27b-base-lora/
 | `name` | `Qwen3.6-35B-A3B-Base-LoRA` | `Qwen3.6-27B-Base-LoRA` |
 | `description` | hybrid Mamba+attn MoE, 256 experts | dense, hybrid GatedDeltaNet+Gated-Attention, multimodal |
 | `base_model` | `Qwen/Qwen3.6-35B-A3B` | `Qwen/Qwen3.6-27B` |
-| `scripts.merge` | `scripts/merge_qwen3moe.py` | **removed** (server falls back to generic `scripts/merge.py`) |
+| `scripts.merge` | `scripts/merge_qwen3moe.py` | **kept** — same script. It handles dense 2D LoRA in `compute_delta()` Case 1 (`base_tensor.ndim == 2`); the MoE 3D branch silently doesn't fire for a dense model. The script name is misleading for a dense model — the 27B `recipe.yaml` will include a comment explaining the reuse. We do NOT use the generic `scripts/merge.py` because it relies on PEFT `merge_and_unload()` which strips Qwen 3.6's multimodal wrapper, producing a `model_type=qwen3_5_text` config that vLLM can't load. |
 | `hardware.min_nodes` | `3` | `2` |
 | `hardware.vram_estimate_mb` | `49152` | TBD — set after phase c measures peak rss; provisional `40960` |
 | `defaults.lora_target_modules` | `q_proj,k_proj,v_proj,o_proj` | unchanged |
@@ -126,9 +126,9 @@ This work spans two repos: code lives in `kreuzhofer/dgx-manager-fine-tune-recip
 
 | Risk tier | What gets tested | Where |
 |---|---|---|
-| Low — recipe YAML | Schema validity (parses, required fields present, generic `merge.py` is invoked when `scripts.merge` is absent) | Server-side recipe-loading code paths run on every train start, so phase c exercises them. If a manager-side schema test exists for the absent-merge-script fallback, fine; if not, **don't add one preemptively** — the fallback is one branch of one if-statement and will surface in phase c if broken. |
-| Low — train.py | Smoke: a 1-step run on a single example finishes without import errors. | Phase c IS this test. No automated unit test (the dependencies — DeepSpeed, NCCL, multi-node — make a unit harness impractical). |
-| Medium — generic merge | The generic `scripts/merge.py` produces a vLLM-loadable artifact for a dense 27B. | Phase c covers this end-to-end. If `merge.py` proves broken on 27B specifically, fix it in code with a regression test rather than forking a 27B-specific merge script. |
+| Low — recipe YAML | Schema validity (parses, required fields present, `scripts.merge` resolves) | Server-side recipe-loading runs on every train start; phase c exercises it. |
+| Low — train.py | Smoke: a 5-step run finishes without import errors and saves an adapter. | Phase c IS this test. No automated unit test (the dependencies — DeepSpeed, NCCL, multi-node — make a unit harness impractical). |
+| Medium — `merge_qwen3moe.py` reuse for dense | The script's Case 1 path (`base_tensor.ndim == 2`) handles q/k/v/o LoRA correctly and produces a vLLM-loadable artifact. | Phase c covers this end-to-end. If a dense run surfaces a bug, fix it in code with a regression check rather than forking the script — adding "qwen3 dense" support to the existing script is preferable to a new file. |
 | Low — eval | Existing `scripts/evaluate.py` works against any vLLM endpoint; no recipe-specific test. | Phase a IS this test. |
 
 Per CLAUDE.md principle 1: "every change should leave `npm test` passing." This work is in the recipes repo (Python, not in the manager's vitest suite), but the manager-side `npm test` should still pass since we don't touch manager code.
@@ -137,7 +137,8 @@ Per CLAUDE.md principle 1: "every change should leave `npm test` passing." This 
 
 - Changes to manager (`packages/server`, `packages/agent`, `packages/dashboard`).
 - Changes to `lib/` shared helpers in the recipes repo (the existing `qwen_drop_cols` handling at recipe-level keeps `lib/dataset.py` Gemma-shaped).
-- Changes to `scripts/merge.py` (only fix if phase c surfaces a bug; not preemptively).
+- Changes to `scripts/merge.py` (we don't use it for the 27B; it remains for Gemma recipes).
+- Renaming `scripts/merge_qwen3moe.py` (the name is misleading once it serves a dense recipe, but renaming would force-update the active 35B-A3B recipe — not worth the churn now).
 - Phase-b dataset choice or recipe variant.
 - TP=4 unblocking (separate upstream vLLM issue tracked in `docs/vllm-issue-draft-tp4-hang.md`).
 - FP8 training (we'll evaluate FP8 *inference* of the merged model, but train in bf16).
@@ -146,14 +147,15 @@ Per CLAUDE.md principle 1: "every change should leave `npm test` passing." This 
 
 1. **OOM on 2 nodes.** Mitigation: explicit pause-and-ask before escalating to 3 nodes. Phase c will surface this within minutes of `from_pretrained`.
 2. **GatedDeltaNet uses `q_proj` naming.** Mitigation: phase-c step-1 static check (above) before training starts. If true, add `layers_to_transform`.
-3. **Generic `merge.py` produces a vLLM-incompatible config for 27B.** Risk profile: lower than 35B-A3B (no multimodal-wrapper-strip issue, since the merge issue on 35B-A3B was tied to the `Qwen3_5MoeForConditionalGeneration` outer wrapper specifically). Mitigation: phase c's deploy-and-smoke step catches this; fix is in code, not by forking.
+3. **`merge_qwen3moe.py` Case 1 path is wrong for dense 27B.** The Case 1 branch is the standard 2D LoRA delta computation — well-tested in principle, but never exercised on a real Qwen 3.6 dense base model. Mitigation: phase c's deploy-and-smoke step catches a broken artifact; if needed, fix in `compute_delta()` rather than forking.
 4. **`fix_gemma4_use_cache` doing the wrong thing on Qwen 27B.** Mitigation: read the function before phase c, ensure it's a safe no-op for non-Gemma archs.
 
 ## Artifacts produced by this design
 
 - `recipes/qwen3.6-27b-base-lora/recipe.yaml`
 - `recipes/qwen3.6-27b-base-lora/train.py`
-- `recipes/qwen3.6-27b-base-lora/entrypoint.sh` (likely unchanged copy)
-- `recipes/qwen3.6-27b-base-lora/launch.sh` (likely unchanged copy)
+- `recipes/qwen3.6-27b-base-lora/entrypoint.sh` (unchanged copy)
+- `recipes/qwen3.6-27b-base-lora/launch.sh` (unchanged copy)
 - `recipes/qwen3.6-27b-base-lora/ds_config.json` (unchanged copy)
 - A documented phase-c run + phase-a 50/500-step runs with eval results in `docs/qwen3.6-27b-fine-tuning-on-dgx-spark.md` (parallel to the 35B doc).
+- `scripts/merge_qwen3moe.py` is **reused, not modified** unless phase c surfaces a Case 1 bug.
