@@ -4,25 +4,29 @@
 > cluster (`recipes/qwen3.6-27b-fp8.yaml` at `tensorParallel=2`).
 > Re-run the measurement scripts (see "How to refresh") whenever hardware,
 > driver, vLLM version, or recipe flags change.
+>
+> All € figures shown in dual-currency at **€1 = $1.087** (May 2026 rate
+> used uniformly throughout). Update the rate + re-derive USD if the
+> currency basis changes materially.
 
 ---
 
 ## TL;DR
 
-At **100% utilization** on a 2-node DGX Spark cluster (2 × GB10, 6000 € capex
-total, 3-year depreciation, ~200 W peak combined draw):
+At **100% utilization** on a 2-node DGX Spark cluster (2 × GB10, €6,000 / $6,520
+capex total, 3-year depreciation, ~200 W peak combined draw):
 
-| | Our cluster | Qwen 3.6-27B API list price |
-|---|---:|---:|
-| Per 1M **input** tokens | **0.032 €** | ~0.55 € (17× cheaper) |
-| Per 1M **output** tokens | **0.82 €** | ~3.31 € (4× cheaper) |
-| Output:Input ratio | 25:1 | 6:1 |
+| | Our cluster | Qwen 3.6-27B API list | Cluster vs API |
+|---|---:|---:|---:|
+| Per 1M **input** tokens | **€0.032 / $0.035** | $0.60 (€0.55) | 17× cheaper |
+| Per 1M **output** tokens | **€0.82 / $0.89** | $3.60 (€3.31) | 4× cheaper |
+| Output:Input ratio | 25:1 | 6:1 | |
 
-At a more realistic **30% duty cycle**: **~0.11 €/M input** and **~2.7 €/M
-output** — still cheaper than the API on both.
+At a more realistic **30% duty cycle**: **~€0.11 / $0.12 per 1M input**
+and **~€2.72 / $2.97 per 1M output** — still cheaper than the API on both.
 
-Per-request example (200 input + 800 output): **~0.066 €¢/request** at
-100% util, or about 1,500 requests per €.
+Per-request example (200 input + 800 output): **~€0.072¢ / $0.078¢ per
+request** at 100% util, or about 1,500 requests per € (1,280 per $).
 
 The cluster is cost-competitive with the API even at modest utilization.
 Capex dominates (~80% of total cost), so the strongest lever for further
@@ -35,10 +39,10 @@ reduction is pushing utilization up.
 | | |
 |---|---|
 | Hardware | 2× NVIDIA DGX Spark (GB10, 122 GB unified memory each) |
-| Capex | 3000 € per node = 6000 € total |
+| Capex | €3,000 / $3,260 per node = €6,000 / $6,520 total |
 | Depreciation | 3 years straight-line |
 | Power (peak) | ~100 W per node = 200 W combined |
-| Electricity | 0.30 €/kWh assumed |
+| Electricity | €0.30 / $0.326 per kWh assumed |
 | Network | Per-node fast fabric (100/200 GbE) — included in capex |
 | vLLM | 0.20.1rc1.dev152+gc3ad791e1 (cu132) |
 | Container | `vllm-node` from `eugr/spark-vllm-docker` (kreuzhofer fork), pinned wheel |
@@ -100,12 +104,13 @@ concurrency > 1 will be higher (unmeasured here — see "Refinements").
 
 ## Cost per cluster-second
 
-| Component | €/s | derivation |
-|---|---:|---|
-| Capex amortization | 0.0000634 | 6000 € / (3 × 365 × 24 × 3600 s) |
-| Power | 0.0000167 | 200 W × 0.30 €/kWh / 3600 s/h |
-| **Total** | **0.0000801** | (capex 79%, power 21%) |
+| Component | €/s | $/s | derivation |
+|---|---:|---:|---|
+| Capex amortization | 0.0000634 | 0.0000689 | €6,000 / (3 × 365 × 24 × 3600 s) |
+| Power | 0.0000167 | 0.0000182 | 200 W × €0.30/kWh / 3600 s/h |
+| **Total** | **0.0000801** | **0.0000871** | (capex 79%, power 21%) |
 
+Equivalently: **€0.288 / $0.314 per hour** for the whole 2-node cluster.
 Capex dominates by 4× over power. **The dominant lever to reduce
 cost-per-token is pushing utilization up**, not reducing power draw.
 
@@ -119,37 +124,37 @@ the per-token cost falls out of `cluster_€/s ÷ tokens/s` for each phase.
 ### Output / decode — at decode saturation (98 tok/s)
 
 ```
-0.0000801 €/s / 98 tok/s × 1,000,000 = 0.817 €/M output tokens
+€0.0000801/s / 98 tok/s × 1,000,000 = €0.817 / $0.888 per 1M output tokens
 ```
 
 ### Input / prefill — at single-request prefill (2,500 tok/s)
 
 ```
-0.0000801 €/s / 2,500 tok/s × 1,000,000 = 0.032 €/M input tokens
+€0.0000801/s / 2,500 tok/s × 1,000,000 = €0.032 / $0.035 per 1M input tokens
 ```
 
 ### Comparison to API list price
 
 Source: llm-stats leaderboard, $0.60/M input + $3.60/M output for Qwen 3.6
-27B. Converted at 0.92 €/$.
+27B (in USD natively).
 
-| | Cluster (100% util) | Qwen 27B API | Cluster vs API |
-|---|---:|---:|---:|
-| 1M input tokens | **0.032 €** | 0.55 € | **17× cheaper** |
-| 1M output tokens | **0.82 €** | 3.31 € | **4× cheaper** |
+| | Cluster (100% util) — € | Cluster — $ | Qwen 27B API ($) | Cluster vs API |
+|---|---:|---:|---:|---:|
+| 1M input tokens | **€0.032** | **$0.035** | $0.60 | **17× cheaper** |
+| 1M output tokens | **€0.82** | **$0.89** | $3.60 | **4× cheaper** |
 
 ### At realistic 30% duty cycle
 
 Multiply both by 1/0.30 ≈ 3.33×:
 
-| | 30% duty cycle | API |
-|---|---:|---:|
-| 1M input | **0.11 €** | 0.55 € (5× cheaper) |
-| 1M output | **2.72 €** | 3.31 € (~20% cheaper) |
+| | Cluster — € | Cluster — $ | API ($) | Cluster vs API |
+|---|---:|---:|---:|---:|
+| 1M input | **€0.11** | **$0.12** | $0.60 | 5× cheaper |
+| 1M output | **€2.72** | **$2.97** | $3.60 | ~20% cheaper |
 
-Even at 30% duty cycle the cluster beats API pricing. At 50% duty cycle
-the gap widens substantially (0.064 €/M input, 1.63 €/M output → both 2-3×
-cheaper than API).
+Even at 30% duty cycle the cluster beats API pricing on both dimensions.
+At 50% duty cycle the gap widens substantially (€0.064 / $0.070 per 1M
+input; €1.63 / $1.78 per 1M output → both 2-3× cheaper than API).
 
 ---
 
@@ -159,17 +164,17 @@ Assume 200 input tokens + 800 output tokens per request.
 
 | | Tokens | Cost @ 100% util | Cost @ 30% util |
 |---|---:|---:|---:|
-| Input | 200 | 0.0064 €¢ | 0.021 €¢ |
-| Output | 800 | 0.066 €¢ | 0.218 €¢ |
-| **Total** | 1000 | **0.072 €¢** | **0.239 €¢** |
+| Input | 200 | €0.0064¢ / $0.0070¢ | €0.021¢ / $0.023¢ |
+| Output | 800 | €0.066¢ / $0.071¢ | €0.218¢ / $0.237¢ |
+| **Total** | 1000 | **€0.072¢ / $0.078¢** | **€0.239¢ / $0.260¢** |
 
-At 100% utilization: ~14,000 such requests per €. At 30% duty cycle:
-~4,200 requests per €.
+At 100% utilization: ~14,000 requests per € (~12,800 per $). At 30% duty
+cycle: ~4,200 requests per € (~3,800 per $).
 
 For comparison, the same request hitting the Qwen 27B API list price:
-- Input: 200 × 0.55 €/M = 0.011 €¢
-- Output: 800 × 3.31 €/M = 0.265 €¢
-- **Total: ~0.276 €¢** → ~360 requests per €
+- Input: 200 × $0.60/M = $0.012¢
+- Output: 800 × $3.60/M = $0.288¢
+- **Total: ~$0.300¢** → ~333 requests per $
 
 So at 100% utilization the cluster is **~38× cheaper per request** than
 the API; at 30% duty cycle, **~12× cheaper**.
