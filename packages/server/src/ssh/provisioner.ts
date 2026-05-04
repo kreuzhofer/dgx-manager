@@ -83,6 +83,20 @@ export async function auditNode(host: string, nodeId?: string): Promise<Provisio
       }),
     },
     {
+      // spark-vllm-docker's hf-download.sh hard-requires uvx to fetch
+      // HuggingFace models on first-time deploys. Without it the agent
+      // silently fails on a fresh node ("uvx: command not found") on
+      // the very first model download. Astral's installer drops the
+      // binaries in ~/.local/bin and is idempotent.
+      name: "uv (uvx)",
+      cmd: "test -x \"$HOME/.local/bin/uvx\" && echo installed",
+      eval: (r) => ({
+        name: "uv (uvx)",
+        status: r.stdout.includes("installed") ? "green" : "yellow",
+        detail: r.stdout.includes("installed") ? "Installed" : "Not installed — can auto-install (no sudo needed)",
+      }),
+    },
+    {
       name: "nvidia-container-toolkit",
       cmd: "dpkg -l nvidia-container-toolkit 2>/dev/null | grep -q ^ii && echo installed",
       eval: (r) => ({
@@ -161,6 +175,11 @@ export async function provisionNode(host: string, checks: PrereqCheck[], nodeId?
         break;
       case "Docker group":
         r = await sshExec(host, "sudo usermod -aG docker $USER", { timeout: 30_000 });
+        break;
+      case "uv (uvx)":
+        // Astral's installer; runs as the SSH user (no sudo), drops
+        // binaries in ~/.local/bin. Idempotent on re-run.
+        r = await sshExec(host, "curl -LsSf https://astral.sh/uv/install.sh | sh", { timeout: 60_000 });
         break;
       case "nvidia-container-toolkit":
         r = await sshExec(host, [

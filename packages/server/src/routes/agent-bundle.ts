@@ -162,6 +162,25 @@ else
   log "Added \$AGENT_USER to docker group (will take effect on next login)"
 fi
 
+# Install uv/uvx for the agent user. The spark-vllm-docker recipe runner's
+# hf-download.sh hard-requires uvx to fetch HuggingFace models for first-
+# time deploys; without it the agent silently fails on a fresh node with
+# "uvx: command not found". Astral's installer drops the binaries in
+# \$AGENT_USER/.local/bin and is idempotent.
+AGENT_HOME=\$(getent passwd "\$AGENT_USER" | cut -d: -f6)
+if [ -n "\$AGENT_HOME" ] && [ -x "\$AGENT_HOME/.local/bin/uvx" ]; then
+  log "uvx already installed at \$AGENT_HOME/.local/bin/uvx"
+elif [ -n "\$AGENT_HOME" ]; then
+  log "Installing uv (provides uvx) for \$AGENT_USER..."
+  sudo -u "\$AGENT_USER" -H sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh' >/dev/null 2>&1 || \
+    log "WARNING: uv install failed — first-time HF model downloads will fail until uvx is available"
+  if [ -x "\$AGENT_HOME/.local/bin/uvx" ]; then
+    log "uvx installed at \$AGENT_HOME/.local/bin/uvx"
+  fi
+else
+  log "WARNING: could not resolve home dir for \$AGENT_USER — skipping uvx install"
+fi
+
 # Step 3: Install nvidia-container-toolkit
 if dpkg -l nvidia-container-toolkit 2>/dev/null | grep -q '^ii'; then
   log "nvidia-container-toolkit already installed"
