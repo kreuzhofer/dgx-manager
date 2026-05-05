@@ -544,7 +544,7 @@ curl -s -X POST http://192.168.44.36:4000/api/finetune \
   -d @- <<EOF | tee /tmp/phase-c-job.json | jq
 {
   "nodeIds": ["${NODE3}", "${NODE4}"],
-  "recipeFile": "recipes/qwen3.6-27b-base-lora/recipe.yaml",
+  "recipeFile": "recipes/qwen3.6-27b-base-lora",
   "dataset": "b-mc2/sql-create-context",
   "config": {
     "max_steps": 5,
@@ -832,7 +832,7 @@ curl -s -X POST http://192.168.44.36:4000/api/finetune \
   -d @- <<EOF | tee /tmp/phase-a-50step.json | jq
 {
   "nodeIds": ["${NODE3}", "${NODE4}"],
-  "recipeFile": "recipes/qwen3.6-27b-base-lora/recipe.yaml",
+  "recipeFile": "recipes/qwen3.6-27b-base-lora",
   "dataset": "b-mc2/sql-create-context",
   "config": {
     "max_steps": 50
@@ -976,7 +976,7 @@ curl -s -X POST http://192.168.44.36:4000/api/finetune \
   -d @- <<EOF | tee /tmp/phase-a-500step.json | jq
 {
   "nodeIds": ["${NODE3}", "${NODE4}"],
-  "recipeFile": "recipes/qwen3.6-27b-base-lora/recipe.yaml",
+  "recipeFile": "recipes/qwen3.6-27b-base-lora",
   "dataset": "b-mc2/sql-create-context",
   "config": { "max_steps": 500 }
 }
