@@ -318,9 +318,17 @@ export class AgentHub {
                 temperature: msg.payload.temp ?? null,
               },
             });
+            // Self-heal stale ipAddress: agent:register only fires on WS
+            // connect, so a netplan change that doesn't drop the WS leaves
+            // the DB stale until the agent restarts. Refresh from the WS
+            // source on every metric tick — same pattern as line 110.
+            const remoteIp = (ws as unknown as { _socket?: { remoteAddress?: string } })._socket?.remoteAddress?.replace("::ffff:", "");
             await prisma.node.update({
               where: { id: nodeId },
-              data: { lastSeen: new Date() },
+              data: {
+                lastSeen: new Date(),
+                ...(remoteIp ? { ipAddress: remoteIp } : {}),
+              },
             });
             const now = Date.now();
             metricsBuffer.push(nodeId, {
