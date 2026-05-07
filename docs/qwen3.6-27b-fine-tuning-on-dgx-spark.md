@@ -164,17 +164,34 @@ Mostly explained by: (1) preamble compression matters and our 500-step run reach
 
 ## Operational Findings
 
-### Multi-node SSH from node 3 → node 4 hung the launcher
+### Multi-node failure had two distinct blockers — both fixed
 
-We initially planned phase a on **2 nodes (head=node 3, worker=node 4)**. The training job's agent tries to SSH from the head agent to the worker over port 22 to launch the worker container (`packages/agent/src/runtime/finetune.ts:675`), with a 120s spawnSync timeout. The first SSH (`docker rm -f … ; docker run …`) on the worker hung at the OS level for the full 120s, returning `ETIMEDOUT`. Two retries reproduced.
+We initially planned phase a on **2 nodes (head=node 3, worker=node 4)**. The training job's agent tries to SSH from the head to the worker on port 22 to launch the worker container (`packages/agent/src/runtime/finetune.ts:675`), with a 120s `spawnSync` timeout. The first SSH (`docker rm -f … ; docker run …`) hung for the full 120 s and returned `ETIMEDOUT`. Two retries reproduced. Phase a was course-corrected to **single-node on idle node 4**.
 
-Symptoms ruled out:
-- **Worker reachable.** Ping works, the agent on the worker is online and was reporting `lastSeen` on every poll.
-- **First-connection prompt.** Line 675 has `-o StrictHostKeyChecking=no`, so a missing known-hosts entry shouldn't prompt.
+After phase a we returned to the multi-node investigation and surfaced two independent root causes:
 
-We did **not** diagnose the hang directly — the user's playbook forbids `ssh + docker` shortcuts on shared DGX nodes for production-host inspection ([memory: no direct container ops](../.claude/projects/-home-daniel-src-github-dgx-manager/memory/feedback_no_direct_container_ops.md)). The right next step is to verify SSH key trust (`~/.ssh/known_hosts`, `~/.ssh/authorized_keys`) for the agent user on each node pair, possibly through an explicit "agent connectivity test" API on the manager.
+**Blocker 1 — netplan: fast-NIC port 1 was leasing addresses on the management subnet.**
 
-For phase a we course-corrected to **single-node on the idle node 4**. ZeRO-3 with `--nproc_per_node=1` is a no-op shard-wise, but a 27B + LoRA + bf16 fits on a single GB10 (122 GB unified memory) — peak observed at deployment time was ~100 GB including vLLM KV cache; training peak is lower.
+`/etc/netplan/40-cx7.yaml` only declared the first port pair (`enp1s0f0np0` / `enp1s0f1np1`). The other ConnectX-7 port (`enP2p1s0f0np0`) was unmanaged, so NetworkManager DHCP'd it onto whatever it could reach — pulling **192.168.44.x leases through the fast NIC** on nodes 1, 2, 3. The manager's database had registered nodes 2 and 3 with their fast-NIC IPs (`.105` and `.142`) by accident, and various routing decisions then went over the fast card for management-plane traffic.
+
+The fix mirrors what was already in node 4's netplan — explicit `dhcp4: false, dhcp6: false, link-local: []` for the second port pair. Applied to nodes 1-3 by hand-edit + `netplan apply`. Result: management traffic stays on the slow card (192.168.44.x), fast fabric stays clean (192.168.100.x).
+
+A side bug in the manager: `node.ipAddress` only refreshes on `agent:register` (WS connect), so a netplan change that doesn't drop the WebSocket leaves a stale IP in the DB. Hardened in `packages/server/src/ws/agent-hub.ts` to also refresh on every metric tick (commit `cc9d58e`).
+
+**Blocker 2 — `nvtx.DummyDomain.push_range` arity mismatch with DeepSpeed.**
+
+After fixing the netplan, the worker container started but training crashed seconds later during DeepSpeed ZeRO-3 parameter partitioning:
+
+```
+File "src/nvtx/_lib/lib.pyx", line 165, in nvtx._lib.lib.DummyDomain.push_range
+TypeError: push_range() takes exactly 2 positional arguments (1 given)
+```
+
+DeepSpeed's accelerator calls `nvtx_domain.push_range(message=msg, category=category)`, but `nvtx`'s `DummyDomain.push_range` (the no-op fallback when CUDA NVTX profiling isn't loaded) accepts only a single positional `message`. **Single-rank runs don't trip this** because the partition path is a no-op for 1 rank — the call site is never reached. Multi-rank reproducibly hits it during the first parameter `partition()`.
+
+Fix: monkey-patch `DummyDomain.push_range` (and `pop_range`) to accept and discard `*args, **kwargs`. Added to `lib/patches.py` as `patch_nvtx_dummy_domain()` and called from `apply_all()` (commit `e3574b8` in `kreuzhofer/dgx-manager-fine-tune-recipes`).
+
+**Multi-node verified:** 5-step smoke on nodes 3+4, wall time 6.5 min, step time ~7 s/step (vs ~1.5 s/step single-node — NCCL all-gather overhead, expected). Adapter saved cleanly. The recipe's `min_nodes: 2` setting is now honest.
 
 ### Recipe discovery only happens on agent (re)connect
 
