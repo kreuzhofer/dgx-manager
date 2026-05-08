@@ -203,6 +203,49 @@ Fix: monkey-patch `DummyDomain.push_range` (and `pop_range`) to accept and disca
 
 **Multi-node verified:** 5-step smoke on nodes 3+4, wall time 6.5 min, step time ~7 s/step (vs ~1.5 s/step single-node — NCCL all-gather overhead, expected). Adapter saved cleanly. The recipe's `min_nodes: 2` setting is now honest.
 
+### Multi-node bandwidth ceiling: NIC is on PCIe Gen5 x4
+
+A diagnostic run with `NCCL_DEBUG=INFO` confirmed NCCL is correctly using **RoCE on `rocep1s0f0` over the 200 Gbps fabric**:
+
+```
+NET/IB : Made virtual device [0] name=rocep1s0f0 speed=200000 ndevs=1
+NET/IB : Using [0]rocep1s0f0:1/RoCE [RO]; OOB enp1s0f0np0:192.168.100.12<0>
+Channel 00/0 : 1[0] -> 0[0] [receive] via NET/NCCL RDMA Plugin v10/0
+```
+
+But two layers reported conflicting GDR status:
+
+```
+NET/IB : GPU Direct RDMA (DMABUF) enabled for HCA 0 'rocep1s0f0'
+NET/NCCL RDMA Plugin v10 : GPU Direct RDMA Disabled for HCA 0 'rocep1s0f0'
+NET/0-0 (3/12.0/P2C)
+```
+
+`P2C` = "PCIe to CPU" path — traffic goes GPU → host RAM → NIC. The advertised effective bandwidth is **12 GB/s**, well below the 25 GB/s the 200 Gbps wire could in principle deliver. Why:
+
+1. **`nvidia_peermem` is N/A on Grace-Hopper / GB10.** `modprobe nvidia_peermem` returns `Invalid argument` on all 4 nodes. The peermem path was designed for *discrete* GPUs where GPU memory is on a separate PCIe card; GB10's GPU memory IS host memory (unified, NVLink-C2C). There's no separate pool to peer with.
+
+2. **The NIC is on a PCIe Gen5 x4 attach.**
+
+   ```
+   $ cat /sys/bus/pci/devices/0000:01:00.0/{current_link_speed,current_link_width}
+   32.0 GT/s PCIe   (Gen5)
+   4
+   ```
+
+   PCIe Gen5 × 4 lanes = ~16 GB/s nominal, ~12 GB/s after framing. **That's the hard ceiling.** Saturating 200 Gbps Ethernet would require at minimum PCIe Gen5 x8; the DGX Spark physically gives the NIC x4. The 200 Gbps fabric is over-provisioned relative to the NIC's PCIe attach.
+
+**Math against the observed step time:**
+- ZeRO-3 traffic per step at 27B / 64 layers / grad_accum=4: ~216 GB
+- 216 GB ÷ 12 GB/s = ~18 s pure communication
+- + ~5 s compute = **~23 s/step** ✓ matches the measured 25 s/step
+
+**This is structural, not a configuration bug.** Implications for future runs on DGX Spark:
+
+- For models that fit on a single 122 GB unit, **single-node is strictly faster** — no NCCL config will close the gap.
+- For models that don't fit (40B+ dense), multi-node is mandatory and the PCIe-x4 cost is the price of admission.
+- **Tensor parallelism would be much friendlier on this topology than ZeRO-3.** TP communicates per-layer activations (small) rather than per-layer weights (huge). Worth exploring for any future multi-node training with a base that needs cross-node sharding.
+
 ### Recipe discovery only happens on agent (re)connect
 
 The agent reads its training-recipes directory at WebSocket-handshake time, then sends one `agent:training-recipes` message to the manager. There is no `cmd:rescan-recipes` command. After committing a new recipe to the local recipes repo on shared NFS (visible to all agents), we had to nudge an agent to reconnect — done via `POST /api/nodes/:id/update-agent` on the idle node 4, which re-runs the install and forces a reconnect.
