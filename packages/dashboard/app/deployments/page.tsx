@@ -106,6 +106,13 @@ export default function DeploymentsPage() {
   const [selectedOllamaModel, setSelectedOllamaModel] = useState<string>("");
   const [idleNodes, setIdleNodes] = useState<Node[]>([]);
   const [selectedNode, setSelectedNode] = useState<string>("");
+  // For cluster (TP>1) deploys: explicit per-node selection. Defaults to the
+  // requiredNodes nodes with the most free VRAM (or alphabetical when no
+  // metrics are available); user can override by toggling checkboxes.
+  // Sending the explicit list to the server bypasses the "first N alphabetical"
+  // auto-pick that ignores VRAM availability and forces the user back onto
+  // already-busy nodes.
+  const [selectedClusterNodes, setSelectedClusterNodes] = useState<Set<string>>(new Set());
   const [port, setPort] = useState("8000");
   const [maxModelLen, setMaxModelLen] = useState("");
   const [tensorParallel, setTensorParallel] = useState("");
@@ -308,7 +315,13 @@ export default function DeploymentsPage() {
         if (gpuMem) configOverrides.gpuMem = parseFloat(gpuMem);
 
         body = needsCluster
-          ? { nodeIds: "auto", recipeFile: selectedRecipe, config: configOverrides }
+          ? {
+              // Explicit list lets the user override which N nodes to use
+              // (the dashboard pre-picks by free VRAM; the user can toggle).
+              nodeIds: Array.from(selectedClusterNodes),
+              recipeFile: selectedRecipe,
+              config: configOverrides,
+            }
           : { nodeId: selectedNode || "auto", recipeFile: selectedRecipe, config: configOverrides };
       }
 
@@ -439,7 +452,47 @@ export default function DeploymentsPage() {
   const effectivePP = parseInt(pipelineParallel) || (selectedRecipeData?.defaults?.pipeline_parallel as number) || 1;
   const requiredNodes = effectiveTP * effectivePP;
   const needsCluster = requiredNodes > 1;
-  const canDeploy = needsCluster ? idleNodes.length >= requiredNodes : !!selectedNode || idleNodes.length >= 1;
+
+  // Per-node free VRAM (MB), computed client-side from the latest metrics
+  // we already keep in `nodes`. Used to sort the cluster picker so the
+  // most-free nodes are pre-selected by default.
+  const nodeFreeMB = (n: Node): number => {
+    const total = n.vramTotal ?? 0;
+    const used = n.metrics?.[0]?.vramUsed ?? 0;
+    return Math.max(0, total - used);
+  };
+  // Online nodes available for the cluster picker. Sorted by free VRAM
+  // (most free first) so the default selection picks the nodes least
+  // likely to clash with running deploys.
+  const clusterCandidates = nodes
+    .filter((n) => n.status === "online")
+    .slice()
+    .sort((a, b) => nodeFreeMB(b) - nodeFreeMB(a));
+
+  // Initialize the cluster selection when:
+  //   - the recipe changes (different requiredNodes),
+  //   - tp/pp overrides change requiredNodes,
+  //   - the current selection becomes stale (size mismatch, or includes
+  //     a node that's no longer in the candidate list).
+  // Pre-pick the top requiredNodes by free VRAM. The user can override
+  // by toggling checkboxes.
+  useEffect(() => {
+    if (!needsCluster) {
+      if (selectedClusterNodes.size > 0) setSelectedClusterNodes(new Set());
+      return;
+    }
+    const candidateIds = new Set(clusterCandidates.map((n) => n.id));
+    const currentValid = Array.from(selectedClusterNodes).filter((id) => candidateIds.has(id));
+    if (currentValid.length === requiredNodes) return; // user's selection is fine
+    // Auto-pick top N
+    const next = new Set(clusterCandidates.slice(0, requiredNodes).map((n) => n.id));
+    setSelectedClusterNodes(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [needsCluster, requiredNodes, selectedRecipe, nodes.length]);
+
+  const canDeploy = needsCluster
+    ? selectedClusterNodes.size === requiredNodes
+    : !!selectedNode || idleNodes.length >= 1;
 
   if (loading) return <p className="text-gray-400">Loading...</p>;
 
@@ -539,18 +592,61 @@ export default function DeploymentsPage() {
               {runtimeMode === "ollama" ? "Node" : needsCluster ? `Target Nodes (${requiredNodes} needed)` : "Node"}
             </label>
             {runtimeMode === "vllm" && needsCluster ? (
-              <div className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm">
-                {idleNodes.length < requiredNodes ? (
-                  <span className="text-red-400">
-                    Need {requiredNodes} nodes but only {idleNodes.length} idle
+              <div className="bg-gray-800 border border-gray-700 rounded p-2">
+                {clusterCandidates.length < requiredNodes ? (
+                  <span className="text-red-400 text-sm px-1">
+                    Need {requiredNodes} online nodes; only {clusterCandidates.length} available
                   </span>
                 ) : (
-                  <span className="text-gray-300">
-                    <span className="text-green-400 font-medium">
-                      {idleNodes.slice(0, requiredNodes).map((n) => n.name).join(", ")}
-                    </span>
-                    <span className="text-gray-500 ml-1">({requiredNodes} of {idleNodes.length} idle)</span>
-                  </span>
+                  <>
+                    <p className="text-[10px] text-gray-500 mb-1.5 px-1">
+                      Pick exactly {requiredNodes} (sorted by free VRAM, most free first).
+                      Selected: <span className={selectedClusterNodes.size === requiredNodes ? "text-green-400" : "text-yellow-400"}>{selectedClusterNodes.size}/{requiredNodes}</span>
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1">
+                      {clusterCandidates.map((n) => {
+                        const checked = selectedClusterNodes.has(n.id);
+                        const freeMB = nodeFreeMB(n);
+                        const totalMB = n.vramTotal ?? 0;
+                        const freeGB = (freeMB / 1024).toFixed(0);
+                        const totalGB = (totalMB / 1024).toFixed(0);
+                        const usedPct = totalMB > 0 ? Math.round(((totalMB - freeMB) / totalMB) * 100) : 0;
+                        const atLimit = !checked && selectedClusterNodes.size >= requiredNodes;
+                        return (
+                          <label
+                            key={n.id}
+                            className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer text-xs border transition-colors ${
+                              checked
+                                ? "bg-green-900/30 border-green-700 text-green-100"
+                                : atLimit
+                                ? "bg-gray-900/40 border-gray-800 text-gray-500 cursor-not-allowed"
+                                : "bg-gray-900/40 border-gray-800 hover:border-gray-600 text-gray-300"
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              disabled={atLimit}
+                              onChange={() => {
+                                setSelectedClusterNodes((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(n.id)) next.delete(n.id);
+                                  else if (next.size < requiredNodes) next.add(n.id);
+                                  return next;
+                                });
+                              }}
+                              className="accent-green-500"
+                            />
+                            <span className="font-medium">{n.name}</span>
+                            <span className="text-gray-500 ml-auto tabular-nums">
+                              {freeGB}/{totalGB} GB free
+                              {usedPct > 0 && <span className="text-yellow-500 ml-1">({usedPct}% used)</span>}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </>
                 )}
               </div>
             ) : (
