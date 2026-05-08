@@ -101,17 +101,19 @@ Output config preserves `architectures=["Qwen3_5ForConditionalGeneration"]` and 
 
 ## Results
 
-### Full matrix — single-node vs multi-node
+### Full matrix — single-node vs multi-node, single-rail vs dual-rail
 
-After fixing the netplan + nvtx blockers (see Operational Findings), we re-ran 50/500 steps on 2-node multi-rank for an apples-to-apples comparison with the original single-node phase a.
+After fixing the netplan + nvtx blockers (see Operational Findings), we re-ran 50/500 steps on 2-node multi-rank for apples-to-apples comparison with the original single-node phase a. After identifying the dual-MAC architecture of DGX Spark's QSFP ports, we re-ran 50/500 steps a third time with both 100G MACs configured — recovering ~40% of step-time overhead.
 
 | Run | Topology | Eff. batch | Train wall | Final eval loss | @512 | @2048 |
 |---|---|---:|---:|---:|---:|---:|
 | Base Qwen 3.6-27B | — | — | — | — | _≈39%_¹ | **39%** |
 | LoRA 50-step | single-node (1 rank) | 4 | ~6 min | 1.11 | 21% | — |
-| LoRA 50-step | **multi-node (2 ranks)** | 8 | ~21 min | 1.09 | **25%** | — |
+| LoRA 50-step | multi-node (2 ranks, single-rail) | 8 | ~21 min | 1.09 | 25% | — |
+| LoRA 50-step | **multi-node (2 ranks, dual-rail)** | 8 | **~13 min** | 1.09 | 20% | — |
 | LoRA 500-step | single-node (1 rank) | 4 | ~58 min | 0.81 | 71% | 73% |
-| LoRA 500-step | **multi-node (2 ranks)** | 8 | ~3:55 hr | 0.79 | **74%** | **76%** |
+| LoRA 500-step | multi-node (2 ranks, single-rail) | 8 | ~3:55 hr | 0.79 | **74%** | **76%** |
+| LoRA 500-step | **multi-node (2 ranks, dual-rail)** | 8 | **~2:35 hr** | 0.79 | 72% | **76%** |
 
 ¹ Base @ 512 not run — base output averages 164 chars and never opens a `<think>` block, so accuracy is budget-independent past ~200 tokens; base @ 512 ≈ base @ 2048.
 
@@ -203,48 +205,73 @@ Fix: monkey-patch `DummyDomain.push_range` (and `pop_range`) to accept and disca
 
 **Multi-node verified:** 5-step smoke on nodes 3+4, wall time 6.5 min, step time ~7 s/step (vs ~1.5 s/step single-node — NCCL all-gather overhead, expected). Adapter saved cleanly. The recipe's `min_nodes: 2` setting is now honest.
 
-### Multi-node bandwidth ceiling: NIC is on PCIe Gen5 x4
+### Multi-node bandwidth: dual-rail NCCL recovers ~40% of step time
 
-A diagnostic run with `NCCL_DEBUG=INFO` confirmed NCCL is correctly using **RoCE on `rocep1s0f0` over the 200 Gbps fabric**:
+**Initial diagnostic (single-rail) showed ~12 GB/s effective**, NCCL using only `rocep1s0f0`:
+
+```
+NET/IB : Using [0]rocep1s0f0:1/RoCE [RO]
+NET/0-0 (3/12.0/P2C)
+NET/NCCL RDMA Plugin v10 : GPU Direct RDMA Disabled for HCA 0 'rocep1s0f0'
+```
+
+That looked like a hardware ceiling at first — the NIC's PCIe attach is **Gen5 x4** (~16 GB/s nominal). But per [NVIDIA's official DGX Spark networking architecture](https://www.servethehome.com/the-nvidia-gb10-connectx-7-200gbe-networking-is-really-different/), each 200 GbE QSFP port is intentionally implemented as **TWO 100G MACs on separate PCIe Gen5 x4 lanes** (PCI domains 0000 and 0002). To hit 200 Gbps you must use both MACs as parallel rails. Our setup was using only one.
+
+**Architecture sanity-check on DGX Spark:**
+
+```
+$ cat /sys/class/net/{enp1s0f0np0,enP2p1s0f0np0}/carrier
+1
+1                    # both MACs of QSFP port 0 have carrier
+$ cat /sys/class/net/enp1s0f1np1/carrier
+0                    # MAC of QSFP port 1, no cable on our cluster
+
+$ cat /sys/bus/pci/devices/0000:01:00.0/{current_link_speed,current_link_width}
+32.0 GT/s PCIe       (Gen5)
+4                    # x4 per MAC, by design
+```
+
+The 4 logical interfaces map to 2 physical QSFP ports × 2 MACs each:
+
+| Interface | HCA | PCI domain | Physical port |
+|---|---|---|---|
+| `enp1s0f0np0` | `rocep1s0f0` | 0000 | QSFP 0, MAC #1 |
+| `enP2p1s0f0np0` | `roceP2p1s0f0` | 0002 | QSFP 0, MAC #2 |
+| `enp1s0f1np1` | `rocep1s0f1` | 0000 | QSFP 1, MAC #1 (no cable) |
+| `enP2p1s0f1np1` | `roceP2p1s0f1` | 0002 | QSFP 1, MAC #2 (no cable) |
+
+**The fix:**
+
+1. Assign fast-fabric IPs to BOTH MACs of the cabled port. We picked `192.168.100.10..13/24` on `enp1s0f0np0` (existing) and `192.168.100.30..33/24` on `enP2p1s0f0np0` (new). Same `/24` subnet — RoCE traffic flows through the HCA, not the IP routing table, so subnet sharing is fine.
+2. MTU 9000 on both interfaces (jumbo confirmed end-to-end with `ping -M do -s 8972`).
+3. Drop the agent's hardcoded `NCCL_IB_HCA=rocep1s0f0` — instead `unset NCCL_IB_HCA` in `launch.sh` so NCCL auto-discovers all RoCE HCAs from `/dev/infiniband`. Per the [official multi-Spark playbook](https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/multi-sparks-through-switch), no `NCCL_IB_HCA` is prescribed; auto-discovery is the recommended setup.
+
+After the fix, NCCL builds 16 channels alternating across both rails:
 
 ```
 NET/IB : Made virtual device [0] name=rocep1s0f0 speed=200000 ndevs=1
-NET/IB : Using [0]rocep1s0f0:1/RoCE [RO]; OOB enp1s0f0np0:192.168.100.12<0>
-Channel 00/0 : 1[0] -> 0[0] [receive] via NET/NCCL RDMA Plugin v10/0
+NET/IB : Made virtual device [1] name=roceP2p1s0f0 speed=200000 ndevs=1
+NET/IB : Using [0]rocep1s0f0:1/RoCE [1]roceP2p1s0f0:1/RoCE
+Channel 00/0 ... via Plugin v10/0
+Channel 01/0 ... via Plugin v10/1
+Channel 02/0 ... via Plugin v10/0
+Channel 03/0 ... via Plugin v10/1
+...
 ```
 
-But two layers reported conflicting GDR status:
+**5-step smoke at grad_accum=1, bs=1:**
 
-```
-NET/IB : GPU Direct RDMA (DMABUF) enabled for HCA 0 'rocep1s0f0'
-NET/NCCL RDMA Plugin v10 : GPU Direct RDMA Disabled for HCA 0 'rocep1s0f0'
-NET/0-0 (3/12.0/P2C)
-```
+| | Single-rail | Dual-rail | Δ |
+|---|---:|---:|---:|
+| Step 1 (cold) | ~12 s | 7.85 s | -35% |
+| Step 5 (warm) | ~7 s | **4.26 s** | **-39%** |
 
-`P2C` = "PCIe to CPU" path — traffic goes GPU → host RAM → NIC. The advertised effective bandwidth is **12 GB/s**, well below the 25 GB/s the 200 Gbps wire could in principle deliver. Why:
+Extrapolating to phase-a defaults (grad_accum=4, bs=1): **~15 s/step instead of 25 s/step → 500-step run drops from ~3:55 hr to an estimated ~2 hr.**
 
-1. **`nvidia_peermem` is N/A on Grace-Hopper / GB10.** `modprobe nvidia_peermem` returns `Invalid argument` on all 4 nodes. The peermem path was designed for *discrete* GPUs where GPU memory is on a separate PCIe card; GB10's GPU memory IS host memory (unified, NVLink-C2C). There's no separate pool to peer with.
-
-2. **The NIC is on a PCIe Gen5 x4 attach.**
-
-   ```
-   $ cat /sys/bus/pci/devices/0000:01:00.0/{current_link_speed,current_link_width}
-   32.0 GT/s PCIe   (Gen5)
-   4
-   ```
-
-   PCIe Gen5 × 4 lanes = ~16 GB/s nominal, ~12 GB/s after framing. **That's the hard ceiling.** Saturating 200 Gbps Ethernet would require at minimum PCIe Gen5 x8; the DGX Spark physically gives the NIC x4. The 200 Gbps fabric is over-provisioned relative to the NIC's PCIe attach.
-
-**Math against the observed step time:**
-- ZeRO-3 traffic per step at 27B / 64 layers / grad_accum=4: ~216 GB
-- 216 GB ÷ 12 GB/s = ~18 s pure communication
-- + ~5 s compute = **~23 s/step** ✓ matches the measured 25 s/step
-
-**This is structural, not a configuration bug.** Implications for future runs on DGX Spark:
-
-- For models that fit on a single 122 GB unit, **single-node is strictly faster** — no NCCL config will close the gap.
-- For models that don't fit (40B+ dense), multi-node is mandatory and the PCIe-x4 cost is the price of admission.
-- **Tensor parallelism would be much friendlier on this topology than ZeRO-3.** TP communicates per-layer activations (small) rather than per-layer weights (huge). Worth exploring for any future multi-node training with a base that needs cross-node sharding.
+**Still on the table — not yet applied:**
+- **GDR via DMABUF.** GDR is still reported "Disabled" at the NCCL plugin level (`peermem` is N/A on Grace-Hopper because GPU and host memory are unified). Building NCCL 2.28.9+ from source with `sm_121` (Blackwell) support per the [official playbook](https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/nccl) may pick up DMABUF GDR and recover more of the gap.
+- **Firmware update.** Forum thread [DGX Spark ↔ EdgeXpert NCCL only ~17 GB/s](https://forums.developer.nvidia.com/t/dgx-spark-edgexpert-nccl-only-17-gb-s-over-200gbe/366055) closed via `sudo fwupdmgr update` on LVFS-testing channel, taking some configurations from ~17 GB/s to ~23 GB/s. We haven't run the firmware bump yet.
+- **Tensor parallelism instead of ZeRO-3** for any future multi-node training with a base too large to fit on one node. TP sends per-layer activations (small) instead of weights (huge). Far friendlier than ZeRO-3 on this hardware.
 
 ### Recipe discovery only happens on agent (re)connect
 
