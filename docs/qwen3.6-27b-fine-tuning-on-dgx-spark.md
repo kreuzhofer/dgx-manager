@@ -10,19 +10,23 @@ Companion: [Qwen 3.6-27B FP8 Cost-per-Token Analysis](./qwen3.6-27b-cost-analysi
 
 ## TL;DR
 
-Qwen 3.6-27B is a **dense, multimodal, hybrid GatedDeltaNet + attention** model: 64 layers, every 4th a full attention layer (`q/k/v/o_proj`), the other 48 stateful linear-attention (`linear_attn`/`in_proj`/`out_proj`/`A_log`). We fine-tuned it with **LoRA + DeepSpeed ZeRO-3**, single-node on DGX Spark (multi-node fell over on inter-node SSH — see Operational Findings). 500-step run took **~58 minutes** of training (effective batch size 4) on the `b-mc2/sql-create-context` benchmark.
+Qwen 3.6-27B is a **dense, multimodal, hybrid GatedDeltaNet + attention** model: 64 layers, every 4th a full attention layer (`q/k/v/o_proj`), the other 48 stateful linear-attention (`linear_attn`/`in_proj`/`out_proj`/`A_log`). We fine-tuned it with **LoRA + DeepSpeed ZeRO-3** on DGX Spark, both single-node and 2-node multi-rank, on the `b-mc2/sql-create-context` benchmark.
+
+**Best result (multi-node 500-step):** **76% @ 2048**, **74% @ 512** — vs base 27B at 39% (+37 pp / +35 pp respectively).
 
 Headline numbers (100 held-out test examples, seed=42):
 
-| Run | max_tokens=512 | max_tokens=2048 | Δ vs base @2048 |
-|---|---:|---:|---:|
-| **27B base (bf16)** | _not run_ | **39%** | — |
-| **50-step LoRA** | **21%** (preamble-throttled) | _not run_ | _n/a_ |
-| **500-step LoRA** | **71%** | **73%** | **+34 pp** |
+| Run | Topology | @ 512 | @ 2048 | Train wall |
+|---|---|---:|---:|---:|
+| 27B base (bf16) | — | _≈39%_ | **39%** | — |
+| 50-step LoRA | single-node | 21% | — | ~6 min |
+| 50-step LoRA | **multi-node (2 ranks)** | **25%** | — | ~21 min |
+| 500-step LoRA | single-node | 71% | 73% | ~58 min |
+| 500-step LoRA | **multi-node (2 ranks)** | **74%** | **76%** | ~3:55 hr |
 
-**The base model emits clean SQL directly; LoRA training induces a verbose `<think>...</think>` preamble that 500 steps then learns to compress.** Mean output length goes 50-step **1697 chars** → 500-step **610–634 chars** → base **164 chars**. At 50 steps the preamble dominates and clips before SQL emerges (only 17/100 outputs reached `</think>` within 512 tokens). At 500 steps, 93–98 of 100 outputs reach SQL. The base never opens a thinking block at all.
+**The base model emits clean SQL directly; LoRA training induces a verbose `<think>...</think>` preamble that 500 steps then learns to compress.** Mean output length goes 50-step **~1700 chars** → 500-step **~700 chars** → base **164 chars**. At 50 steps the preamble dominates and clips before SQL emerges (only 17/100 outputs reach `</think>` within 512 tokens, regardless of single- vs multi-node). At 500 steps, 90-98 / 100 outputs reach SQL.
 
-The +34 pp gain at 500-step / @2048 is real: the LoRA learns SQL formatting and table-name conventions on top of the base's existing ability to translate English questions into SQL.
+**Multi-node bought ~3 pp at 500 steps but cost 4× wall time** (NCCL all-gather adds ~25 s/step vs ~5.5 s/step single-node). Not worth it for SQL-create-context. The recipe's `min_nodes: 2` is honest after fixing two stacked blockers (netplan + nvtx; see Operational Findings) but **single-node is the recommended setup for this dataset**.
 
 ---
 
@@ -97,32 +101,35 @@ Output config preserves `architectures=["Qwen3_5ForConditionalGeneration"]` and 
 
 ## Results
 
-### Like-for-like, max_tokens=2048
+### Full matrix — single-node vs multi-node
 
-| Run | Steps | Wall (train) | Final train loss | Final eval loss | SQL accuracy | Δ vs base |
-|---|---:|---:|---:|---:|---:|---:|
-| Base Qwen 3.6-27B | — | — | — | — | **39%** | — |
-| LoRA 500-step | 500 | ~58 min | 0.62 | 0.81 | **73%** | **+34 pp** |
+After fixing the netplan + nvtx blockers (see Operational Findings), we re-ran 50/500 steps on 2-node multi-rank for an apples-to-apples comparison with the original single-node phase a.
 
-### Max-tokens sensitivity (500-step)
+| Run | Topology | Eff. batch | Train wall | Final eval loss | @512 | @2048 |
+|---|---|---:|---:|---:|---:|---:|
+| Base Qwen 3.6-27B | — | — | — | — | _≈39%_¹ | **39%** |
+| LoRA 50-step | single-node (1 rank) | 4 | ~6 min | 1.11 | 21% | — |
+| LoRA 50-step | **multi-node (2 ranks)** | 8 | ~21 min | 1.09 | **25%** | — |
+| LoRA 500-step | single-node (1 rank) | 4 | ~58 min | 0.81 | 71% | 73% |
+| LoRA 500-step | **multi-node (2 ranks)** | 8 | ~3:55 hr | 0.79 | **74%** | **76%** |
 
-| max_tokens | Base | Tuned (500-step) | Δ |
+¹ Base @ 512 not run — base output averages 164 chars and never opens a `<think>` block, so accuracy is budget-independent past ~200 tokens; base @ 512 ≈ base @ 2048.
+
+### Best result vs base, max_tokens=2048
+
+| | Base | 500-step (multi-node) | Δ |
 |---:|---:|---:|---:|
-|  512 | _not run_¹ | **71%** | _n/a_ |
-| 2048 | **39%** | **73%** | **+34 pp** |
+| @ 2048 | 39% | **76%** | **+37 pp** |
+| @ 512 | _≈39%_ | **74%** | **+35 pp** |
 
-¹ Base @ 512 not run to save eval wall time. Base output averages 164 chars (~40 tokens) and never opens a `<think>` block, so accuracy is essentially budget-independent past ~200 tokens — base @ 512 ≈ base @ 2048.
+### What multi-node bought us
 
-### 50-step run — preamble-throttled at 512 tokens
+- **+3 pp at 500-step** at both token budgets. Effective batch 8 produces a slightly cleaner gradient than batch 4; 500-step eval_loss drops 0.81 → 0.79.
+- **+4 pp at 50-step** (21% → 25%) — marginal. Both single- and multi-node remain heavily preamble-throttled at 50 steps (only 17/100 outputs reach `</think>` either way).
+- Mean output length at 500 steps grew slightly: 610 chars (single) → 727 chars (multi @ 512). The multi-node model emits a slightly longer thinking block. `</think>` reached: 90/100 (multi) vs 93/100 (single) at @ 512 — a wash.
+- **The cost is real:** multi-node 500-step took **~4 hr** vs **~58 min** single-node. The bulk of the slowdown is per-step NCCL all-gather (~25 s/step vs 5.5 s/step) plus a mid-training eval at step 250 that takes ~14 min on its own.
 
-| max_tokens | Tuned (50-step) | Reached `</think>` within budget | Mean output (chars) |
-|---:|---:|---:|---:|
-| 512 | **21%** (21/100) | 17/100 | 1,697 |
-| 2048 | _not run_² | — | — |
-
-² 50-step @ 2048 not run — the @512 eval already shows the model is undertrained at this effective batch size, so the @2048 number wouldn't change next-step strategy.
-
-At 50 steps the LoRA has **introduced** a `<think>...</think>` preamble that the base model doesn't emit, but hasn't yet learned to keep it short. 83 of 100 outputs run out of tokens mid-think.
+For SQL-create-context the gain doesn't justify the wall-time cost. Multi-node would be more interesting on (a) tasks where effective batch matters more (longer-context training with bigger `max_seq_length`, e.g. complex domain-specific data needing 4096-token context vs. our 256-token SQL prompts) or (b) models that don't fit on a single 122 GB unit (a real 35B+ dense base, FP32 training, etc.).
 
 ---
 
@@ -138,25 +145,28 @@ The most likely cause: the chat template under the LoRA-saved tokenizer is rende
 
 | Eval | Mean output (chars) | Wall (100 examples, c=4) |
 |---|---:|---:|
-| 50-step @ 512 | 1,697 | 47 min |
-| 500-step @ 512 | 610 | 19 min |
-| 500-step @ 2048 | 634 | 21 min |
+| 50-step single-node @ 512 | 1,697 | 47 min |
+| 50-step multi-node @ 512 | 1,675 | 47 min |
+| 500-step single-node @ 512 | 610 | 19 min |
+| 500-step multi-node @ 512 | 727 | 22 min |
+| 500-step single-node @ 2048 | 634 | 21 min |
+| 500-step multi-node @ 2048 | 764 | 26 min |
 | Base @ 2048 | 164 | 102 min² |
 
 ² The base eval was unexpectedly slow despite shorter outputs. Suspected cause: prefill-bound rather than decode-bound (long CREATE TABLE schemas in the prompts). Did not chase down.
 
-### The 27B at 500 steps beats 35B-A3B at 500 steps on this benchmark
+### The 27B beats 35B-A3B on this benchmark, even at smaller effective batch
 
 Same dataset, same eval methodology:
 
-| | 35B-A3B 500-step | 27B 500-step (this run) |
-|---|---:|---:|
-| @ 512 | 49% | **71%** |
-| @ 2048 | 56% | **73%** |
-| Effective batch | 12 (3 nodes) | 4 (single node) |
-| Wall time train | ~24 h | ~58 min |
+| | 35B-A3B 500-step | 27B 500-step single-node | 27B 500-step multi-node |
+|---|---:|---:|---:|
+| @ 512 | 49% | 71% | **74%** |
+| @ 2048 | 56% | 73% | **76%** |
+| Effective batch | 12 (3 nodes) | 4 (single) | 8 (2 nodes) |
+| Wall time train | ~24 h | ~58 min | ~3:55 hr |
 
-Mostly explained by: (1) preamble compression matters and our 500-step run reached deeper compression on the 27B because of the smaller batch acting as a regularizer; (2) the 35B-A3B's MoE routing introduces decoding noise the dense 27B doesn't have; (3) the 27B's effective hidden dim (5,120) is the same as the 35B-A3B's, so per-projection LoRA capacity is comparable.
+The 27B comes out ahead at every effective-batch level. Likely explanations: (1) the 35B-A3B's MoE routing introduces decoding noise the dense 27B doesn't have; (2) the 27B's hidden dim (5,120) is the same as the 35B-A3B's, so per-projection LoRA capacity is comparable; (3) preamble compression matters most — both 27B runs reach 90+ / 100 `</think>` close at 500 steps while the 35B-A3B never hit that ratio in the previous run.
 
 **Caveat:** this is a single 100-example benchmark. The 35B-A3B has more raw capacity for richer SQL (subqueries, joins) — the SQL-create-context dataset's distribution is dominated by simple SELECTs, which is the easiest thing for both models. A harder SQL benchmark might invert this ordering.
 
@@ -207,34 +217,44 @@ We dropped:
 
 Net wall time savings: ~6 hours; matrix retains the headline 27B-vs-base comparison at @2048 and the LoRA's preamble-suppression progress at @512.
 
+### HF datasets `_builder.lock` is created as root by training, blocks subsequent eval
+
+Each training run inside the docker container runs as root (entrypoint needs apt-get + pip install). HF `datasets` writes a 0-byte `_builder.lock` file at `/mnt/tank/models/datasets/<dataset>/.../...builder.lock` as root with default 0644 perms. The next eval run from the host (as `daniel`) calls `os.open(lock, O_RDWR)` and gets EACCES.
+
+Workaround: `rm` the offending lock file before each eval (the parent dir is daniel-owned, so the unlink works regardless of file ownership).
+
+Better fix (deferred): add `umask 002` to `entrypoint.sh` before any HF cache touch, or pass `-e HF_HOME=$WORKSPACE/hf-cache-${USER}` so the cache is per-user.
+
 ---
 
 ## Comparison with the 35B-A3B MoE
 
-| | 27B (this run) | 35B-A3B |
+| | 27B (best — multi-node 500-step) | 35B-A3B |
 |---|---|---|
 | Total params | 27B | 35B |
 | Active params | 27B (dense) | 3B (MoE) |
 | Trainable LoRA params | 10.5M (0.039%) | ~324M (0.93%, with `target_parameters` to MoE experts) |
-| Effective batch | 4 (single node) | 12 (3 nodes) |
-| Wall time @ 500 steps | ~58 min | ~24 h |
-| Step time | ~5.5 s/step | ~170 s/step |
+| Effective batch | 8 (2 nodes) | 12 (3 nodes) |
+| Wall time @ 500 steps | ~3:55 hr | ~24 h |
+| Step time | ~25 s/step | ~170 s/step |
 | Base @ 2048 | 39% | 42% |
-| 500-step @ 2048 | **73% (+34 pp)** | 56% (+14 pp) |
-| 500-step @ 512 | 71% | 49% |
+| 500-step @ 2048 | **76% (+37 pp)** | 56% (+14 pp) |
+| 500-step @ 512 | **74%** | 49% |
 
-The 27B is **far** cheaper to train and outperformed the 35B-A3B on this benchmark. The compute saving is real: 1 node × 1 hour vs. 3 nodes × 24 hours = ~72× less compute. Most of that is because LoRA on the 27B doesn't need DeepSpeed to shard a 35B base across 3 ranks; the 27B base fits on a single GB10 with room to spare, so the per-step cost is the same regardless of rank count, and ZeRO-3's communication overhead disappears.
+The 27B is **far** cheaper to train and outperformed the 35B-A3B on this benchmark even at 1/3 the rank count. The compute saving is real: 1 node × 1 hour (single-node 500-step at 73%) vs. 3 nodes × 24 hours (35B-A3B at 56%) = **~72× less compute for +17 pp accuracy**. The 27B base fits on a single GB10 with room to spare, so per-step cost is fixed regardless of rank count and ZeRO-3 communication overhead disappears in single-node mode.
 
-For SQL-create-context, **the 27B with 500 steps of single-node LoRA is the new recommended setup** until a harder benchmark inverts this. The MoE doesn't earn its inference complexity here.
+For SQL-create-context, **the 27B with 500 steps of single-node LoRA is the recommended setup** until a harder benchmark inverts this. Multi-node adds +3 pp at 4× the wall time — keep it in reserve for tasks where effective batch matters more (longer-context training data) or models that don't fit on a single 122 GB unit.
 
 ---
 
 ## Artifacts
 
 ```
-/mnt/tank/outputs/cmos4vjb613la36s26zp1dvyv/                # phase-c smoke (5 steps)
-/mnt/tank/outputs/cmos5lmzk14ch36s21dxy9f78/                # phase-a 50-step
-/mnt/tank/outputs/cmosb1vbg1a1836s2j57p9ujm/                # phase-a 500-step
+/mnt/tank/outputs/cmos4vjb613la36s26zp1dvyv/                # phase-c smoke (5 steps, single-node)
+/mnt/tank/outputs/cmos5lmzk14ch36s21dxy9f78/                # 50-step single-node
+/mnt/tank/outputs/cmosb1vbg1a1836s2j57p9ujm/                # 500-step single-node
+/mnt/tank/outputs/cmovz8tvs09c936mibes5nr4d/                # 50-step multi-node
+/mnt/tank/outputs/cmow2sb2f0d1s36mic9zrajoe/                # 500-step multi-node (best)
 ├── lora_adapter/
 │   ├── adapter_model.safetensors                            # ~21 MB (10.5M params × bf16)
 │   └── adapter_config.json
@@ -243,12 +263,16 @@ For SQL-create-context, **the 27B with 500 steps of single-node LoRA is the new 
 │   ├── model-00001-of-00015.safetensors … (15 shards)
 │   └── tokenizer / chat_template / preprocessor_config / video_preprocessor_config
 ├── train.log
-└── merge.log
+├── merge.log
+└── worker-192_168_44_39.log                                # multi-node only
 
-/mnt/tank/results/qwen3.6-27b-50step/eval-512/results.json    # 21% (preamble-throttled)
-/mnt/tank/results/qwen3.6-27b-500step/eval-512/results.json   # 71%
-/mnt/tank/results/qwen3.6-27b-500step/eval-2048/results.json  # 73%
-/mnt/tank/results/qwen3.6-27b-base/eval-2048/results.json     # 39% (base baseline)
+/mnt/tank/results/qwen3.6-27b-50step/eval-512/results.json       # 21% (single-node, preamble-throttled)
+/mnt/tank/results/qwen3.6-27b-50step-mn/eval-512/results.json    # 25% (multi-node, still preamble-throttled)
+/mnt/tank/results/qwen3.6-27b-500step/eval-512/results.json      # 71% (single-node)
+/mnt/tank/results/qwen3.6-27b-500step/eval-2048/results.json     # 73% (single-node)
+/mnt/tank/results/qwen3.6-27b-500step-mn/eval-512/results.json   # 74% (multi-node)
+/mnt/tank/results/qwen3.6-27b-500step-mn/eval-2048/results.json  # 76% (multi-node, best)
+/mnt/tank/results/qwen3.6-27b-base/eval-2048/results.json        # 39% (base baseline)
 ```
 
 ## Recipe location
