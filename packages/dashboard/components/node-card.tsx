@@ -16,6 +16,20 @@ interface DiskDeviceSample {
   writeBytesPerSec: number;
 }
 
+interface MemorySample {
+  memTotalMb: number;
+  memAvailableMb: number;
+  memCachedMb: number;
+  swapTotalMb: number;
+  swapUsedMb: number;
+}
+
+interface PressureSample {
+  memorySomeAvg10: number | null;
+  ioSomeAvg10: number | null;
+  cpuSomeAvg10: number | null;
+}
+
 interface MetricSample {
   timestamp: number;
   gpuUtil: number;
@@ -26,6 +40,8 @@ interface MetricSample {
   netInterfaces?: NetInterfaceSample[];
   rdmaInterfaces?: NetInterfaceSample[];
   diskDevices?: DiskDeviceSample[];
+  memory?: MemorySample;
+  pressure?: PressureSample;
 }
 
 interface NodeDeployment {
@@ -142,6 +158,24 @@ export function NodeCard({
     }),
   }));
 
+  // System memory (GB10 unified pool: GPU+CPU share). Diagnostic for the
+  // class of OOM / soft-hang failures we hit at end-of-training. Tracks
+  // % used (memTotal - memAvailable) so the y-axis stays comparable
+  // across nodes regardless of total RAM.
+  const memData = displayHistory
+    .filter((s) => s.memory && s.memory.memTotalMb > 0)
+    .map((s) => Math.round(((s.memory!.memTotalMb - s.memory!.memAvailableMb) / s.memory!.memTotalMb) * 100));
+  const latestMem = displayHistory.length > 0 ? displayHistory[displayHistory.length - 1]?.memory : null;
+  const swapData = displayHistory
+    .filter((s) => s.memory && s.memory.swapTotalMb > 0)
+    .map((s) => s.memory!.swapUsedMb);
+
+  // PSI memory pressure: % of last 10 s where at least one task was stalled
+  // on memory. Earliest leading indicator of the soft-hang failure mode.
+  const psiMemData = displayHistory
+    .filter((s) => s.pressure && s.pressure.memorySomeAvg10 !== null)
+    .map((s) => s.pressure!.memorySomeAvg10!);
+
   // Disk devices — combined read+write throughput in MB/s (bytes-based, unlike net)
   const diskNames = new Set<string>();
   for (const s of displayHistory) {
@@ -209,6 +243,33 @@ export function NodeCard({
             label="VRAM"
             currentValue={`${Math.round(latest.vramUsed)}/${vramMax} MB`}
           />
+          {memData.length > 0 && latestMem && (
+            <Sparkline
+              data={memData}
+              max={100}
+              color="#a855f7"
+              label="Memory"
+              currentValue={`${Math.round((latestMem.memTotalMb - latestMem.memAvailableMb) / 1024)}/${Math.round(latestMem.memTotalMb / 1024)} GB`}
+            />
+          )}
+          {swapData.length > 0 && latestMem && latestMem.swapTotalMb > 0 && (
+            <Sparkline
+              data={swapData}
+              max={Math.max(latestMem.swapTotalMb, ...swapData, 1024)}
+              color="#dc2626"
+              label="Swap"
+              currentValue={`${Math.round(latestMem.swapUsedMb)} MB`}
+            />
+          )}
+          {psiMemData.length > 0 && (
+            <Sparkline
+              data={psiMemData}
+              max={Math.max(...psiMemData, 5)}
+              color="#f43f5e"
+              label="PSI mem"
+              unit="%"
+            />
+          )}
           {tempData.length > 0 && (
             <Sparkline
               data={tempData}
