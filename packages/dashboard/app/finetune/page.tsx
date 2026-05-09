@@ -738,18 +738,18 @@ export default function FinetunePage() {
             return (
               <div
                 key={job.id}
-                className="bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors"
+                className="bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors overflow-hidden"
               >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div>
-                      <h3 className="font-semibold flex items-center gap-2">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="flex items-center gap-3 min-w-0 flex-1">
+                    <div className="min-w-0 flex-1">
+                      <h3 className="font-semibold flex items-center gap-2 flex-wrap">
                         <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-purple-900/60 text-purple-300">
                           {job.method}
                         </span>
-                        {job.baseModel}
+                        <span className="break-all">{job.baseModel}</span>
                       </h3>
-                      <p className="text-xs text-gray-500 mt-0.5">
+                      <p className="text-xs text-gray-500 mt-0.5 break-all">
                         <button
                           onClick={() => navigator.clipboard.writeText(job.id)}
                           title={`${job.id} (click to copy)`}
@@ -759,14 +759,14 @@ export default function FinetunePage() {
                         </button>
                         {job.node?.name || job.nodeId}
                         {job.node?.ipAddress && ` (${job.node.ipAddress})`}
-                        <span className="ml-2 text-gray-600">{job.dataset}</span>
+                        <span className="ml-2 text-gray-600 break-all">{job.dataset}</span>
                         {job.startedAt && (
                           <span className="ml-2">{formatElapsed(job.startedAt, job.completedAt)}</span>
                         )}
                       </p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap justify-end">
                     <span
                       className={`text-xs px-2.5 py-1 rounded font-medium ${
                         statusStyles[job.status] || "bg-gray-700 text-gray-300"
