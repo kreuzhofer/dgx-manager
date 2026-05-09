@@ -19,6 +19,32 @@ export interface DiskDevice {
   writeBytesPerSec: number;
 }
 
+/**
+ * Linux PSI (Pressure Stall Information) — `some.avg10` is the % of time
+ * in the last 10 s that AT LEAST ONE task was stalled on the resource.
+ * The single most predictive signal for the soft-hang failure mode we hit
+ * at end-of-training (memory exhaustion → kernel can't allocate → user-
+ * space stalls → login PAM/getty hangs → only power-cycle recovers).
+ */
+export interface PressureMetrics {
+  memorySomeAvg10: number | null;
+  ioSomeAvg10: number | null;
+  cpuSomeAvg10: number | null;
+}
+
+export interface MemoryMetrics {
+  /** Total RAM (MB). On GB10 this is the unified GPU+CPU pool. */
+  memTotalMb: number;
+  /** Currently available for new allocations (MB). The number kernel uses for OOM decisions. */
+  memAvailableMb: number;
+  /** Reclaimable page cache (MB). High = lots of headroom; low + low MemAvailable = pressure. */
+  memCachedMb: number;
+  /** Total swap (MB). 0 if no swap configured. */
+  swapTotalMb: number;
+  /** Swap currently in use (MB). Sustained non-zero = swapping under CPU memory pressure. */
+  swapUsedMb: number;
+}
+
 export interface GpuMetrics {
   gpuModel: string;
   vramTotal: number;
@@ -28,6 +54,8 @@ export interface GpuMetrics {
   netInterfaces: NetInterface[];
   rdmaInterfaces: RdmaInterface[];
   diskDevices: DiskDevice[];
+  memory: MemoryMetrics | null;
+  pressure: PressureMetrics | null;
 }
 
 export async function collectMetrics(): Promise<GpuMetrics> {
@@ -60,6 +88,8 @@ export async function collectMetrics(): Promise<GpuMetrics> {
       netInterfaces: collectNetworkMetrics(),
       rdmaInterfaces: collectRdmaMetrics(),
       diskDevices: collectDiskMetrics(),
+      memory: collectMemoryMetrics(),
+      pressure: collectPressureMetrics(),
     };
   } catch {
     return {
@@ -71,6 +101,8 @@ export async function collectMetrics(): Promise<GpuMetrics> {
       netInterfaces: collectNetworkMetrics(),
       rdmaInterfaces: collectRdmaMetrics(),
       diskDevices: collectDiskMetrics(),
+      memory: collectMemoryMetrics(),
+      pressure: collectPressureMetrics(),
     };
   }
 }
@@ -243,4 +275,63 @@ function getSystemMemoryMB(): number {
   } catch {
     return 0;
   }
+}
+
+/**
+ * Read /proc/meminfo and report unified-memory state in MB. Used to
+ * diagnose the soft-hang failure mode where GB10's unified memory pool
+ * (shared GPU + CPU) gets exhausted at end-of-training and the kernel
+ * can't allocate even small new pages — login/PAM/getty stall and only
+ * a power cycle recovers. Pre-hang signal: MemAvailable trends sharply
+ * down while swap pressure ramps.
+ */
+function collectMemoryMetrics(): MemoryMetrics | null {
+  try {
+    const raw = readFileSync("/proc/meminfo", "utf-8");
+    const get = (key: string): number => {
+      const m = raw.match(new RegExp(`^${key}:\\s+(\\d+)\\s+kB`, "m"));
+      return m ? Math.round(parseInt(m[1], 10) / 1024) : 0;
+    };
+    const memTotalMb = get("MemTotal");
+    const memAvailableMb = get("MemAvailable");
+    const memCachedMb = get("Cached");
+    const swapTotalMb = get("SwapTotal");
+    const swapFreeMb = get("SwapFree");
+    return {
+      memTotalMb,
+      memAvailableMb,
+      memCachedMb,
+      swapTotalMb,
+      swapUsedMb: Math.max(0, swapTotalMb - swapFreeMb),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read PSI (Pressure Stall Information) from /proc/pressure/{memory,io,cpu}.
+ * `some.avg10` = % of last 10 s where at least one task was stalled. The
+ * earliest signal that the system is approaching a soft-hang. Available
+ * since kernel 4.20 with CONFIG_PSI=y.
+ */
+function collectPressureMetrics(): PressureMetrics | null {
+  const read = (resource: "memory" | "io" | "cpu"): number | null => {
+    try {
+      const raw = readFileSync(`/proc/pressure/${resource}`, "utf-8");
+      // First line is "some avg10=X.YY avg60=... avg300=... total=..."
+      const m = raw.match(/^some\s+avg10=([\d.]+)/m);
+      return m ? parseFloat(m[1]) : null;
+    } catch {
+      return null;
+    }
+  };
+  const memorySomeAvg10 = read("memory");
+  const ioSomeAvg10 = read("io");
+  const cpuSomeAvg10 = read("cpu");
+  // If all three are null, PSI isn't available at all on this kernel.
+  if (memorySomeAvg10 === null && ioSomeAvg10 === null && cpuSomeAvg10 === null) {
+    return null;
+  }
+  return { memorySomeAvg10, ioSomeAvg10, cpuSomeAvg10 };
 }

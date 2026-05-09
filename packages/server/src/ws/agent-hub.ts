@@ -308,6 +308,8 @@ export class AgentHub {
 
           case "agent:metrics": {
             if (!nodeId) break;
+            const mem = msg.payload.memory ?? null;
+            const psi = msg.payload.pressure ?? null;
             await prisma.metricSnapshot.create({
               data: {
                 nodeId,
@@ -316,6 +318,14 @@ export class AgentHub {
                 tps: msg.payload.tps ?? null,
                 activeRequests: msg.payload.activeRequests ?? null,
                 temperature: msg.payload.temp ?? null,
+                memTotalMb: mem?.memTotalMb ?? null,
+                memAvailableMb: mem?.memAvailableMb ?? null,
+                memCachedMb: mem?.memCachedMb ?? null,
+                swapTotalMb: mem?.swapTotalMb ?? null,
+                swapUsedMb: mem?.swapUsedMb ?? null,
+                pressureMemoryAvg10: psi?.memorySomeAvg10 ?? null,
+                pressureIoAvg10: psi?.ioSomeAvg10 ?? null,
+                pressureCpuAvg10: psi?.cpuSomeAvg10 ?? null,
               },
             });
             // Self-heal stale ipAddress: agent:register only fires on WS
@@ -341,6 +351,8 @@ export class AgentHub {
               netInterfaces: msg.payload.netInterfaces ?? undefined,
               rdmaInterfaces: msg.payload.rdmaInterfaces ?? undefined,
               diskDevices: msg.payload.diskDevices ?? undefined,
+              memory: mem ?? undefined,
+              pressure: psi ?? undefined,
             });
             this.onMetrics?.(nodeId, msg.payload);
             sseBroadcast({ type: "node:metrics", payload: { nodeId, timestamp: now, ...msg.payload } });

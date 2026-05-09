@@ -10,6 +10,20 @@ export interface DiskDeviceSample {
   writeBytesPerSec: number;
 }
 
+export interface MemorySample {
+  memTotalMb: number;
+  memAvailableMb: number;
+  memCachedMb: number;
+  swapTotalMb: number;
+  swapUsedMb: number;
+}
+
+export interface PressureSample {
+  memorySomeAvg10: number | null;
+  ioSomeAvg10: number | null;
+  cpuSomeAvg10: number | null;
+}
+
 export interface MetricSample {
   timestamp: number;
   gpuUtil: number;
@@ -20,6 +34,8 @@ export interface MetricSample {
   netInterfaces?: NetInterfaceSample[];
   rdmaInterfaces?: NetInterfaceSample[];
   diskDevices?: DiskDeviceSample[];
+  memory?: MemorySample;
+  pressure?: PressureSample;
 }
 
 const MAX_SAMPLES = 720; // 1 hour at 5s intervals

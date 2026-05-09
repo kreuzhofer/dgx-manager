@@ -94,6 +94,18 @@ model MetricSnapshot {
   tps            Float?
   activeRequests Int?
   temperature    Float?
+  // Unified-memory + PSI, added 2026-05-09 to diagnose soft-hangs at
+  // end-of-training where the GB10's shared GPU+CPU pool gets exhausted
+  // and the kernel can't allocate even small new pages.
+  // All nullable for backwards compat with pre-extension agents.
+  memTotalMb          Int?
+  memAvailableMb      Int?
+  memCachedMb         Int?
+  swapTotalMb         Int?
+  swapUsedMb          Int?
+  pressureMemoryAvg10 Float?
+  pressureIoAvg10     Float?
+  pressureCpuAvg10    Float?
   timestamp      DateTime @default(now())
   node           Node     @relation(fields: [nodeId], references: [id])
 }

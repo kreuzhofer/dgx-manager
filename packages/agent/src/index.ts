@@ -261,6 +261,8 @@ function connect() {
           netInterfaces: m.netInterfaces,
           rdmaInterfaces: m.rdmaInterfaces,
           diskDevices: m.diskDevices,
+          memory: m.memory,
+          pressure: m.pressure,
         },
       }));
     }, METRICS_INTERVAL);
