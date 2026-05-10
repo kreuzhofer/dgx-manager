@@ -10,7 +10,10 @@ export const finetuneRouter = Router();
 finetuneRouter.get("/", async (_req, res) => {
   const jobs = await prisma.fineTuneJob.findMany({
     orderBy: { createdAt: "desc" },
-    include: { node: true },
+    include: {
+      node: true,
+      clusterNodes: { include: { node: true }, orderBy: { role: "asc" } },
+    },
   });
   res.json(jobs);
 });
@@ -18,7 +21,10 @@ finetuneRouter.get("/", async (_req, res) => {
 finetuneRouter.get("/:id", async (req, res) => {
   const job = await prisma.fineTuneJob.findUnique({
     where: { id: req.params.id },
-    include: { node: true },
+    include: {
+      node: true,
+      clusterNodes: { include: { node: true }, orderBy: { role: "asc" } },
+    },
   });
   if (!job) return res.status(404).json({ error: "Job not found" });
   res.json(job);
@@ -140,7 +146,12 @@ finetuneRouter.post("/", async (req, res) => {
     data: { outputDir },
   });
 
-  // Resolve node IPs for multi-node
+  // Resolve node IPs for multi-node + persist cluster membership.
+  // Without persistence we'd lose the worker list after the start command
+  // fires (only the head ends up on the FineTuneJob row), making it
+  // impossible for the dashboard / API to show what nodes actually
+  // participated in a given training run. Mirrors the ClusterNode pattern
+  // used by Deployment.
   let clusterNodeIps: string[] | undefined;
   if (isMultiNode) {
     const nodes = await prisma.node.findMany({
@@ -149,6 +160,14 @@ finetuneRouter.post("/", async (req, res) => {
     // Maintain order: head first, then workers
     const nodeMap = new Map(nodes.map((n) => [n.id, n.ipAddress]));
     clusterNodeIps = nodeIds.map((id: string) => nodeMap.get(id)!).filter(Boolean);
+
+    await prisma.fineTuneClusterNode.createMany({
+      data: nodeIds.map((id: string, idx: number) => ({
+        jobId: job.id,
+        nodeId: id,
+        role: idx === 0 ? "head" : "worker",
+      })),
+    });
   }
 
   // Container path matches outputDir's basename, which differs from job.id when resuming
@@ -174,7 +193,10 @@ finetuneRouter.post("/", async (req, res) => {
 
   const result = await prisma.fineTuneJob.findUnique({
     where: { id: job.id },
-    include: { node: true },
+    include: {
+      node: true,
+      clusterNodes: { include: { node: true }, orderBy: { role: "asc" } },
+    },
   });
   sseBroadcast({ type: "finetune:created", payload: result });
   res.status(201).json(result);

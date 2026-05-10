@@ -27,10 +27,11 @@ model Node {
   bootstrapMethod String           @default("ssh")
   lastSeen        DateTime?
   createdAt       DateTime         @default(now())
-  deployments          Deployment[]
-  clusterMemberships   ClusterNode[]
-  finetuneJobs         FineTuneJob[]
-  metrics              MetricSnapshot[]
+  deployments              Deployment[]
+  clusterMemberships       ClusterNode[]
+  finetuneJobs             FineTuneJob[]
+  finetuneClusterMemberships FineTuneClusterNode[]
+  metrics                  MetricSnapshot[]
 }
 
 model JoinToken {
@@ -150,6 +151,23 @@ model FineTuneJob {
   createdAt    DateTime  @default(now())
   node         Node      @relation(fields: [nodeId], references: [id])
   metrics      TrainingMetric[]
+  // For multi-node runs, one row per participating node (head + workers).
+  // Single-node runs leave this empty; the head can be inferred from
+  // `nodeId`. Mirrors the ClusterNode pattern used by Deployment.
+  clusterNodes FineTuneClusterNode[]
+}
+
+model FineTuneClusterNode {
+  id        String      @id @default(cuid())
+  jobId     String
+  nodeId    String
+  role      String      @default("worker")
+  createdAt DateTime    @default(now())
+  job       FineTuneJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  node      Node        @relation(fields: [nodeId], references: [id])
+
+  @@unique([jobId, nodeId])
+  @@index([jobId])
 }
 
 model Dataset {
