@@ -427,6 +427,7 @@ export default function FinetunePage() {
       finetuneJobId: job.id,
       baseModel: job.baseModel,
     });
+    if (job.displayName) params.set("displayName", job.displayName);
     window.location.href = `/deployments?${params.toString()}`;
   };
 
