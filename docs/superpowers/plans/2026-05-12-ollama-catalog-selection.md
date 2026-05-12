@@ -5,14 +5,14 @@
 **Goal:** Replace the agent-shipped hardcoded `ollama-models.json` with a Settings-page UI that lets the cluster admin (a) refresh the Ollama model catalog on demand, (b) check which models should be available for deployment, and (c) get live download progress in the deployments page when an unpulled model is launched.
 
 **Architecture:**
-- **Catalog** (the universe of pickable models) is fetched on demand from `https://ollama.com/library`, parsed server-side with `cheerio`, and cached in the `Setting` table under two keys: `ollama.catalog.json` (the model array) and `ollama.catalog.fetchedAt` (ISO timestamp).
-- **Selection** (the user-curated subset enabled for the cluster) lives in `Setting` under `ollama.enabled.json` as a JSON string-array of model names. Auto-persistence: checkbox toggle on the Settings page debounces 400ms then PUT-merges into `/api/settings`.
-- **Propagation**: the deployments page calls a new `GET /api/ollama-catalog/available` that returns the intersection (catalog × enabled). Any PUT to the enabled list emits SSE `ollama-catalog:updated`, and the deployments page reloads its dropdown without a page refresh.
+- **Catalog** (the universe of pickable models) is fetched on demand from `https://ollama.com/library`, parsed server-side with `cheerio`, and cached in the `Setting` table under two keys: `ollama.catalog.json` (the model array) and `ollama.catalog.fetchedAt` (ISO timestamp). The parser filters out cloud-only models (cards with the cloud marker and zero local parameter sizes) so the cluster only ever sees locally-pullable entries. Each entry exposes `name`, `description`, `type` (chat/embedding), `sizes[]` (parameter sizes like `"8b"`, `"70b"`), and `capabilities[]` (`tools`, `thinking`, `vision`, `embedding`, `audio`).
+- **Selection** (the user-curated subset enabled for the cluster) lives in `Setting` under `ollama.enabled.json` as a JSON string-array of **tag identifiers** — `"model:size"` (e.g. `"llama3.1:8b"`, `"qwen3:32b"`) for sized models, or the bare model name for sizeless ones (`"nomic-embed-text"`). Auto-persistence: checkbox toggle on the Settings page debounces 400ms then PUTs to `/api/ollama-catalog/enabled`.
+- **Propagation**: the deployments page calls a new `GET /api/ollama-catalog/available` that returns a **flat list of deployable tag rows** (one row per enabled tag, carrying its parent model's description, type, capabilities). Any PUT to the enabled list emits SSE `ollama-catalog:updated`, and the deployments page reloads its dropdown without a page refresh.
 - **Download progress**: the agent's existing `pullModel()` already streams Ollama's pull progress through an `onLog` callback. We add a structured `agent:ollama:pull-progress` WS message alongside the existing log lines; the server forwards it as a `deployment:progress` SSE event (phase `"downloading"`), which the deployments page already renders. We additionally surface a `sonner` toast that lives across pages while a pull is in flight.
 
 **Tech Stack:** TypeScript strict + ESM, Express 5, Prisma 7 (SQLite), Next.js 15 + React 19 + Tailwind 4, `cheerio` (new server dep), `sonner` (new dashboard dep), Vitest + supertest.
 
-**Out of scope:** Per-user preferences (system is single-user / no auth); Ollama models that aren't in the upstream catalog (the agent's `ollama-models.json` is removed once the catalog flow lands); embedding-vs-chat editing in the UI (we display the `type` shown by Ollama's library but don't expose an override).
+**Out of scope:** Per-user preferences (system is single-user / no auth); Ollama models that aren't in the upstream catalog (the agent's `ollama-models.json` is removed once the catalog flow lands); embedding-vs-chat editing in the UI (we display the `type` shown by Ollama's library but don't expose an override); cloud-only models (filtered out at the parser — we deploy locally).
 
 ---
 
@@ -50,7 +50,7 @@
 **Settings keys used:**
 - `ollama.catalog.json` — JSON-stringified `OllamaCatalogEntry[]`.
 - `ollama.catalog.fetchedAt` — ISO timestamp.
-- `ollama.enabled.json` — JSON-stringified `string[]` of model names (e.g. `["llama3.1:8b","qwen3:8b"]`).
+- `ollama.enabled.json` — JSON-stringified `string[]` of tag identifiers (e.g. `["llama3.1:8b","qwen3:8b","nomic-embed-text"]`). A sized model contributes one key per size the user enabled; a sizeless model contributes just its bare name.
 
 ---
 
@@ -244,6 +244,22 @@ export interface CatalogSnapshot {
   fetchedAt: string | null;
 }
 
+/**
+ * A flat, deployable tag — what the deployments page renders in its dropdown
+ * and what the user actually pulls with `ollama pull`. Sized models flatten
+ * into one row per size ("llama3.1:8b", "llama3.1:70b"); sizeless models
+ * (nomic-embed-text, wizardlm) flatten into a single row with `size === null`
+ * and `tag === modelName`.
+ */
+export interface AvailableTag {
+  tag: string;            // "llama3.1:8b" or "nomic-embed-text"
+  modelName: string;      // "llama3.1"
+  size: string | null;    // "8b" or null for sizeless models
+  type: "chat" | "embedding";
+  description: string;
+  capabilities: string[];
+}
+
 async function readSetting(key: string): Promise<string | null> {
   const row = await prisma.setting.findUnique({ where: { key } });
   return row?.value ?? null;
@@ -289,21 +305,49 @@ export async function readEnabled(): Promise<string[]> {
   }
 }
 
-export async function writeEnabled(names: string[]): Promise<void> {
+export async function writeEnabled(tags: string[]): Promise<void> {
   // Dedupe + drop non-strings defensively — the PUT route validates, but the
   // DB shouldn't trust callers.
-  const cleaned = Array.from(new Set(names.filter((n) => typeof n === "string" && n.length > 0)));
+  const cleaned = Array.from(new Set(tags.filter((t) => typeof t === "string" && t.length > 0)));
   await writeSetting(ENABLED_KEY, JSON.stringify(cleaned));
 }
 
 /**
- * The set of models the user has both (a) selected AND (b) seen in the most
- * recent catalog fetch. This is what the deployments page should show.
+ * Flatten the catalog × enabled-set into the deployable rows the deployments
+ * page actually wants. Enabled tags reference either:
+ *   - "model:size" — must match a `OllamaCatalogEntry` whose `sizes` list
+ *     contains `size`, OR
+ *   - "model" (no colon) — must match an `OllamaCatalogEntry` with the same
+ *     bare name and an empty `sizes` list (sizeless / embedding models).
+ *
+ * Entries that no longer exist in the catalog (model removed upstream) are
+ * silently dropped — the UI surfaces this as the model disappearing from
+ * the dropdown, which is the right outcome.
  */
-export async function readAvailable(): Promise<OllamaCatalogEntry[]> {
+export async function readAvailable(): Promise<AvailableTag[]> {
   const [{ entries }, enabled] = await Promise.all([readCatalog(), readEnabled()]);
-  const enabledSet = new Set(enabled);
-  return entries.filter((e) => enabledSet.has(e.name));
+  const byName = new Map(entries.map((e) => [e.name, e]));
+  const rows: AvailableTag[] = [];
+  for (const tag of enabled) {
+    const [modelName, size] = tag.includes(":") ? tag.split(":", 2) : [tag, null];
+    const entry = byName.get(modelName);
+    if (!entry) continue;
+    if (size === null) {
+      // Sizeless: only valid if the catalog entry has no sizes either.
+      if (entry.sizes.length > 0) continue;
+    } else {
+      if (!entry.sizes.includes(size)) continue;
+    }
+    rows.push({
+      tag,
+      modelName,
+      size,
+      type: entry.type,
+      description: entry.description,
+      capabilities: entry.capabilities,
+    });
+  }
+  return rows;
 }
 ```
 
@@ -447,12 +491,13 @@ describe("GET /api/ollama-catalog/catalog", () => {
 
   it("returns persisted entries and timestamp", async () => {
     const ts = await writeCatalog([
-      { name: "llama3.1", description: "Meta Llama", type: "chat", sizes: ["4.7GB"] },
+      { name: "llama3.1", description: "Meta Llama", type: "chat", sizes: ["8b", "70b"], capabilities: ["tools"] },
     ]);
     const res = await request(makeApp()).get("/api/ollama-catalog/catalog");
     expect(res.body.fetchedAt).toBe(ts);
     expect(res.body.entries).toHaveLength(1);
     expect(res.body.entries[0].name).toBe("llama3.1");
+    expect(res.body.entries[0].sizes).toEqual(["8b", "70b"]);
   });
 });
 
@@ -481,24 +526,39 @@ describe("GET /api/ollama-catalog/enabled and PUT /api/ollama-catalog/enabled", 
 });
 
 describe("GET /api/ollama-catalog/available", () => {
-  it("returns only catalog entries that are also enabled", async () => {
+  it("flattens catalog × enabled into deployable tag rows", async () => {
     await writeCatalog([
-      { name: "llama3.1:8b", description: "A", type: "chat", sizes: ["4.7GB"] },
-      { name: "qwen3:8b", description: "B", type: "chat", sizes: ["5.2GB"] },
-      { name: "phi4:14b", description: "C", type: "chat", sizes: ["9.1GB"] },
+      { name: "llama3.1", description: "A", type: "chat", sizes: ["8b", "70b"], capabilities: ["tools"] },
+      { name: "qwen3",   description: "B", type: "chat", sizes: ["8b", "32b"], capabilities: ["tools"] },
+      { name: "phi4",    description: "C", type: "chat", sizes: ["14b"], capabilities: [] },
+      { name: "nomic-embed-text", description: "Emb", type: "embedding", sizes: [], capabilities: ["embedding"] },
     ]);
-    await writeEnabled(["llama3.1:8b", "qwen3:8b"]);
+    await writeEnabled(["llama3.1:8b", "qwen3:8b", "qwen3:32b", "nomic-embed-text"]);
     const res = await request(makeApp()).get("/api/ollama-catalog/available");
     expect(res.status).toBe(200);
-    expect(res.body.map((m: { name: string }) => m.name)).toEqual([
-      "llama3.1:8b",
-      "qwen3:8b",
+    const tags = (res.body as { tag: string }[]).map((r) => r.tag);
+    expect(tags).toEqual(["llama3.1:8b", "qwen3:8b", "qwen3:32b", "nomic-embed-text"]);
+    const llama = (res.body as { tag: string; modelName: string; size: string | null }[])
+      .find((r) => r.tag === "llama3.1:8b")!;
+    expect(llama.modelName).toBe("llama3.1");
+    expect(llama.size).toBe("8b");
+    const emb = (res.body as { tag: string; size: string | null }[])
+      .find((r) => r.tag === "nomic-embed-text")!;
+    expect(emb.size).toBeNull();
+  });
+
+  it("drops enabled tags that no longer exist in the catalog", async () => {
+    await writeCatalog([
+      { name: "llama3.1", description: "A", type: "chat", sizes: ["8b"], capabilities: [] },
     ]);
+    await writeEnabled(["llama3.1:8b", "llama3.1:405b", "ghost-model:1b"]);
+    const res = await request(makeApp()).get("/api/ollama-catalog/available");
+    expect((res.body as { tag: string }[]).map((r) => r.tag)).toEqual(["llama3.1:8b"]);
   });
 
   it("returns [] when nothing is enabled even if catalog is non-empty", async () => {
     await writeCatalog([
-      { name: "llama3.1:8b", description: "A", type: "chat", sizes: ["4.7GB"] },
+      { name: "llama3.1", description: "A", type: "chat", sizes: ["8b"], capabilities: [] },
     ]);
     const res = await request(makeApp()).get("/api/ollama-catalog/available");
     expect(res.body).toEqual([]);
@@ -510,7 +570,7 @@ describe("POST /api/ollama-catalog/catalog/refresh", () => {
     vi.resetModules();
     vi.doMock("../../ollama/catalog-fetcher.js", () => ({
       refreshCatalog: async () => ({
-        entries: [{ name: "fake", description: "stub", type: "chat", sizes: [] }],
+        entries: [{ name: "fake", description: "stub", type: "chat", sizes: [], capabilities: [] }],
         fetchedAt: "2026-05-12T00:00:00.000Z",
       }),
     }));
@@ -623,11 +683,92 @@ git commit -m "server: ollama-catalog routes (catalog, enabled, available, refre
 ## Task 5: Server — switch deployments VRAM estimation to use the catalog
 
 **Files:**
-- Modify: `packages/server/src/routes/deployments.ts`
+- Create: `packages/server/src/ollama/vram-estimate.ts` — pure parameter-size → MB helper, unit-testable.
+- Create: `packages/server/src/ollama/vram-estimate.test.ts`
+- Modify: `packages/server/src/routes/deployments.ts` — use the new helper, fall back to the agent's curated list (legacy byte sizes) when neither catalog nor parameter size is available.
 
-Right now `deployments.ts:107-113` derives Ollama VRAM from `agentHub.getOllamaModels()` (the agent-shipped `ollama-models.json`). With the catalog flow we want the same lookup against the persisted catalog, falling back to the agent's list only if the catalog hasn't been populated yet.
+Right now `deployments.ts:107-113` derives Ollama VRAM from `agentHub.getOllamaModels()` by parsing `"4.7GB"`-style strings. The catalog gives us *parameter* sizes (`"8b"`, `"70b"`), not byte sizes, so we need a small conversion: Ollama defaults to Q4_K_M quantization which lands around `~0.55 GB per billion params` plus modest KV/cache overhead. We use that as the upper-bound VRAM estimate for admission; `vramActual` corrects it after `nvidia-smi` reports post-load.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the unit test for the parameter-size → MB helper**
+
+Create `packages/server/src/ollama/vram-estimate.test.ts`:
+```ts
+import { describe, expect, it } from "vitest";
+import { ollamaVramEstimateMB } from "./vram-estimate.js";
+
+describe("ollamaVramEstimateMB", () => {
+  it.each([
+    ["8b", 4506],     // 8 × 0.55 GB × 1024 ≈ 4506 MB
+    ["70b", 39424],   // 70 × 0.55 GB × 1024
+    ["405b", 228096], // 405 × 0.55 GB × 1024
+    ["1.5b", 845],    // 1.5 × 0.55 GB × 1024
+    ["270m", 149],    // 0.27 × 0.55 GB × 1024
+    ["e2b", 1126],    // Gemma "effective 2b" — parsed as 2b
+    ["e4b", 2253],
+  ])("parses %s as ~%d MB", (size, expected) => {
+    const got = ollamaVramEstimateMB(size);
+    // Allow ±2 MB for rounding drift.
+    expect(got).toBeGreaterThanOrEqual(expected - 2);
+    expect(got).toBeLessThanOrEqual(expected + 2);
+  });
+
+  it.each(["", "huge", "12.34xyz", "GB", null as unknown as string, undefined as unknown as string])(
+    "returns null for unparseable input %p",
+    (s) => {
+      expect(ollamaVramEstimateMB(s)).toBeNull();
+    },
+  );
+});
+```
+
+- [ ] **Step 2: Run the test and verify it fails**
+
+```bash
+npx vitest run packages/server/src/ollama/vram-estimate.test.ts
+```
+Expected: FAIL — module not found.
+
+- [ ] **Step 3: Implement the helper**
+
+Create `packages/server/src/ollama/vram-estimate.ts`:
+```ts
+/**
+ * Parse an Ollama parameter-size tag ("8b", "70b", "e2b", "270m") into a VRAM
+ * estimate in MB. Ollama defaults to Q4_K_M quantization which lands around
+ * 0.55 GB per billion params; we use that as the upper-bound estimate for
+ * admission. The agent reports `vramActual` once nvidia-smi has post-load
+ * truth, so the estimate is only load-bearing for the refuse-before-launch
+ * check.
+ *
+ * Recognized suffixes:
+ *   - "b"  — billions of params
+ *   - "m"  — millions of params (e.g. "270m")
+ *   - "e2b"/"e4b" — Gemma "effective N billion" notation; treated as Nb.
+ *
+ * Returns null if the input doesn't match the expected shape.
+ */
+const Q4_GB_PER_BILLION = 0.55;
+const MB_PER_GB = 1024;
+
+export function ollamaVramEstimateMB(rawSize: string | null | undefined): number | null {
+  if (!rawSize || typeof rawSize !== "string") return null;
+  const m = rawSize.trim().toLowerCase().match(/^e?(\d+(?:\.\d+)?)\s*([bm])$/);
+  if (!m) return null;
+  const value = parseFloat(m[1]);
+  if (!Number.isFinite(value)) return null;
+  const billionsParams = m[2] === "b" ? value : value / 1000;
+  return Math.round(billionsParams * Q4_GB_PER_BILLION * MB_PER_GB);
+}
+```
+
+- [ ] **Step 4: Run the unit test and verify it passes**
+
+```bash
+npx vitest run packages/server/src/ollama/vram-estimate.test.ts
+```
+Expected: PASS.
+
+- [ ] **Step 5: Write the failing integration test**
 
 Add a new test file `packages/server/src/__tests__/integration/deployments.ollama-vram.test.ts`:
 ```ts
@@ -692,39 +833,43 @@ function makeApp() {
 }
 
 describe("POST /api/deployments with runtime=ollama uses the catalog for VRAM estimation", () => {
-  it("derives vramEstimate from a catalog size string", async () => {
+  it("derives vramEstimate from a catalog parameter size", async () => {
     await prisma.node.create({
       data: { id: "n1", name: "node1", status: "online", vramTotal: 128_000 },
     });
     await writeCatalog([
-      { name: "llama3.1:8b", description: "Meta", type: "chat", sizes: ["4.7GB"] },
+      { name: "llama3.1", description: "Meta", type: "chat", sizes: ["8b", "70b"], capabilities: ["tools"] },
     ]);
     const { app } = makeApp();
     const res = await request(app)
       .post("/api/deployments")
       .send({ nodeId: "n1", runtime: "ollama", modelName: "llama3.1:8b" });
-    expect(res.status).toBe(201);
-    // 4.7 * 1024 * 1.1 ≈ 5294
-    expect(res.body.vramEstimate).toBeGreaterThan(5000);
-    expect(res.body.vramEstimate).toBeLessThan(5500);
+    // Adapt status check to what the route actually returns (read the existing
+    // vram-admission test for the response shape — likely 200 with deployment row).
+    expect([200, 201]).toContain(res.status);
+    // 8b @ Q4 ≈ 8 × 0.55 × 1024 ≈ 4506 MB. Allow generous bounds.
+    const persisted = await prisma.deployment.findFirst();
+    expect(persisted?.vramEstimate ?? 0).toBeGreaterThan(4000);
+    expect(persisted?.vramEstimate ?? 0).toBeLessThan(5000);
   });
 });
 ```
 
-Inspect the actual POST response shape first (look at the existing test or the route — adapt `expect(res.status).toBe(201)` if the route uses 200, and `vramEstimate` field name). If the route doesn't include `vramEstimate` in the response, read it back via `prisma.deployment.findFirst()` instead.
+Inspect the actual POST response shape first (look at the existing test or the route — adapt `expect(res.status).toBe(...)` to what the route returns). Reading the persisted row via prisma is the safest invariant regardless of response shape.
 
-- [ ] **Step 2: Run the test and verify it fails**
+- [ ] **Step 6: Run the integration test and verify it fails**
 
 ```bash
 npx vitest run packages/server/src/__tests__/integration/deployments.ollama-vram.test.ts
 ```
-Expected: FAIL — `vramEstimate` will be null/0 because the route still consults `getOllamaModels()` which is empty.
+Expected: FAIL — `vramEstimate` will be null/0 because the route still parses GB strings.
 
-- [ ] **Step 3: Update deployments.ts to consult the catalog first**
+- [ ] **Step 7: Update deployments.ts to consult the catalog first**
 
-In `packages/server/src/routes/deployments.ts`, add this import near the top with the other imports:
+In `packages/server/src/routes/deployments.ts`, add these imports near the top with the other imports:
 ```ts
 import { readCatalog as readOllamaCatalog } from "../ollama/catalog-store.js";
+import { ollamaVramEstimateMB } from "../ollama/vram-estimate.js";
 ```
 Then replace the Ollama VRAM-estimation block (currently around lines 107-113):
 ```ts
@@ -741,40 +886,54 @@ with:
 ```ts
     if (isOllama) {
       const agentHub: AgentHub = req.app.get("agentHub");
+      // Resolve the parameter size from the catalog: modelName is the pull
+      // tag like "llama3.1:8b". Look up the bare model name, then pick the
+      // requested size out of its `sizes` list (or the bare name for sizeless
+      // entries like nomic-embed-text).
       const catalog = await readOllamaCatalog();
-      // Catalog entries carry tag-level sizes; pick the largest as the upper-bound
-      // VRAM estimate so admission errs on the side of refusing under-provisioned
-      // launches. Fall back to the agent's curated list if the catalog hasn't
-      // been refreshed yet.
-      const catalogEntry = catalog.entries.find((m) => modelName === m.name || modelName.startsWith(m.name + ":"));
-      const sizeStr =
-        catalogEntry?.sizes.sort((a, b) => parseFloat(b) - parseFloat(a))[0] ||
-        agentHub.getOllamaModels().find((m) => m.name === modelName)?.size;
-      if (sizeStr) {
-        const sizeMatch = sizeStr.match(/([\d.]+)\s*GB/i);
-        vramEstimate = sizeMatch ? Math.round(parseFloat(sizeMatch[1]) * 1024 * 1.1) : 0; // +10% overhead
+      const [bareName, requestedSize] = modelName.includes(":")
+        ? modelName.split(":", 2)
+        : [modelName, null];
+      const catalogEntry = catalog.entries.find((m) => m.name === bareName);
+      const catalogSize =
+        catalogEntry && requestedSize && catalogEntry.sizes.includes(requestedSize)
+          ? requestedSize
+          : catalogEntry?.sizes[0] ?? null;
+      const estimate = ollamaVramEstimateMB(catalogSize);
+      if (estimate !== null) {
+        vramEstimate = Math.round(estimate * 1.1); // +10% overhead (KV cache, runtime)
+      } else {
+        // Fallback: legacy agent-shipped byte size, parsed as before. Used
+        // until the operator runs the first catalog refresh.
+        const legacy = agentHub.getOllamaModels().find((m) => m.name === modelName);
+        if (legacy?.size) {
+          const sizeMatch = legacy.size.match(/([\d.]+)\s*GB/i);
+          vramEstimate = sizeMatch ? Math.round(parseFloat(sizeMatch[1]) * 1024 * 1.1) : 0;
+        }
       }
     } else {
 ```
 
-- [ ] **Step 4: Run the test and verify it passes**
+- [ ] **Step 8: Run the test and verify it passes**
 
 ```bash
 npx vitest run packages/server/src/__tests__/integration/deployments.ollama-vram.test.ts
 ```
 Expected: PASS.
 
-- [ ] **Step 5: Run the full suite**
+- [ ] **Step 9: Run the full suite**
 
 ```bash
 npm test
 ```
 Expected: green (especially the pre-existing `deployments.vram-admission.test.ts` — that suite seeds an empty catalog and stubs `getOllamaModels()`, so nothing changes).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
-git add packages/server/src/routes/deployments.ts \
+git add packages/server/src/ollama/vram-estimate.ts \
+        packages/server/src/ollama/vram-estimate.test.ts \
+        packages/server/src/routes/deployments.ts \
         packages/server/src/__tests__/integration/deployments.ollama-vram.test.ts
 git commit -m "server: deployments use ollama catalog for vram estimation"
 ```
@@ -892,7 +1051,7 @@ Create `packages/dashboard/components/ollama-models-section.tsx`:
 ```tsx
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiFetch } from "@/lib/api";
 import { useDebouncedCallback } from "@/lib/use-debounced-callback";
 
@@ -901,6 +1060,7 @@ interface CatalogEntry {
   description: string;
   type: "chat" | "embedding";
   sizes: string[];
+  capabilities: string[];
 }
 
 interface CatalogResponse {
@@ -910,6 +1070,30 @@ interface CatalogResponse {
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
+interface Row {
+  tag: string;          // "llama3.1:8b" or "nomic-embed-text"
+  modelName: string;
+  size: string | null;
+  description: string;
+  type: "chat" | "embedding";
+  capabilities: string[];
+}
+
+/** Flatten catalog entries into one row per deployable tag. */
+function flatten(entries: CatalogEntry[]): Row[] {
+  const rows: Row[] = [];
+  for (const e of entries) {
+    if (e.sizes.length === 0) {
+      rows.push({ tag: e.name, modelName: e.name, size: null, description: e.description, type: e.type, capabilities: e.capabilities });
+    } else {
+      for (const size of e.sizes) {
+        rows.push({ tag: `${e.name}:${size}`, modelName: e.name, size, description: e.description, type: e.type, capabilities: e.capabilities });
+      }
+    }
+  }
+  return rows;
+}
+
 export function OllamaModelsSection() {
   const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
@@ -917,6 +1101,16 @@ export function OllamaModelsSection() {
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [filter, setFilter] = useState("");
+
+  const rows = useMemo(() => flatten(catalog), [catalog]);
+  const visibleRows = useMemo(() => {
+    if (!filter.trim()) return rows;
+    const q = filter.trim().toLowerCase();
+    return rows.filter(
+      (r) => r.tag.toLowerCase().includes(q) || r.description.toLowerCase().includes(q),
+    );
+  }, [rows, filter]);
 
   const load = useCallback(async () => {
     try {
@@ -936,15 +1130,14 @@ export function OllamaModelsSection() {
     load();
   }, [load]);
 
-  const persistEnabled = useCallback(async (names: string[]) => {
+  const persistEnabled = useCallback(async (tags: string[]) => {
     setSaveState("saving");
     try {
       await apiFetch("/api/ollama-catalog/enabled", {
         method: "PUT",
-        body: JSON.stringify({ enabled: names }),
+        body: JSON.stringify({ enabled: tags }),
       });
       setSaveState("saved");
-      // Reset to idle after a short delay so the indicator doesn't linger.
       setTimeout(() => setSaveState((s) => (s === "saved" ? "idle" : s)), 1500);
     } catch {
       setSaveState("error");
@@ -953,11 +1146,11 @@ export function OllamaModelsSection() {
 
   const debouncedPersist = useDebouncedCallback(persistEnabled, 400);
 
-  const toggle = (name: string) => {
+  const toggle = (tag: string) => {
     setEnabled((prev) => {
       const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
+      if (next.has(tag)) next.delete(tag);
+      else next.add(tag);
       debouncedPersist(Array.from(next));
       return next;
     });
@@ -1005,12 +1198,12 @@ export function OllamaModelsSection() {
         </div>
       </div>
 
-      <p className="text-xs text-gray-500 mb-4">
-        Pulled from <code>ollama.com/library</code>.{" "}
+      <p className="text-xs text-gray-500 mb-3">
+        Pulled from <code>ollama.com/library</code> (cloud-only models excluded).{" "}
         {fetchedAt
           ? `Last refreshed ${new Date(fetchedAt).toLocaleString()}.`
           : "Never refreshed."}{" "}
-        Check the models you want available on the Deployments page.
+        Check the model:tag combinations you want available on the Deployments page.
       </p>
 
       {refreshError && (
@@ -1022,33 +1215,47 @@ export function OllamaModelsSection() {
           Catalog is empty. Click <strong>Refresh catalog</strong> to pull the latest from ollama.com.
         </p>
       ) : (
-        <ul className="max-h-96 overflow-y-auto divide-y divide-gray-800/60 border border-gray-800 rounded">
-          {catalog.map((m) => {
-            const checked = enabled.has(m.name);
-            return (
-              <li key={m.name} className="px-3 py-2 flex items-center gap-3 hover:bg-gray-800/30">
-                <input
-                  type="checkbox"
-                  className="accent-green-500"
-                  checked={checked}
-                  onChange={() => toggle(m.name)}
-                />
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium text-gray-200 truncate">
-                    {m.name}{" "}
-                    <span className="text-[10px] uppercase tracking-wide text-gray-500 ml-1">
-                      {m.type}
-                    </span>
+        <>
+          <input
+            type="text"
+            placeholder="Filter by name or description"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            className="w-full mb-2 bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-xs focus:outline-none focus:border-green-500"
+          />
+          <ul className="max-h-96 overflow-y-auto divide-y divide-gray-800/60 border border-gray-800 rounded">
+            {visibleRows.map((r) => {
+              const checked = enabled.has(r.tag);
+              return (
+                <li key={r.tag} className="px-3 py-2 flex items-center gap-3 hover:bg-gray-800/30">
+                  <input
+                    type="checkbox"
+                    className="accent-green-500"
+                    checked={checked}
+                    onChange={() => toggle(r.tag)}
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-gray-200 truncate">
+                      {r.tag}{" "}
+                      <span className="text-[10px] uppercase tracking-wide text-gray-500 ml-1">
+                        {r.type}
+                      </span>
+                      {r.capabilities.length > 0 && (
+                        <span className="text-[10px] text-indigo-400 ml-2">
+                          {r.capabilities.join(" · ")}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-gray-500 truncate">{r.description}</div>
                   </div>
-                  <div className="text-xs text-gray-500 truncate">{m.description}</div>
-                </div>
-                <div className="text-[11px] text-gray-500 tabular-nums whitespace-nowrap">
-                  {m.sizes.join(" / ")}
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+                </li>
+              );
+            })}
+            {visibleRows.length === 0 && (
+              <li className="px-3 py-4 text-center text-gray-600 text-sm">No matches.</li>
+            )}
+          </ul>
+        </>
       )}
     </section>
   );
@@ -1103,6 +1310,19 @@ git commit -m "dashboard: ollama models selection section on settings page"
 
 The deployments page currently fetches `/api/recipes/ollama-models` (line 155). Switch to `/api/ollama-catalog/available` and add an SSE handler so a change on the Settings page propagates without a manual reload.
 
+The `/available` endpoint now returns rows shaped as:
+```ts
+type AvailableRow = {
+  tag: string;             // "llama3.1:8b" or "nomic-embed-text"
+  modelName: string;
+  size: string | null;
+  type: "chat" | "embedding";
+  description: string;
+  capabilities: string[];
+};
+```
+The existing `ollamaModels` state holds `{ name, size, type?, description }` where `name` is the actual pull tag passed to `POST /api/deployments` as `modelName`. We map `tag → name` and `size` (param size like `"8b"`) into the existing field, which is rendered for display only.
+
 - [ ] **Step 1: Switch the fetch URL**
 
 In `packages/dashboard/app/deployments/page.tsx`, locate the `loadData` callback (around line 149). Replace this line:
@@ -1111,14 +1331,14 @@ In `packages/dashboard/app/deployments/page.tsx`, locate the `loadData` callback
 ```
 with:
 ```ts
-      apiFetch<{ name: string; type?: string; description: string; sizes?: string[] }[]>("/api/ollama-catalog/available"),
+      apiFetch<{ tag: string; modelName: string; size: string | null; type: "chat" | "embedding"; description: string; capabilities: string[] }[]>("/api/ollama-catalog/available"),
 ```
 Just below, the destructuring `.then(([r, n, d, idle, om]) => {` already assigns to `om`. Update the `setOllamaModels` call to adapt the new shape:
 ```ts
         setOllamaModels(
           om.map((m) => ({
-            name: m.name,
-            size: (m.sizes && m.sizes[0]) || "",
+            name: m.tag,
+            size: m.size ?? "",
             type: m.type,
             description: m.description,
           })),
@@ -1131,14 +1351,14 @@ Just below, the destructuring `.then(([r, n, d, idle, om]) => {` already assigns
 Inside the `handleSSE` callback (around line 188), add a new branch alongside the existing event handlers:
 ```ts
     if (event.type === "ollama-catalog:updated") {
-      apiFetch<{ name: string; type?: string; description: string; sizes?: string[] }[]>(
+      apiFetch<{ tag: string; modelName: string; size: string | null; type: "chat" | "embedding"; description: string; capabilities: string[] }[]>(
         "/api/ollama-catalog/available",
       )
         .then((om) =>
           setOllamaModels(
             om.map((m) => ({
-              name: m.name,
-              size: (m.sizes && m.sizes[0]) || "",
+              name: m.tag,
+              size: m.size ?? "",
               type: m.type,
               description: m.description,
             })),
