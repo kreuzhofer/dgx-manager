@@ -399,4 +399,128 @@ describe("finetune displayName + Model cleanup", () => {
     const aJob = await prisma.fineTuneJob.findUnique({ where: { id: a.body.id } });
     expect(aJob?.displayName).toBe("first");
   });
+
+  it("DELETE /:id removes the associated Model row via cascade", async () => {
+    await wipeAll();
+    await seedNode();
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    const create = await request(app)
+      .post("/api/finetune")
+      .send({ nodeId: "node-1", recipeFile: RECIPE.file, dataset: "/tmp/fake.jsonl" });
+
+    // Create the Model row directly (bypass POST /deploy so we don't also
+    // get a pending Deployment row that would block the delete). This
+    // isolates the FK cascade behavior under test.
+    await prisma.model.create({
+      data: {
+        name: `finetune-${create.body.id.slice(0, 8)}`,
+        runtime: "vllm",
+        finetuneJobId: create.body.id,
+      },
+    });
+
+    expect(await prisma.model.count({ where: { finetuneJobId: create.body.id } })).toBe(1);
+
+    const del = await request(app).delete(`/api/finetune/${create.body.id}`);
+    expect(del.status).toBe(200);
+
+    expect(await prisma.fineTuneJob.count({ where: { id: create.body.id } })).toBe(0);
+    expect(await prisma.model.count({ where: { finetuneJobId: create.body.id } })).toBe(0);
+  });
+
+  it("DELETE /:id refuses when the Model has an active Deployment", async () => {
+    await wipeAll();
+    await seedNode();
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    const create = await request(app)
+      .post("/api/finetune")
+      .send({ nodeId: "node-1", recipeFile: RECIPE.file, dataset: "/tmp/fake.jsonl" });
+    await prisma.fineTuneJob.update({
+      where: { id: create.body.id },
+      data: { mergeStatus: "completed", mergedPath: "/tmp/fake-merged" },
+    });
+    await request(app)
+      .post(`/api/finetune/${create.body.id}/deploy`)
+      .send({ config: {} });
+
+    const model = await prisma.model.findFirstOrThrow({ where: { finetuneJobId: create.body.id } });
+    // Insert an active deployment that references this Model
+    await prisma.deployment.create({
+      data: {
+        nodeId: "node-1",
+        modelId: model.id,
+        status: "running",
+      },
+    });
+
+    const del = await request(app).delete(`/api/finetune/${create.body.id}`);
+    expect(del.status).toBe(409);
+    expect(del.body.error).toMatch(/active deployment/i);
+
+    // Job + Model are still there
+    expect(await prisma.fineTuneJob.count({ where: { id: create.body.id } })).toBe(1);
+    expect(await prisma.model.count({ where: { finetuneJobId: create.body.id } })).toBe(1);
+  });
+
+  it("DELETE /:id refuses when the Model has a pending Deployment (agent in-flight)", async () => {
+    await wipeAll();
+    await seedNode();
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    const create = await request(app)
+      .post("/api/finetune")
+      .send({ nodeId: "node-1", recipeFile: RECIPE.file, dataset: "/tmp/fake.jsonl" });
+    await prisma.fineTuneJob.update({
+      where: { id: create.body.id },
+      data: { mergeStatus: "completed", mergedPath: "/tmp/fake-merged" },
+    });
+    // This creates the Model AND a `pending` Deployment via the stub hub.
+    await request(app).post(`/api/finetune/${create.body.id}/deploy`).send({ config: {} });
+
+    const del = await request(app).delete(`/api/finetune/${create.body.id}`);
+    expect(del.status).toBe(409);
+    expect(del.body.error).toMatch(/active deployment/i);
+
+    // Job + Model + pending Deployment are all still there
+    expect(await prisma.fineTuneJob.count({ where: { id: create.body.id } })).toBe(1);
+    expect(await prisma.model.count({ where: { finetuneJobId: create.body.id } })).toBe(1);
+    expect(await prisma.deployment.count({ where: { modelId: { not: undefined } } })).toBeGreaterThanOrEqual(1);
+  });
+
+  it("DELETE /:id sweeps terminal Deployment rows then cascades the Model", async () => {
+    await wipeAll();
+    await seedNode();
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    const create = await request(app)
+      .post("/api/finetune")
+      .send({ nodeId: "node-1", recipeFile: RECIPE.file, dataset: "/tmp/fake.jsonl" });
+
+    // Set up Model + a terminal Deployment directly via Prisma.
+    const model = await prisma.model.create({
+      data: {
+        name: `finetune-${create.body.id.slice(0, 8)}`,
+        runtime: "vllm",
+        finetuneJobId: create.body.id,
+      },
+    });
+    const stoppedDep = await prisma.deployment.create({
+      data: { nodeId: "node-1", modelId: model.id, status: "stopped" },
+    });
+
+    const del = await request(app).delete(`/api/finetune/${create.body.id}`);
+    expect(del.status).toBe(200);
+
+    // Cascade chain: FineTuneJob gone, Model gone (via cascade), stopped
+    // Deployment gone (via explicit sweep).
+    expect(await prisma.fineTuneJob.count({ where: { id: create.body.id } })).toBe(0);
+    expect(await prisma.model.count({ where: { id: model.id } })).toBe(0);
+    expect(await prisma.deployment.count({ where: { id: stoppedDep.id } })).toBe(0);
+  });
 });

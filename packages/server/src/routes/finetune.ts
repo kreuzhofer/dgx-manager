@@ -278,6 +278,46 @@ finetuneRouter.delete("/:id", async (req, res) => {
   const job = await prisma.fineTuneJob.findUnique({ where: { id: req.params.id } });
   if (!job) return res.status(404).json({ error: "Job not found" });
 
+  // Guard against deleting when the fine-tune's Model has active deployments.
+  //
+  // "Active" = anything that isn't a terminal status. In particular, `pending`
+  // is active because the manager has already dispatched `cmd:deploy` to the
+  // agent — the container is being spun up and the agent expects the
+  // Deployment row to remain so it can report status back. Sweeping a
+  // pending row would orphan the agent-managed container.
+  //
+  // Terminal statuses (stopped/failed/removed) are safe to sweep because
+  // the container/process is gone. We explicitly delete those rows before
+  // the FineTuneJob delete so the FK Cascade chain (FineTuneJob → Model)
+  // can proceed (Deployment.modelId has no cascade of its own).
+  //
+  // The guard returns 409 with deployment IDs so the user knows which to
+  // stop first.
+  const TERMINAL_STATUSES = ["stopped", "failed", "removed"];
+  const linkedModel = await prisma.model.findUnique({
+    where: { finetuneJobId: job.id },
+    include: { deployments: true },
+  });
+  if (linkedModel) {
+    const active = linkedModel.deployments.filter(
+      (d) => !TERMINAL_STATUSES.includes(d.status),
+    );
+    if (active.length > 0) {
+      return res.status(409).json({
+        error: `Cannot delete: ${active.length} active deployment(s) reference this model. ` +
+               `Stop the deployment(s) first.`,
+        deploymentIds: active.map((d) => d.id),
+      });
+    }
+    // Sweep terminal deployments so the FineTuneJob → Model cascade can
+    // proceed (Deployment.modelId has no cascade of its own).
+    if (linkedModel.deployments.length > 0) {
+      await prisma.deployment.deleteMany({
+        where: { id: { in: linkedModel.deployments.map((d) => d.id) } },
+      });
+    }
+  }
+
   // If running, stop it first
   if (["pending", "starting", "running"].includes(job.status)) {
     const agentHub: AgentHub = req.app.get("agentHub");
