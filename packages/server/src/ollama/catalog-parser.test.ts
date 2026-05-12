@@ -3,40 +3,132 @@ import { it as fcIt } from "@fast-check/vitest";
 import fc from "fast-check";
 import { parseCatalogHtml } from "./catalog-parser.js";
 
+/**
+ * Fixture mirrors the real markup of ollama.com/library (sampled 2026-05).
+ * Four cards cover the cases the parser must handle:
+ *
+ *   - llama3.1     : plain chat model with sizes + a "tools" capability.
+ *   - nomic-embed-text : embedding model — has the "embedding" capability
+ *                      badge and a single parameter size.
+ *   - gemma3       : has BOTH local sizes AND a cloud marker — must be kept,
+ *                    cloud span must be ignored, sizes intact.
+ *   - kimi-k2      : cloud-only — zero x-test-size entries. Must be dropped.
+ */
 const SAMPLE_LIBRARY_HTML = `
 <html><body>
   <ul role="list">
     <li>
-      <a href="/library/llama3.1">
-        <h2>llama3.1</h2>
-        <p>Meta's Llama 3.1 family.</p>
-        <span x-test="size">4.7GB</span>
-        <span x-test="size">40GB</span>
-        <span x-test="pulls">1.2M</span>
+      <a href="/library/llama3.1" class="group w-full space-y-5">
+        <div x-test-model-title title="llama3.1" class="flex flex-col">
+          <h2><div class="flex"><span class="truncate">llama3.1</span></div></h2>
+          <p>Meta's Llama 3.1 family.</p>
+        </div>
+        <div>
+          <span x-test-capability>tools</span>
+          <span x-test-size>8b</span>
+          <span x-test-size>70b</span>
+          <span x-test-size>405b</span>
+        </div>
       </a>
     </li>
     <li>
-      <a href="/library/nomic-embed-text">
-        <h2>nomic-embed-text</h2>
-        <p>A high-performing open embedding model.</p>
-        <span x-test="size">274MB</span>
-        <span x-test="capability">embedding</span>
+      <a href="/library/nomic-embed-text" class="group w-full space-y-5">
+        <div x-test-model-title title="nomic-embed-text">
+          <h2><span>nomic-embed-text</span></h2>
+          <p>Open embedding model.</p>
+        </div>
+        <div>
+          <span x-test-capability>embedding</span>
+          <span x-test-size>137m</span>
+        </div>
+      </a>
+    </li>
+    <li>
+      <a href="/library/gemma3" class="group w-full space-y-5">
+        <div x-test-model-title title="gemma3">
+          <h2><span>gemma3</span></h2>
+          <p>Gemma 3, Google's open model.</p>
+        </div>
+        <div>
+          <span x-test-capability>vision</span>
+          <span x-test-size>270m</span>
+          <span x-test-size>1b</span>
+          <span x-test-size>4b</span>
+          <span x-test-size>12b</span>
+          <span x-test-size>27b</span>
+          <span class="bg-cyan-50 text-cyan-500">cloud</span>
+        </div>
+      </a>
+    </li>
+    <li>
+      <a href="/library/kimi-k2" class="group w-full space-y-5">
+        <div x-test-model-title title="kimi-k2">
+          <h2><span>kimi-k2</span></h2>
+          <p>Cloud-only Kimi K2.</p>
+        </div>
+        <div>
+          <span x-test-capability>tools</span>
+          <span class="bg-cyan-50 text-cyan-500">cloud</span>
+        </div>
+      </a>
+    </li>
+    <li>
+      <a href="/library/wizardlm" class="group w-full space-y-5">
+        <div x-test-model-title title="wizardlm">
+          <h2><span>wizardlm</span></h2>
+          <p>Older local model without a size badge on the index card.</p>
+        </div>
+        <div>
+        </div>
       </a>
     </li>
   </ul>
 </body></html>`;
 
 describe("parseCatalogHtml", () => {
-  it("extracts entries from a library page", () => {
+  it("extracts locally-pullable entries from a library page", () => {
     const entries = parseCatalogHtml(SAMPLE_LIBRARY_HTML);
-    expect(entries).toHaveLength(2);
-    expect(entries[0]).toMatchObject({
-      name: "llama3.1",
-      description: "Meta's Llama 3.1 family.",
-      type: "chat",
-    });
-    expect(entries[0].sizes).toEqual(["4.7GB", "40GB"]);
-    expect(entries[1]).toMatchObject({ name: "nomic-embed-text", type: "embedding" });
+    const names = entries.map((e) => e.name);
+    expect(names).toEqual(["llama3.1", "nomic-embed-text", "gemma3", "wizardlm"]);
+
+    const llama = entries.find((e) => e.name === "llama3.1")!;
+    expect(llama.description).toBe("Meta's Llama 3.1 family.");
+    expect(llama.type).toBe("chat");
+    expect(llama.sizes).toEqual(["8b", "70b", "405b"]);
+    expect(llama.capabilities).toEqual(["tools"]);
+  });
+
+  it("classifies the embedding capability as type=embedding", () => {
+    const entries = parseCatalogHtml(SAMPLE_LIBRARY_HTML);
+    const nomic = entries.find((e) => e.name === "nomic-embed-text")!;
+    expect(nomic.type).toBe("embedding");
+    expect(nomic.capabilities).toContain("embedding");
+    expect(nomic.sizes).toEqual(["137m"]);
+  });
+
+  it("keeps models that have BOTH local sizes and a cloud marker", () => {
+    const entries = parseCatalogHtml(SAMPLE_LIBRARY_HTML);
+    const gemma = entries.find((e) => e.name === "gemma3")!;
+    expect(gemma).toBeDefined();
+    expect(gemma.sizes).toEqual(["270m", "1b", "4b", "12b", "27b"]);
+    // The cloud span must NOT leak into sizes or capabilities.
+    expect(gemma.sizes).not.toContain("cloud");
+    expect(gemma.capabilities).not.toContain("cloud");
+  });
+
+  it("drops cloud-only models (cloud marker + no x-test-size)", () => {
+    const entries = parseCatalogHtml(SAMPLE_LIBRARY_HTML);
+    expect(entries.map((e) => e.name)).not.toContain("kimi-k2");
+  });
+
+  it("keeps local-only models that happen to have no size badge", () => {
+    // Embedding models like nomic-embed-text and older single-size models
+    // (wizardlm, openhermes, goliath, …) render no x-test-size span on the
+    // library index. They must NOT be dropped — they're locally pullable.
+    const entries = parseCatalogHtml(SAMPLE_LIBRARY_HTML);
+    const wizard = entries.find((e) => e.name === "wizardlm");
+    expect(wizard).toBeDefined();
+    expect(wizard!.sizes).toEqual([]);
   });
 
   it("returns [] on malformed HTML", () => {
@@ -44,7 +136,7 @@ describe("parseCatalogHtml", () => {
     expect(parseCatalogHtml("<p>no models here</p>")).toEqual([]);
   });
 
-  it("skips entries with no name", () => {
+  it("skips entries with no /library/{slug} href", () => {
     expect(parseCatalogHtml(`<a href="/library/"><h2></h2></a>`)).toEqual([]);
   });
 
