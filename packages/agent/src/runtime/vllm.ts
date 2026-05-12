@@ -8,6 +8,14 @@ const VLLM_REPO_PATH =
   process.env.VLLM_REPO_PATH || `${SHARED_STORAGE}/src/github/spark-vllm-docker`;
 const SSH_USER = process.env.SSH_USER || process.env.USER || "daniel";
 
+// Site-specific CX-7 fabric override. Our 4-node switched topology has both
+// PCIe endpoints of QSFP port 0 carrying IPs in 192.168.100.0/24 (per NVIDIA's
+// multi-sparks-through-switch playbook), which trips the subnet-collision check
+// in spark-vllm-docker's autodiscover.sh. Pass the fabric NICs explicitly via
+// upstream's --eth-if/--ib-if so autodiscovery short-circuits.
+const ETH_IF = process.env.ETH_IF || "enp1s0f0np0";
+const IB_IF = process.env.IB_IF || "rocep1s0f0";
+
 export interface VllmStatus {
   deploymentId: string;
   recipeName: string;
@@ -40,24 +48,28 @@ const running = new Map<string, VllmInstance>();
  */
 export function generateLocalModelRecipe(params: {
   jobId: string;
-  modelPath: string;      // host path (e.g., ${SHARED_STORAGE}/outputs/job123/merged)
-  container?: string;     // vLLM container name (from training recipe deploy config)
+  modelPath: string;
+  container?: string;
   port?: number;
   gpuMemoryUtilization?: number;
   maxModelLen?: number;
+  // When true, omit the `solo_only: true` marker so the dashboard's
+  // recipe selector lists this as a cluster-capable recipe. The actual
+  // launch topology is decided by the CLI flags launchRecipe builds,
+  // not by this marker — this just keeps recipe metadata honest.
+  isCluster?: boolean;
 }): string {
   const recipeName = `finetune-${params.jobId.slice(0, 12)}`;
   const recipeFile = `recipes/${recipeName}.yaml`;
   const fullPath = join(VLLM_REPO_PATH, recipeFile);
 
-  // launch-cluster.sh mounts ${SHARED_STORAGE}:/workspace, so translate host path to container path
   const containerModelPath = params.modelPath.replace(`${SHARED_STORAGE}/`, `${WORKSPACE}/`);
 
   const port = params.port ?? 8000;
   const gpuMem = params.gpuMemoryUtilization ?? 0.85;
   const maxLen = params.maxModelLen ?? 4096;
-
   const container = params.container || "vllm-node";
+  const soloLine = params.isCluster ? "" : "solo_only: true\n";
 
   const yaml = `# Auto-generated recipe for fine-tuned model
 recipe_version: "1"
@@ -65,8 +77,7 @@ name: ${recipeName}
 description: Fine-tuned model from job ${params.jobId}
 model: ${containerModelPath}
 container: ${container}
-solo_only: true
-
+${soloLine}
 defaults:
   port: ${port}
   host: 0.0.0.0
@@ -84,7 +95,7 @@ command: |
 
   mkdirSync(join(VLLM_REPO_PATH, "recipes"), { recursive: true });
   writeFileSync(fullPath, yaml, "utf-8");
-  console.log(`Generated vLLM recipe: ${fullPath}`);
+  console.log(`Generated vLLM recipe: ${fullPath} (cluster=${!!params.isCluster})`);
   return recipeFile;
 }
 
@@ -126,6 +137,8 @@ export function launchRecipe(
   if (options?.gpuMem) args.push("--gpu-mem", String(options.gpuMem));
   if (options?.maxModelLen) args.push("--max-model-len", String(options.maxModelLen));
   if (options?.tensorParallel) args.push("--tp", String(options.tensorParallel));
+  if (ETH_IF) args.push("--eth-if", ETH_IF);
+  if (IB_IF) args.push("--ib-if", IB_IF);
   if (options?.pipelineParallel) args.push("--", "-pp", String(options.pipelineParallel));
 
   // For cluster mode, ensure workers have an image identical to the head's
@@ -240,15 +253,19 @@ export function stopRecipe(deploymentId: string, clusterNodes?: string[]): boole
   const env = { ...process.env };
   if (isCluster && clusterNodes[0]) env.LOCAL_IP = clusterNodes[0];
 
+  const ifaceArgs = [ETH_IF && `--eth-if ${ETH_IF}`, IB_IF && `--ib-if ${IB_IF}`]
+    .filter(Boolean)
+    .join(" ");
+
   try {
     if (isCluster) {
       execSync(
-        `${join(VLLM_REPO_PATH, "launch-cluster.sh")} -n ${clusterNodes.join(",")} stop`,
+        `${join(VLLM_REPO_PATH, "launch-cluster.sh")} -n ${clusterNodes.join(",")} ${ifaceArgs} stop`,
         { cwd: VLLM_REPO_PATH, timeout: 60_000, stdio: "inherit", env }
       );
     } else {
       execSync(
-        `${join(VLLM_REPO_PATH, "launch-cluster.sh")} --solo stop`,
+        `${join(VLLM_REPO_PATH, "launch-cluster.sh")} --solo ${ifaceArgs} stop`,
         { cwd: VLLM_REPO_PATH, timeout: 30_000, stdio: "inherit" }
       );
     }
@@ -313,15 +330,19 @@ export function forceStopVllm(clusterNodes?: string[]): void {
   const env = { ...process.env };
   if (isCluster && clusterNodes![0]) env.LOCAL_IP = clusterNodes![0];
 
+  const ifaceArgs = [ETH_IF && `--eth-if ${ETH_IF}`, IB_IF && `--ib-if ${IB_IF}`]
+    .filter(Boolean)
+    .join(" ");
+
   try {
     if (isCluster) {
       execSync(
-        `${join(VLLM_REPO_PATH, "launch-cluster.sh")} -n ${clusterNodes!.join(",")} stop`,
+        `${join(VLLM_REPO_PATH, "launch-cluster.sh")} -n ${clusterNodes!.join(",")} ${ifaceArgs} stop`,
         { cwd: VLLM_REPO_PATH, timeout: 60_000, stdio: "pipe", env }
       );
     } else {
       execSync(
-        `${join(VLLM_REPO_PATH, "launch-cluster.sh")} --solo stop`,
+        `${join(VLLM_REPO_PATH, "launch-cluster.sh")} --solo ${ifaceArgs} stop`,
         { cwd: VLLM_REPO_PATH, timeout: 30_000, stdio: "pipe" }
       );
     }
