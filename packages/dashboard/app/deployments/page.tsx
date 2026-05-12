@@ -153,7 +153,7 @@ export default function DeploymentsPage() {
       apiFetch<Node[]>("/api/nodes"),
       apiFetch<Deployment[]>("/api/deployments"),
       apiFetch<Node[]>("/api/nodes/idle"),
-      apiFetch<{ name: string; size: string; type?: string; description: string }[]>("/api/recipes/ollama-models"),
+      apiFetch<{ tag: string; modelName: string; size: string | null; type: "chat" | "embedding"; description: string; capabilities: string[] }[]>("/api/ollama-catalog/available"),
     ])
       .then(([r, n, d, idle, om]) => {
         setRecipes(r);
@@ -161,7 +161,7 @@ export default function DeploymentsPage() {
         setDeployments(d);
         setIdleNodes(idle);
         if (idle.length > 0 && !selectedNode) setSelectedNode(idle[0].id);
-        setOllamaModels(om);
+        setOllamaModels(om.map((m) => ({ name: m.tag, size: m.size ?? "", type: m.type, description: m.description })));
       })
       .catch(console.error)
       .finally(() => setLoading(false));
@@ -270,6 +270,11 @@ export default function DeploymentsPage() {
           n.id === nodeId ? { ...n, metrics: [{ vramUsed }] } : n
         ));
       }
+    }
+    if (event.type === "ollama-catalog:updated") {
+      apiFetch<{ tag: string; modelName: string; size: string | null; type: "chat" | "embedding"; description: string; capabilities: string[] }[]>("/api/ollama-catalog/available")
+        .then((om) => setOllamaModels(om.map((m) => ({ name: m.tag, size: m.size ?? "", type: m.type, description: m.description }))))
+        .catch(console.error);
     }
   }, []);
 
@@ -631,7 +636,7 @@ export default function DeploymentsPage() {
                   <option value="">Select a model...</option>
                   {ollamaModels.map((m) => (
                     <option key={m.name} value={m.name}>
-                      {m.name} ({m.size}) [{m.type}] — {m.description}
+                      {m.name}{m.size ? ` (${m.size})` : ""} [{m.type}] — {m.description}
                     </option>
                   ))}
                 </select>
