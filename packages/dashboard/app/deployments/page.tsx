@@ -98,6 +98,7 @@ export default function DeploymentsPage() {
   const [finetuneModel, setFinetuneModel] = useState<string | null>(null);
   const [finetuneJobId, setFinetuneJobId] = useState<string | null>(null);
   const [finetuneBaseModel, setFinetuneBaseModel] = useState<string | null>(null);
+  const [finetuneDisplayName, setFinetuneDisplayName] = useState<string | null>(null);
 
   // Deploy form state
   const [runtimeMode, setRuntimeMode] = useState<"vllm" | "ollama" | "finetune">("vllm");
@@ -179,6 +180,8 @@ export default function DeploymentsPage() {
       setFinetuneBaseModel(fb);
       setRuntimeMode("finetune");
     }
+    const fn = params.get("displayName");
+    if (fn) setFinetuneDisplayName(fn);
   }, []);
 
   // SSE handler for real-time updates
@@ -290,6 +293,7 @@ export default function DeploymentsPage() {
         setRuntimeMode("vllm");
         setFinetuneModel(null);
         setFinetuneJobId(null);
+        setFinetuneDisplayName(null);
         // Clear URL params
         window.history.replaceState({}, "", "/deployments");
         setDeploying(false);
@@ -541,8 +545,15 @@ export default function DeploymentsPage() {
               <div>
                 <label className="block text-xs text-gray-400 mb-1">Fine-tuned Model</label>
                 <div className="bg-gray-800 border border-purple-700 rounded px-3 py-2 text-sm text-purple-300">
-                  {finetuneBaseModel || "Fine-tuned model"}
-                  <span className="ml-2 text-[10px] text-gray-500">{finetuneModel}</span>
+                  <div className="font-medium">
+                    {finetuneDisplayName || finetuneBaseModel || "Fine-tuned model"}
+                  </div>
+                  {finetuneDisplayName && finetuneBaseModel && (
+                    <div className="text-[10px] text-gray-500 mt-0.5">
+                      base: {finetuneBaseModel}
+                    </div>
+                  )}
+                  <div className="text-[10px] text-gray-500 mt-0.5 truncate">{finetuneModel}</div>
                 </div>
               </div>
             ) : runtimeMode === "vllm" ? (
