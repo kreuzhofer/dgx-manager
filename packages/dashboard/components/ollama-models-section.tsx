@@ -28,7 +28,7 @@ interface Row {
   capabilities: string[];
 }
 
-/** Flatten catalog entries into one row per deployable tag. */
+/** Flatten catalog entries into one row per deployable tag, alphabetised by tag. */
 function flatten(entries: CatalogEntry[]): Row[] {
   const rows: Row[] = [];
   for (const e of entries) {
@@ -40,7 +40,21 @@ function flatten(entries: CatalogEntry[]): Row[] {
       }
     }
   }
-  return rows;
+  return rows.sort((a, b) => a.tag.localeCompare(b.tag));
+}
+
+/**
+ * Token-based fuzzy match: every whitespace-separated token in `query` must
+ * appear as a substring of the haystack (tag + description + capabilities),
+ * order-independent. So "qwen emb" matches "qwen3-embedding:8b" because both
+ * "qwen" and "emb" are substrings of the row's combined text. Empty query
+ * matches everything.
+ */
+function fuzzyMatch(row: Row, query: string): boolean {
+  const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return true;
+  const haystack = `${row.tag} ${row.description} ${row.capabilities.join(" ")}`.toLowerCase();
+  return tokens.every((t) => haystack.includes(t));
 }
 
 export function OllamaModelsSection() {
@@ -53,13 +67,10 @@ export function OllamaModelsSection() {
   const [filter, setFilter] = useState("");
 
   const rows = useMemo(() => flatten(catalog), [catalog]);
-  const visibleRows = useMemo(() => {
-    if (!filter.trim()) return rows;
-    const q = filter.trim().toLowerCase();
-    return rows.filter(
-      (r) => r.tag.toLowerCase().includes(q) || r.description.toLowerCase().includes(q),
-    );
-  }, [rows, filter]);
+  const visibleRows = useMemo(
+    () => rows.filter((r) => fuzzyMatch(r, filter)),
+    [rows, filter],
+  );
 
   const load = useCallback(async () => {
     try {
