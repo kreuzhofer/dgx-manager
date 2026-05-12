@@ -327,12 +327,12 @@ function connect() {
         } catch { /* ollama not running */ }
 
         // Check tracked Ollama deployments for eviction
-        const { getActiveDeployments: getOllamaDeployments } = await import("./runtime/ollama.js");
+        const { getActiveDeployments: getOllamaDeployments, decideOllamaStateTransition } = await import("./runtime/ollama.js");
         for (const [depId, modelName] of getOllamaDeployments()) {
           const health = await checkOllamaHealth(depId);
           if (!health) continue;
-          const prev = ollamaLastState.get(depId);
-          if (!health.loaded && prev !== "evicted") {
+          const transition = decideOllamaStateTransition(health.loaded, ollamaLastState.get(depId));
+          if (transition === "evicted") {
             ollamaLastState.set(depId, "evicted");
             sendMsg("agent:deployment:status", {
               deploymentId: depId,
@@ -340,7 +340,7 @@ function connect() {
               vramActual: 0,
               error: `Model ${modelName} was unloaded from GPU memory`,
             });
-          } else if (health.loaded && (prev === "evicted" || !prev)) {
+          } else if (transition === "running") {
             ollamaLastState.set(depId, "running");
             sendMsg("agent:deployment:status", {
               deploymentId: depId,
@@ -506,6 +506,10 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
 
       // Ollama deployment
       if (runtime === "ollama" && modelName) {
+        // Reset health-check state machine so the first tick after a
+        // restart doesn't see stale "running" from the previous cycle
+        // and false-flag the in-progress load as eviction.
+        ollamaLastState.delete(deploymentId);
         sendMsg("agent:deployment:status", { deploymentId, status: "starting" });
         ollamaDeployModel(
           deploymentId,

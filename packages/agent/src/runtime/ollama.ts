@@ -234,3 +234,24 @@ export async function isOllamaRunning(): Promise<boolean> {
 export function getActiveDeployments(): Map<string, string> {
   return activeDeployments;
 }
+
+/**
+ * Decide what (if any) status transition to report from one health-check tick.
+ *
+ * `loaded` is whether the deployment's model is currently in Ollama's
+ * /api/ps response. `prev` is the last status we reported for this
+ * deployment (undefined if we haven't reported anything yet in this
+ * deploy cycle — agents clear it at the start of cmd:deploy).
+ *
+ * Returns "evicted" only on the running -> not-loaded transition,
+ * "running" on the (undefined|evicted) -> loaded transition, and null
+ * otherwise (steady state or still-starting).
+ */
+export function decideOllamaStateTransition(
+  loaded: boolean,
+  prev: string | undefined,
+): "evicted" | "running" | null {
+  if (!loaded && prev === "running") return "evicted";
+  if (loaded && (prev === undefined || prev === "evicted")) return "running";
+  return null;
+}
