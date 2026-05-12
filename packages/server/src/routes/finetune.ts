@@ -741,6 +741,11 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
       modelPath,
       baseModel: job.baseModel,
       deployContainer: deployConfig?.container || "vllm-node",
+      // Friendly Model.name (user-set displayName or the stable
+      // finetune-<id> fallback). The agent feeds this to vLLM as
+      // --served-model-name so /v1/models reports the readable name
+      // instead of the on-disk path.
+      modelName: model.name,
       // clusterNodes / clusterNodeFastIps are undefined for solo deploys and
       // set to arrays for multi-node — computed above from Task 3's nodeIds[].
       clusterNodes: clusterNodeIps,

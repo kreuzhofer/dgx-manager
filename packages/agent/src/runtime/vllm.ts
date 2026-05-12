@@ -66,6 +66,12 @@ export function generateLocalModelRecipe(params: {
   // "cluster launches that only used the head GPU".
   tensorParallel?: number;
   pipelineParallel?: number;
+  // Friendly name to report via vLLM's OpenAI API (`/v1/models`) and accept
+  // as the `model` field in chat/completion requests. Without this, vLLM
+  // defaults to echoing the model load path (e.g.
+  // `/workspace/outputs/<id>/merged`), which is unreadable for downstream
+  // tooling. Falls back to the recipe name (`finetune-<id-12>`) if absent.
+  servedModelName?: string;
 }): string {
   const recipeName = `finetune-${params.jobId.slice(0, 12)}`;
   const recipeFile = `recipes/${recipeName}.yaml`;
@@ -79,6 +85,7 @@ export function generateLocalModelRecipe(params: {
   const container = params.container || "vllm-node";
   const tp = params.tensorParallel ?? 1;
   const pp = params.pipelineParallel ?? 1;
+  const servedName = params.servedModelName || recipeName;
   const soloLine = params.isCluster ? "" : "solo_only: true\n";
 
   // For cluster, add Ray placement env + the executor-backend flag.
@@ -105,6 +112,7 @@ defaults:
   max_model_len: ${maxLen}
   tensor_parallel: ${tp}
   pipeline_parallel: ${pp}
+  served_model_name: ${servedName}
 
 ${envBlock}command: |
   vllm serve ${containerModelPath} \\
@@ -114,6 +122,7 @@ ${envBlock}command: |
     --gpu-memory-utilization {gpu_memory_utilization} \\
     -tp {tensor_parallel} \\
     -pp {pipeline_parallel} \\
+    --served-model-name {served_model_name} \\
 ${rayBackendFlag}    --dtype auto
 `;
 
