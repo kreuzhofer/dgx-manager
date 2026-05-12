@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { applyFinetuneSubstitutions, MERGED_PATH_PLACEHOLDER } from "./inference-template.js";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+import { findInferenceTemplate } from "./inference-template.js";
 
 describe("applyFinetuneSubstitutions", () => {
   it("replaces {{MERGED_MODEL_PATH}} placeholder and injects served_model_name", () => {
@@ -85,5 +89,37 @@ command: |
     });
     expect(out).toContain("served_model_name: real-name");
     expect(out).toContain("--served-model-name foo"); // original kept
+  });
+});
+
+describe("findInferenceTemplate", () => {
+  it("returns the path when inference.yaml exists in the recipe dir", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "inftpl-"));
+    try {
+      const recipeDir = join(tmp, "recipes", "qwen3.6-27b-base-lora-attn-mlp");
+      mkdirSync(recipeDir, { recursive: true });
+      const target = join(recipeDir, "inference.yaml");
+      writeFileSync(target, "recipe_version: \"1\"\nname: test\n");
+
+      expect(findInferenceTemplate(recipeDir)).toBe(target);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null when the recipe dir has no inference.yaml", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "inftpl-"));
+    try {
+      const recipeDir = join(tmp, "recipes", "qwen3.6-27b-base-lora-attn-only");
+      mkdirSync(recipeDir, { recursive: true });
+      // Note: no inference.yaml written
+      expect(findInferenceTemplate(recipeDir)).toBeNull();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null when the recipe dir does not exist at all", () => {
+    expect(findInferenceTemplate("/nonexistent/path/never/created")).toBeNull();
   });
 });

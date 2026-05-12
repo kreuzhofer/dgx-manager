@@ -45,3 +45,17 @@ export function applyFinetuneSubstitutions(
 
   return out;
 }
+
+import { existsSync } from "fs";
+import { join } from "path";
+
+/**
+ * Return the absolute path to `<recipeDir>/inference.yaml` if it exists,
+ * else null. Used by the deploy path to decide whether to inherit a
+ * hand-authored serve config (Task 5 caller) or fall through to the
+ * minimal auto-gen.
+ */
+export function findInferenceTemplate(recipeDir: string): string | null {
+  const candidate = join(recipeDir, "inference.yaml");
+  return existsSync(candidate) ? candidate : null;
+}
