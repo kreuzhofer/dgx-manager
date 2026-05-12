@@ -521,7 +521,15 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             }
             // "running" is sent below with vramActual from the return value
           },
-          modelType
+          modelType,
+          (p) =>
+            sendMsg("agent:ollama:pull-progress", {
+              deploymentId,
+              status: p.status,
+              percent: p.percent,
+              current: p.current,
+              total: p.total,
+            }),
         ).then((result) => {
           sendMsg("agent:deployment:status", {
             deploymentId,

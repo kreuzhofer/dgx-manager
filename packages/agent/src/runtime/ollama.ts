@@ -21,6 +21,17 @@ export interface OllamaStatus {
   vramUsed: number | null;
 }
 
+export interface OllamaPullProgress {
+  /** Raw status string from Ollama (e.g. "pulling manifest", "downloading"). */
+  status: string;
+  /** 0-100 if Ollama reported byte counts, else null. */
+  percent: number | null;
+  /** Bytes pulled so far if reported. */
+  current: number | null;
+  /** Total bytes for the current layer if reported. */
+  total: number | null;
+}
+
 // Track active Ollama deployments and their abort controllers
 const activeDeployments = new Map<string, string>(); // deploymentId → modelName
 const activeAbortControllers = new Map<string, AbortController>(); // deploymentId → AbortController
@@ -55,7 +66,8 @@ async function ollamaFetch(path: string, options?: {
 async function pullModel(
   modelName: string,
   onLog?: (line: string) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onProgress?: (p: OllamaPullProgress) => void,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(new Error("Aborted")); return; }
@@ -76,10 +88,17 @@ async function pullModel(
           try {
             const msg = JSON.parse(line);
             if (msg.status) {
-              const pct = msg.completed && msg.total
-                ? ` ${Math.round(msg.completed / msg.total * 100)}%`
-                : "";
+              const percent = msg.completed && msg.total
+                ? Math.round(msg.completed / msg.total * 100)
+                : null;
+              const pct = percent !== null ? ` ${percent}%` : "";
               onLog?.(`${msg.status}${pct}\n`);
+              onProgress?.({
+                status: String(msg.status),
+                percent,
+                current: typeof msg.completed === "number" ? msg.completed : null,
+                total: typeof msg.total === "number" ? msg.total : null,
+              });
             }
             if (msg.error) {
               reject(new Error(msg.error));
@@ -108,7 +127,8 @@ export async function deployModel(
   modelName: string,
   onLog?: (line: string) => void,
   onStatus?: (status: string, error?: string) => void,
-  modelType?: "chat" | "embedding"
+  modelType?: "chat" | "embedding",
+  onProgress?: (p: OllamaPullProgress) => void,
 ): Promise<{ port: number; vramActual: number }> {
   activeDeployments.set(deploymentId, modelName);
   const abortController = new AbortController();
@@ -136,7 +156,7 @@ export async function deployModel(
     // Pull model (streams progress, skips if cached)
     onStatus?.("downloading");
     onLog?.(`Pulling ${modelName}...\n`);
-    await pullModel(modelName, onLog, abortController.signal);
+    await pullModel(modelName, onLog, abortController.signal, onProgress);
     if (abortController.signal.aborted) return { port: OLLAMA_PORT, vramActual: 0 };
     onLog?.(`Pull complete.\n`);
 
