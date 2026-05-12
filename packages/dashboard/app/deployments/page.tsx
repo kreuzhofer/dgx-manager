@@ -281,13 +281,27 @@ export default function DeploymentsPage() {
       let body: Record<string, unknown>;
 
       if (runtimeMode === "finetune" && finetuneJobId) {
-        if (!selectedNode) return;
         const config: Record<string, unknown> = { port: parseInt(port) || 8000 };
         if (gpuMem) config.gpuMem = parseFloat(gpuMem);
         if (maxModelLen) config.maxModelLen = parseInt(maxModelLen);
+        if (tensorParallel) config.tensorParallel = parseInt(tensorParallel);
+        if (pipelineParallel) config.pipelineParallel = parseInt(pipelineParallel);
+
+        // Cluster vs solo: when TP * PP > 1, send the explicit node list
+        // selectedClusterNodes already holds (the cluster picker is reused).
+        const tp = parseInt(tensorParallel) || 1;
+        const pp = parseInt(pipelineParallel) || 1;
+        const needsClusterFt = tp * pp > 1;
+        if (needsClusterFt && selectedClusterNodes.size !== tp * pp) return;
+        if (!needsClusterFt && !selectedNode) return;
+
+        const ftBody: Record<string, unknown> = { config };
+        if (needsClusterFt) ftBody.nodeIds = Array.from(selectedClusterNodes);
+        else ftBody.nodeId = selectedNode;
+
         const result = await apiFetch<Deployment>(`/api/finetune/${finetuneJobId}/deploy`, {
           method: "POST",
-          body: JSON.stringify({ nodeId: selectedNode, config }),
+          body: JSON.stringify(ftBody),
         });
         setDeployments((prev) => prev.some((d) => d.id === result.id) ? prev : [result, ...prev]);
         setRuntimeMode("vllm");
@@ -602,7 +616,7 @@ export default function DeploymentsPage() {
             <label className="block text-xs text-gray-400 mb-1">
               {runtimeMode === "ollama" ? "Node" : needsCluster ? `Target Nodes (${requiredNodes} needed)` : "Node"}
             </label>
-            {runtimeMode === "vllm" && needsCluster ? (
+            {(runtimeMode === "vllm" || runtimeMode === "finetune") && needsCluster ? (
               <div className="bg-gray-800 border border-gray-700 rounded p-2">
                 {clusterCandidates.length < requiredNodes ? (
                   <span className="text-red-400 text-sm px-1">
@@ -759,10 +773,77 @@ export default function DeploymentsPage() {
           </>
         )}
 
+        {/* Deployment options for finetune mode (port, TP, PP, maxModelLen, gpuMem) */}
+        {runtimeMode === "finetune" && (
+          <div className="mt-3 p-3 bg-gray-800/50 rounded border border-gray-700/50">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+              <div>
+                <label className="block text-[10px] text-gray-500 mb-0.5">Port</label>
+                <input
+                  type="number"
+                  value={port}
+                  onChange={(e) => setPort(e.target.value)}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-green-500"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] text-gray-500 mb-0.5">Tensor Parallel</label>
+                <input
+                  type="number"
+                  value={tensorParallel}
+                  onChange={(e) => setTensorParallel(e.target.value)}
+                  placeholder="1"
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-green-500"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] text-gray-500 mb-0.5">Pipeline Parallel</label>
+                <input
+                  type="number"
+                  value={pipelineParallel}
+                  onChange={(e) => setPipelineParallel(e.target.value)}
+                  placeholder="1"
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-green-500"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] text-gray-500 mb-0.5">Max Model Length</label>
+                <input
+                  type="number"
+                  value={maxModelLen}
+                  onChange={(e) => setMaxModelLen(e.target.value)}
+                  placeholder=""
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-green-500"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] text-gray-500 mb-0.5">GPU Memory Util</label>
+                <input
+                  type="number"
+                  step="any"
+                  min="0"
+                  value={gpuMem}
+                  onChange={(e) => setGpuMem(e.target.value)}
+                  placeholder="0.85"
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-green-500"
+                />
+                <p className="text-[10px] text-gray-500 mt-0.5">fraction 0–1; leave blank for default</p>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="mt-4 flex justify-end">
           <button
             type="submit"
-            disabled={deploying || (runtimeMode === "finetune" ? !selectedNode : runtimeMode === "vllm" ? (!selectedRecipe || !canDeploy) : (!selectedOllamaModel || !selectedNode))}
+            disabled={deploying || (runtimeMode === "finetune"
+              ? (() => {
+                  const tp = parseInt(tensorParallel) || 1;
+                  const pp = parseInt(pipelineParallel) || 1;
+                  const needsClusterFt = tp * pp > 1;
+                  return needsClusterFt ? selectedClusterNodes.size !== tp * pp : !selectedNode;
+                })()
+              : runtimeMode === "vllm" ? (!selectedRecipe || !canDeploy) : (!selectedOllamaModel || !selectedNode))}
             className="bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-5 py-2 rounded text-sm font-medium transition-colors"
           >
             {deploying ? "Deploying..." : "Deploy"}
