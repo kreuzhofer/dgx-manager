@@ -36,6 +36,7 @@ interface Dataset {
 interface FineTuneJob {
   id: string;
   nodeId: string;
+  displayName: string | null;
   recipeFile: string | null;
   baseModel: string;
   method: string;
