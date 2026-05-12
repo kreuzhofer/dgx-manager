@@ -5,6 +5,8 @@ import { SHARED_STORAGE } from "../env.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import type { AgentHub } from "../ws/agent-hub.js";
 import { checkVllmVramAdmission, vramShortfallMessage } from "../admission/vram.js";
+import { readCatalog as readOllamaCatalog } from "../ollama/catalog-store.js";
+import { ollamaVramEstimateMB } from "../ollama/vram-estimate.js";
 
 export const deploymentsRouter = Router();
 
@@ -106,10 +108,30 @@ deploymentsRouter.post("/", async (req, res) => {
     const vramTotal = node?.vramTotal || 128000;
     if (isOllama) {
       const agentHub: AgentHub = req.app.get("agentHub");
-      const ollamaModel = agentHub.getOllamaModels().find((m) => m.name === modelName);
-      if (ollamaModel?.size) {
-        const sizeMatch = ollamaModel.size.match(/([\d.]+)\s*GB/i);
-        vramEstimate = sizeMatch ? Math.round(parseFloat(sizeMatch[1]) * 1024 * 1.1) : 0; // +10% overhead
+      // Resolve the parameter size from the catalog: modelName is the pull
+      // tag like "llama3.1:8b". Look up the bare model name, then pick the
+      // requested size out of its `sizes` list (or the bare name for sizeless
+      // entries like nomic-embed-text).
+      const catalog = await readOllamaCatalog();
+      const [bareName, requestedSize] = modelName.includes(":")
+        ? modelName.split(":", 2)
+        : [modelName, null];
+      const catalogEntry = catalog.entries.find((m) => m.name === bareName);
+      const catalogSize =
+        catalogEntry && requestedSize && catalogEntry.sizes.includes(requestedSize)
+          ? requestedSize
+          : catalogEntry?.sizes[0] ?? null;
+      const estimate = ollamaVramEstimateMB(catalogSize);
+      if (estimate !== null) {
+        vramEstimate = Math.round(estimate * 1.1); // +10% overhead (KV cache, runtime)
+      } else {
+        // Fallback: legacy agent-shipped byte size, parsed as before. Used
+        // until the operator runs the first catalog refresh.
+        const legacy = agentHub.getOllamaModels().find((m) => m.name === modelName);
+        if (legacy?.size) {
+          const sizeMatch = legacy.size.match(/([\d.]+)\s*GB/i);
+          vramEstimate = sizeMatch ? Math.round(parseFloat(sizeMatch[1]) * 1024 * 1.1) : 0;
+        }
       }
     } else {
       const agentHub: AgentHub = req.app.get("agentHub");
