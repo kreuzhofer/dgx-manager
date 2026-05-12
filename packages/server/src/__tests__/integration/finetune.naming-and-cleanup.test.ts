@@ -180,4 +180,115 @@ describe("finetune displayName + Model cleanup", () => {
       .send({ displayName: "x" });
     expect(res.status).toBe(404);
   });
+
+  it("POST /:id/deploy upserts a Model row whose finetuneJobId is set", async () => {
+    await wipeAll();
+    await seedNode();
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    const create = await request(app)
+      .post("/api/finetune")
+      .send({ nodeId: "node-1", recipeFile: RECIPE.file, dataset: "/tmp/fake.jsonl" });
+    // Simulate merge having completed so the deploy route accepts it.
+    await prisma.fineTuneJob.update({
+      where: { id: create.body.id },
+      data: { mergeStatus: "completed", mergedPath: "/tmp/fake-merged" },
+    });
+
+    const dep = await request(app)
+      .post(`/api/finetune/${create.body.id}/deploy`)
+      .send({ config: {} });
+    expect(dep.status).toBe(201);
+
+    // Find the upserted Model and confirm the FK is set
+    const model = await prisma.model.findFirst({
+      where: { finetuneJobId: create.body.id },
+    });
+    expect(model).not.toBeNull();
+    expect(model?.runtime).toBe("vllm");
+  });
+
+  it("POST /:id/deploy uses displayName as Model.name when available", async () => {
+    await wipeAll();
+    await seedNode();
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    const create = await request(app)
+      .post("/api/finetune")
+      .send({
+        nodeId: "node-1", recipeFile: RECIPE.file, dataset: "/tmp/fake.jsonl",
+        displayName: "build123d-v1",
+      });
+    await prisma.fineTuneJob.update({
+      where: { id: create.body.id },
+      data: { mergeStatus: "completed", mergedPath: "/tmp/fake-merged" },
+    });
+
+    await request(app)
+      .post(`/api/finetune/${create.body.id}/deploy`)
+      .send({ config: {} });
+
+    const model = await prisma.model.findFirst({
+      where: { finetuneJobId: create.body.id },
+    });
+    expect(model?.name).toBe("build123d-v1");
+  });
+
+  it("POST /:id/deploy falls back to finetune-<prefix> when displayName is null", async () => {
+    await wipeAll();
+    await seedNode();
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    const create = await request(app)
+      .post("/api/finetune")
+      .send({ nodeId: "node-1", recipeFile: RECIPE.file, dataset: "/tmp/fake.jsonl" });
+    await prisma.fineTuneJob.update({
+      where: { id: create.body.id },
+      data: { mergeStatus: "completed", mergedPath: "/tmp/fake-merged" },
+    });
+
+    await request(app)
+      .post(`/api/finetune/${create.body.id}/deploy`)
+      .send({ config: {} });
+
+    const model = await prisma.model.findFirst({
+      where: { finetuneJobId: create.body.id },
+    });
+    expect(model?.name).toBe(`finetune-${create.body.id.slice(0, 8)}`);
+  });
+
+  it("POST /:id/deploy returns 409 when another Model has the same name", async () => {
+    await wipeAll();
+    await seedNode();
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    // Pre-seed a Model with the name the new deploy will want.
+    await prisma.model.create({
+      data: { name: "collision-name", runtime: "vllm" },
+    });
+
+    // Create a job that wants the same name.
+    const create = await request(app)
+      .post("/api/finetune")
+      .send({
+        nodeId: "node-1", recipeFile: RECIPE.file, dataset: "/tmp/fake.jsonl",
+        displayName: "collision-name",
+      });
+    await prisma.fineTuneJob.update({
+      where: { id: create.body.id },
+      data: { mergeStatus: "completed", mergedPath: "/tmp/fake-merged" },
+    });
+
+    const dep = await request(app)
+      .post(`/api/finetune/${create.body.id}/deploy`)
+      .send({ config: {} });
+
+    expect(dep.status).toBe(409);
+    expect(dep.body.error).toMatch(/already exists/i);
+    expect(dep.body.error).toMatch(/collision-name/);
+  });
 });

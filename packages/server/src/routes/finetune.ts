@@ -380,11 +380,33 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
   }
 
   // Create a deployment record
-  const model = await prisma.model.upsert({
-    where: { name: `finetune-${job.id.slice(0, 8)}` },
-    create: { name: `finetune-${job.id.slice(0, 8)}`, runtime: "vllm" },
-    update: {},
-  });
+  // Deployable Model name: prefer the user-set displayName, fall back to a
+  // stable id-derived label. The finetuneJobId FK is what makes the row
+  // get cleaned up automatically when the job is deleted (onDelete: Cascade
+  // in schema.prisma). displayName is pre-normalized to null-or-trimmed by
+  // POST/PATCH, so we don't trim again here.
+  const stableName = `finetune-${job.id.slice(0, 8)}`;
+  const modelName = job.displayName || stableName;
+
+  let model;
+  try {
+    model = await prisma.model.upsert({
+      where: { finetuneJobId: job.id },
+      create: { name: modelName, runtime: "vllm", finetuneJobId: job.id },
+      update: { name: modelName },
+    });
+  } catch (e: unknown) {
+    // P2002 = Prisma unique constraint violation. Only Model.name is unique
+    // among the fields we set here, so this fires when another Model row
+    // (different job or hand-created) already has this name. Surface as
+    // 409 so the user can rename the job and try again.
+    if (typeof e === "object" && e !== null && "code" in e && (e as { code: unknown }).code === "P2002") {
+      return res.status(409).json({
+        error: `A model named "${modelName}" already exists. Rename this fine-tune (PATCH /api/finetune/${job.id}) and try again.`,
+      });
+    }
+    throw e;
+  }
 
   const deployment = await prisma.deployment.create({
     data: {
