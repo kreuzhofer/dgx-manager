@@ -72,10 +72,11 @@ function makeApp(hub: unknown) {
 
 async function wipeAll() {
   // FK-safe deletion order: leaf tables first, then parents.
-  // trainingMetric → fineTuneClusterNode → deployment → model →
+  // trainingMetric → fineTuneClusterNode → clusterNode → deployment → model →
   // fineTuneJob → metricSnapshot → node
   await prisma.trainingMetric.deleteMany({});
   await prisma.fineTuneClusterNode.deleteMany({});
+  await prisma.clusterNode.deleteMany({});
   await prisma.deployment.deleteMany({});
   await prisma.model.deleteMany({});
   await prisma.fineTuneJob.deleteMany({});
@@ -90,6 +91,20 @@ async function seedNode() {
       status: "online", vramTotal: 122_502,
     },
   });
+}
+
+async function seedFourNodes() {
+  return Promise.all(
+    [1, 2, 3, 4].map((i) =>
+      prisma.node.create({
+        data: {
+          id: `node-${i}`, name: `dgx-spark-0${i}`,
+          ipAddress: `192.168.44.${35 + i}`, status: "online",
+          vramTotal: 122_502,
+        },
+      }),
+    ),
+  );
 }
 
 describe("finetune displayName + Model cleanup", () => {
@@ -579,5 +594,88 @@ describe("finetune displayName + Model cleanup", () => {
 
     // C: still there
     expect(await prisma.model.count({ where: { name: "finetune-feedface" } })).toBe(1);
+  });
+
+  it("POST /:id/deploy accepts nodeIds[] and creates ClusterNode rows", async () => {
+    await wipeAll();
+    await seedFourNodes();
+    const { hub, sentMessages } = makeStubHub();
+    const app = makeApp(hub);
+
+    const create = await request(app)
+      .post("/api/finetune")
+      .send({ nodeId: "node-1", recipeFile: RECIPE.file, dataset: "/tmp/fake.jsonl" });
+    await prisma.fineTuneJob.update({
+      where: { id: create.body.id },
+      data: { mergeStatus: "completed", mergedPath: "/tmp/fake-merged" },
+    });
+
+    const dep = await request(app)
+      .post(`/api/finetune/${create.body.id}/deploy`)
+      .send({
+        nodeIds: ["node-1", "node-2", "node-3", "node-4"],
+        config: { tensorParallel: 4 },
+      });
+    expect(dep.status).toBe(201);
+    expect(dep.body.clusterMode).toBe(true);
+
+    const cluster = await prisma.clusterNode.findMany({
+      where: { deploymentId: dep.body.id },
+      orderBy: { role: "asc" },
+    });
+    expect(cluster).toHaveLength(4);
+    expect(cluster.find((c) => c.role === "head")?.nodeId).toBe("node-1");
+    expect(cluster.filter((c) => c.role === "worker").map((c) => c.nodeId).sort())
+      .toEqual(["node-2", "node-3", "node-4"]);
+
+    // Agent message went to head and included cluster info.
+    const startMsg = sentMessages.find((m) =>
+      (m.message as { type?: string }).type === "cmd:finetune:deploy"
+    );
+    expect(startMsg?.nodeId).toBe("node-1");
+    const payload = (startMsg!.message as { payload: { clusterNodes?: string[]; config: Record<string, unknown> } }).payload;
+    expect(payload.clusterNodes).toEqual([
+      "192.168.44.36", "192.168.44.37", "192.168.44.38", "192.168.44.39",
+    ]);
+    expect(payload.config.tensorParallel).toBe(4);
+  });
+
+  it("POST /:id/deploy returns 409 when a cluster node lacks VRAM", async () => {
+    await wipeAll();
+    await seedFourNodes();
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    // Saturate node-2 via a MetricSnapshot reporting 110 GB in use, leaving
+    // < 0.85 * 122 GB free, which the admission helper will reject.
+    // (The admission check reads latestMetric.vramUsed, not vramActual.)
+    await prisma.metricSnapshot.create({
+      data: {
+        nodeId: "node-2",
+        gpuUtil: 95,
+        vramUsed: 110_000,
+        tps: 0,
+      },
+    });
+
+    const create = await request(app)
+      .post("/api/finetune")
+      .send({ nodeId: "node-1", recipeFile: RECIPE.file, dataset: "/tmp/fake.jsonl" });
+    await prisma.fineTuneJob.update({
+      where: { id: create.body.id },
+      data: { mergeStatus: "completed", mergedPath: "/tmp/fake-merged" },
+    });
+
+    const dep = await request(app)
+      .post(`/api/finetune/${create.body.id}/deploy`)
+      .send({
+        nodeIds: ["node-1", "node-2", "node-3", "node-4"],
+        config: { tensorParallel: 4, gpuMem: 0.85 },
+      });
+    expect(dep.status).toBe(409);
+    expect(dep.body.error).toMatch(/Not enough VRAM/i);
+    expect(dep.body.shortfalls).toBeDefined();
+    expect(dep.body.shortfalls.some((s: { nodeName: string }) => s.nodeName === "dgx-spark-02"))
+      .toBe(true);
   });
 });
