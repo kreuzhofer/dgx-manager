@@ -524,8 +524,12 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
   });
   if (!job) return res.status(404).json({ error: "Job not found" });
 
-  const { nodeId, config } = req.body;
-  const targetNodeId = nodeId || job.nodeId;
+  const { nodeId, nodeIds, config } = req.body;
+  const isCluster = Array.isArray(nodeIds) && nodeIds.length > 1;
+  const headNodeId = isCluster ? nodeIds[0] : (nodeId || job.nodeId);
+  if (!headNodeId) {
+    return res.status(400).json({ error: "nodeId or nodeIds required" });
+  }
 
   // Determine model path — use merged if available, otherwise adapter
   const modelPath = job.mergedPath || (job.outputDir ? `${job.outputDir}/merged` : null);
@@ -564,12 +568,35 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
 
   const deployment = await prisma.deployment.create({
     data: {
-      nodeId: targetNodeId,
+      nodeId: headNodeId,
       modelId: model.id,
       status: "pending",
+      clusterMode: isCluster,
       config: JSON.stringify({ ...config, localModelPath: modelPath }),
     },
   });
+
+  // For multi-node deploys, persist cluster membership the same way normal
+  // deploys do — one ClusterNode row per participant, head first. The agent
+  // gets the node IP list separately (see clusterNodeIps/Fast below).
+  let clusterNodeIps: string[] | undefined;
+  let clusterNodeFastIps: (string | null)[] | undefined;
+  if (isCluster) {
+    const nodes = await prisma.node.findMany({ where: { id: { in: nodeIds } } });
+    const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+    for (let i = 0; i < nodeIds.length; i++) {
+      await prisma.clusterNode.create({
+        data: {
+          deploymentId: deployment.id,
+          nodeId: nodeIds[i],
+          role: i === 0 ? "head" : "worker",
+          status: "pending",
+        },
+      });
+    }
+    clusterNodeIps = nodeIds.map((id: string) => nodeMap.get(id)?.ipAddress).filter((ip): ip is string => Boolean(ip));
+    clusterNodeFastIps = nodeIds.map((id: string) => nodeMap.get(id)?.fastIpAddress ?? null);
+  }
 
   await prisma.fineTuneJob.update({
     where: { id: job.id },
@@ -583,7 +610,7 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
     : undefined;
   const deployConfig = trainingRecipe?.deploy;
 
-  agentHub.sendToAgent(targetNodeId, {
+  agentHub.sendToAgent(headNodeId, {
     type: "cmd:finetune:deploy",
     payload: {
       jobId: job.id,
