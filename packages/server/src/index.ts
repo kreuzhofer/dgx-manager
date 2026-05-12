@@ -13,6 +13,7 @@ import { recipesRouter } from "./routes/recipes.js";
 import { trainingRecipesRouter } from "./routes/training-recipes.js";
 import { tokensRouter } from "./routes/tokens.js";
 import { settingsRouter } from "./routes/settings.js";
+import { ollamaCatalogRouter } from "./routes/ollama-catalog.js";
 import { agentBundleRouter } from "./routes/agent-bundle.js";
 import { datasetsRouter } from "./routes/datasets.js";
 import { sseHandler } from "./sse.js";
@@ -52,6 +53,7 @@ app.use("/api/recipes", recipesRouter);
 app.use("/api/training-recipes", trainingRecipesRouter);
 app.use("/api/tokens", tokensRouter);
 app.use("/api/settings", settingsRouter);
+app.use("/api/ollama-catalog", ollamaCatalogRouter);
 app.use("/api/agent", agentBundleRouter);
 app.use("/api/datasets", datasetsRouter);
 
