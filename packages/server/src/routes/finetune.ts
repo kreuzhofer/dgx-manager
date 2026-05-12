@@ -4,6 +4,7 @@ import { prisma } from "../prisma.js";
 import { SHARED_STORAGE } from "../env.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import type { AgentHub } from "../ws/agent-hub.js";
+import { checkVllmVramAdmission, vramShortfallMessage } from "../admission/vram.js";
 
 export const finetuneRouter = Router();
 
@@ -537,6 +538,31 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
     return res.status(400).json({ error: "Model must be merged before deployment. Call POST /merge first." });
   }
 
+  // Look up the training recipe's deploy config for container/defaults
+  const agentHub: AgentHub = req.app.get("agentHub");
+  const trainingRecipe = job.recipeFile
+    ? agentHub.getTrainingRecipes().find((r) => r.file === job.recipeFile)
+    : undefined;
+  const deployConfig = trainingRecipe?.deploy;
+
+  // Pre-flight VRAM admission, same as normal vLLM deploys. The gpuMem
+  // ceiling either comes from the user's launch override or the training
+  // recipe's deploy.gpu_memory_utilization default (set when the recipe
+  // was authored). 0.85 fallback matches the normal-deploy default.
+  const gpuMemForAdmission =
+    (config?.gpuMem as number) ||
+    (deployConfig?.gpu_memory_utilization as number) ||
+    0.85;
+  const admissionNodeIds = isCluster ? (nodeIds as string[]) : [headNodeId];
+  const shortfalls = await checkVllmVramAdmission(admissionNodeIds, gpuMemForAdmission);
+  if (shortfalls.length > 0) {
+    return res.status(409).json({
+      error: `Not enough VRAM on ${shortfalls.length} of ${admissionNodeIds.length} node(s): ${vramShortfallMessage(shortfalls)}`,
+      shortfalls,
+      gpuMemoryUtilization: gpuMemForAdmission,
+    });
+  }
+
   // Create a deployment record
   // Deployable Model name: prefer the user-set displayName, fall back to a
   // stable id-derived label. The finetuneJobId FK is what makes the row
@@ -602,13 +628,6 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
     where: { id: job.id },
     data: { deploymentId: deployment.id },
   });
-
-  // Look up the training recipe's deploy config for container/defaults
-  const agentHub: AgentHub = req.app.get("agentHub");
-  const trainingRecipe = job.recipeFile
-    ? agentHub.getTrainingRecipes().find((r) => r.file === job.recipeFile)
-    : undefined;
-  const deployConfig = trainingRecipe?.deploy;
 
   agentHub.sendToAgent(headNodeId, {
     type: "cmd:finetune:deploy",

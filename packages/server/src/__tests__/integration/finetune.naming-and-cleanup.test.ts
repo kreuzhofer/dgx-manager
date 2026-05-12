@@ -5,7 +5,7 @@
  * Follows the same per-suite SQLite + supertest + stub-hub pattern as
  * finetune.cluster-persistence.test.ts.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { execSync } from "child_process";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
@@ -31,6 +31,12 @@ beforeAll(async () => {
     },
     stdio: "pipe",
   });
+  // singleFork test pool reuses one process across files; prisma.ts caches its
+  // client on globalThis. Clear both globalThis and vitest's module cache so
+  // this suite gets a fresh PrismaClient bound to its own per-suite DB, not
+  // the previous suite's tmp DB (which its afterAll already rm -rf'd).
+  delete (globalThis as { prisma?: unknown }).prisma;
+  vi.resetModules();
   ({ prisma } = await import("../../prisma.js"));
   ({ finetuneRouter } = await import("../../routes/finetune.js"));
 });
@@ -85,7 +91,10 @@ async function wipeAll() {
 
 async function seedNode() {
   return prisma.node.create({
-    data: { id: "node-1", name: "dgx-spark-01", ipAddress: "192.168.44.36", status: "online" },
+    data: {
+      id: "node-1", name: "dgx-spark-01", ipAddress: "192.168.44.36",
+      status: "online", vramTotal: 122_502,
+    },
   });
 }
 
