@@ -76,6 +76,7 @@ export default function FinetunePage() {
   const [selectedRecipe, setSelectedRecipe] = useState("");
   const [selectedNode, setSelectedNode] = useState("");
   const [dataset, setDataset] = useState("");
+  const [newJobName, setNewJobName] = useState("");
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [manualDataset, setManualDataset] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -297,6 +298,7 @@ export default function FinetunePage() {
       const needsMultiNode = (selectedRecipeData?.hardware?.min_nodes ?? 1) > 1;
 
       const body: Record<string, unknown> = { recipeFile: selectedRecipe, dataset, config };
+      if (newJobName.trim()) body.displayName = newJobName.trim();
       if (needsMultiNode) {
         // Send all selected idle nodes (up to min_nodes)
         const requiredNodes = selectedRecipeData!.hardware.min_nodes;
@@ -313,6 +315,7 @@ export default function FinetunePage() {
       setJobs((prev) => prev.some((j) => j.id === job.id) ? prev : [job, ...prev]);
       setViewingLogs(job.id);
       setDataset("");
+      setNewJobName("");
     } catch (err) {
       alert(String(err));
     } finally {
@@ -470,6 +473,19 @@ export default function FinetunePage() {
         <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wide mb-4">
           New Fine-Tune Job
         </h2>
+        <div className="mb-3">
+          <label className="block text-xs text-gray-400 mb-1">
+            Name <span className="text-gray-600">(optional — defaults to recipe + job id)</span>
+          </label>
+          <input
+            type="text"
+            value={newJobName}
+            onChange={(e) => setNewJobName(e.target.value)}
+            placeholder="e.g. build123d-v1"
+            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+            maxLength={80}
+          />
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
           <div>
             <label className="block text-xs text-gray-400 mb-1">Training Recipe</label>
