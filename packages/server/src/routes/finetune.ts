@@ -637,7 +637,12 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
       modelPath,
       baseModel: job.baseModel,
       deployContainer: deployConfig?.container || "vllm-node",
+      // clusterNodes / clusterNodeFastIps are undefined for solo deploys and
+      // set to arrays for multi-node — computed above from Task 3's nodeIds[].
+      clusterNodes: clusterNodeIps,
+      clusterNodeFastIps,
       config: {
+        // Recipe defaults first, user overrides win via the spread.
         gpuMem: deployConfig?.gpu_memory_utilization,
         maxModelLen: deployConfig?.max_model_len,
         ...config,
