@@ -28,5 +28,10 @@ export default defineConfig({
     // negligible at this size.
     pool: "forks",
     poolOptions: { forks: { singleFork: true } },
+    // singleFork means prisma.ts's globalThis.prisma cache leaks between
+    // integration suites. setup.ts clears that cache before each file so
+    // every suite gets a fresh PrismaClient bound to its own per-suite DB.
+    // Harmless for unit tests (they don't touch prisma).
+    setupFiles: ["packages/server/src/__tests__/integration/setup.ts"],
   },
 });
