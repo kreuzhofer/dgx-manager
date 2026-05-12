@@ -1,3 +1,6 @@
+import { existsSync } from "fs";
+import { join } from "path";
+
 /**
  * Materialize a fine-tune's inference template by substituting the merged-model
  * path placeholder and injecting served_model_name into the defaults block.
@@ -45,9 +48,6 @@ export function applyFinetuneSubstitutions(
 
   return out;
 }
-
-import { existsSync } from "fs";
-import { join } from "path";
 
 /**
  * Return the absolute path to `<recipeDir>/inference.yaml` if it exists,
