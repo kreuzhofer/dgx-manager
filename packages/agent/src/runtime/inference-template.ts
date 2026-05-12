@@ -27,8 +27,16 @@ export function applyFinetuneSubstitutions(
 
   // 2. Inject served_model_name into defaults: block — unless author already
   // declared one (then we preserve their intent; see test 2).
-  const hasServedName = /^\s*served_model_name:\s*\S/m.test(out);
+  // Scope detection to a YAML key at exactly 2 spaces of indent (the
+  // convention for defaults: children) so we don't false-positive on
+  // `--served-model-name foo` inside a `command: |` literal block scalar.
+  const hasServedName = /^ {2}served_model_name:\s*\S/m.test(out);
   if (!hasServedName) {
+    if (!/^defaults:\s*\n/m.test(out)) {
+      throw new Error(
+        "inference template: must contain a top-level 'defaults:' block (followed by a newline) OR an explicit served_model_name: line; got neither",
+      );
+    }
     out = out.replace(
       /^defaults:\s*\n/m,
       `defaults:\n  served_model_name: ${params.servedModelName}\n`,

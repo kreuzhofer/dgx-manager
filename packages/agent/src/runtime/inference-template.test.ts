@@ -54,4 +54,36 @@ command: |
     expect(out).toContain("served_model_name: existing-name");
     expect(out).not.toContain("served_model_name: new-name");
   });
+
+  it("throws when template has no defaults: block AND no served_model_name", () => {
+    const input = `name: minimal
+command: |
+  vllm serve ${MERGED_PATH_PLACEHOLDER}
+`;
+    expect(() =>
+      applyFinetuneSubstitutions(input, {
+        modelPath: "/path",
+        servedModelName: "x",
+      }),
+    ).toThrow(/defaults/);
+  });
+
+  it("does not treat --served-model-name inside command: heredoc as already-declared", () => {
+    // The command: block has `--served-model-name foo` as a vLLM flag, but
+    // there is no top-level `served_model_name:` YAML key. Injection should
+    // still happen into defaults:.
+    const input = `defaults:
+  port: 8000
+
+command: |
+  vllm serve ${MERGED_PATH_PLACEHOLDER} \\
+    --served-model-name foo
+`;
+    const out = applyFinetuneSubstitutions(input, {
+      modelPath: "/m",
+      servedModelName: "real-name",
+    });
+    expect(out).toContain("served_model_name: real-name");
+    expect(out).toContain("--served-model-name foo"); // original kept
+  });
 });
