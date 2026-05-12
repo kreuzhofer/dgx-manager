@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { TopNav } from "@/components/top-nav";
 import { Toaster } from "sonner";
+import { DeploymentPullToast } from "@/components/deployment-pull-toast";
 
 export const metadata: Metadata = {
   title: "DGX Manager",
@@ -17,6 +18,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           {children}
         </main>
         <Toaster theme="dark" position="bottom-right" richColors closeButton />
+        <DeploymentPullToast />
       </body>
     </html>
   );
