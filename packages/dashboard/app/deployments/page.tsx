@@ -915,6 +915,9 @@ export default function DeploymentsPage() {
             const isStopping = ["stopping", "removing"].includes(d.status);
             const isWorker = nodeRole === "worker";
             const isHead = nodeRole === "head";
+            // Ollama deployments don't take TP/PP/maxModelLen/gpuMem — those
+            // are vLLM-only. Restart goes straight to the API; no edit form.
+            const isOllama = config.runtime === "ollama";
 
             return (
               <div
@@ -1026,10 +1029,16 @@ export default function DeploymentsPage() {
                         {(d.status === "stopped" || d.status === "failed" || d.status === "evicted") && (
                           <>
                             <button
-                              onClick={() => editingRestart[d.id] ? cancelEditRestart(d.id) : beginEditRestart(d.id)}
+                              onClick={() => {
+                                if (isOllama) {
+                                  restartDeployment(d.id);
+                                  return;
+                                }
+                                editingRestart[d.id] ? cancelEditRestart(d.id) : beginEditRestart(d.id);
+                              }}
                               className="text-xs px-2 py-1 rounded bg-blue-900/50 hover:bg-blue-800 text-blue-300 transition-colors"
                             >
-                              {editingRestart[d.id] ? "Cancel" : "Restart"}
+                              {!isOllama && editingRestart[d.id] ? "Cancel" : "Restart"}
                             </button>
                             <button
                               onClick={() => deleteDeployment(d.id)}
@@ -1047,7 +1056,7 @@ export default function DeploymentsPage() {
                 {/* Edit-and-restart form — appears when "Edit & restart" is clicked
                     on a stopped/failed/evicted deployment. Pre-filled from the
                     deployment's saved config; blank fields keep saved values. */}
-                {editingRestart[d.id] && (
+                {!isOllama && editingRestart[d.id] && (
                   <div className="mt-3 p-3 bg-gray-800/50 rounded border border-blue-700/40">
                     <p className="text-[10px] text-gray-400 mb-2">
                       Edit settings then restart. Blank fields keep the saved value.
