@@ -291,4 +291,112 @@ describe("finetune displayName + Model cleanup", () => {
     expect(dep.body.error).toMatch(/already exists/i);
     expect(dep.body.error).toMatch(/collision-name/);
   });
+
+  it("PATCH /:id renames the associated Model row if one exists", async () => {
+    await wipeAll();
+    await seedNode();
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    const create = await request(app)
+      .post("/api/finetune")
+      .send({
+        nodeId: "node-1", recipeFile: RECIPE.file, dataset: "/tmp/fake.jsonl",
+        displayName: "original-name",
+      });
+    await prisma.fineTuneJob.update({
+      where: { id: create.body.id },
+      data: { mergeStatus: "completed", mergedPath: "/tmp/fake-merged" },
+    });
+    await request(app)
+      .post(`/api/finetune/${create.body.id}/deploy`)
+      .send({ config: {} });
+
+    // Confirm pre-condition: Model.name == 'original-name'
+    let model = await prisma.model.findFirst({ where: { finetuneJobId: create.body.id } });
+    expect(model?.name).toBe("original-name");
+
+    // Rename
+    await request(app)
+      .patch(`/api/finetune/${create.body.id}`)
+      .send({ displayName: "renamed-name" });
+
+    model = await prisma.model.findFirst({ where: { finetuneJobId: create.body.id } });
+    expect(model?.name).toBe("renamed-name");
+  });
+
+  it("PATCH /:id clearing displayName resets Model.name to the stable fallback", async () => {
+    await wipeAll();
+    await seedNode();
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    const create = await request(app)
+      .post("/api/finetune")
+      .send({
+        nodeId: "node-1", recipeFile: RECIPE.file, dataset: "/tmp/fake.jsonl",
+        displayName: "to-be-cleared",
+      });
+    await prisma.fineTuneJob.update({
+      where: { id: create.body.id },
+      data: { mergeStatus: "completed", mergedPath: "/tmp/fake-merged" },
+    });
+    await request(app)
+      .post(`/api/finetune/${create.body.id}/deploy`)
+      .send({ config: {} });
+
+    await request(app)
+      .patch(`/api/finetune/${create.body.id}`)
+      .send({ displayName: null });
+
+    const model = await prisma.model.findFirst({ where: { finetuneJobId: create.body.id } });
+    expect(model?.name).toBe(`finetune-${create.body.id.slice(0, 8)}`);
+  });
+
+  it("PATCH /:id returns 409 when the new displayName collides with another Model.name", async () => {
+    await wipeAll();
+    await seedNode();
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    // Job A: deployed with name "first"
+    const a = await request(app)
+      .post("/api/finetune")
+      .send({ nodeId: "node-1", recipeFile: RECIPE.file, dataset: "/tmp/fake.jsonl",
+              displayName: "first" });
+    await prisma.fineTuneJob.update({
+      where: { id: a.body.id },
+      data: { mergeStatus: "completed", mergedPath: "/tmp/fake-merged-a" },
+    });
+    await request(app).post(`/api/finetune/${a.body.id}/deploy`).send({ config: {} });
+
+    // Job B: deployed with name "second"
+    const b = await request(app)
+      .post("/api/finetune")
+      .send({ nodeId: "node-1", recipeFile: RECIPE.file, dataset: "/tmp/fake.jsonl",
+              displayName: "second" });
+    await prisma.fineTuneJob.update({
+      where: { id: b.body.id },
+      data: { mergeStatus: "completed", mergedPath: "/tmp/fake-merged-b" },
+    });
+    await request(app).post(`/api/finetune/${b.body.id}/deploy`).send({ config: {} });
+
+    // Try to rename A to "second" — should 409.
+    const patch = await request(app)
+      .patch(`/api/finetune/${a.body.id}`)
+      .send({ displayName: "second" });
+    expect(patch.status).toBe(409);
+    expect(patch.body.error).toMatch(/already exists/i);
+
+    // Both Model rows still have their original names.
+    const aModel = await prisma.model.findFirst({ where: { finetuneJobId: a.body.id } });
+    const bModel = await prisma.model.findFirst({ where: { finetuneJobId: b.body.id } });
+    expect(aModel?.name).toBe("first");
+    expect(bModel?.name).toBe("second");
+
+    // Atomicity: FineTuneJob A's displayName must NOT have been updated
+    // since the transactional rename rolled back.
+    const aJob = await prisma.fineTuneJob.findUnique({ where: { id: a.body.id } });
+    expect(aJob?.displayName).toBe("first");
+  });
 });

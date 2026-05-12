@@ -116,16 +116,50 @@ finetuneRouter.patch("/:id", async (req, res) => {
     return res.status(400).json({ error: "no allowed fields provided" });
   }
 
-  const updated = await prisma.fineTuneJob.update({
-    where: { id: req.params.id },
-    data: updates,
-    include: {
-      node: true,
-      clusterNodes: { include: { node: true }, orderBy: { role: "asc" } },
-    },
-  });
-  sseBroadcast({ type: "finetune:updated", payload: updated });
-  res.json(updated);
+  // Apply both writes (FineTuneJob.displayName and the linked Model.name)
+  // atomically. Without a transaction, a P2002 collision on Model.name
+  // would leave FineTuneJob.displayName updated but the Model rename
+  // rolled back — a half-applied rename that's hard to reason about.
+  let result;
+  try {
+    result = await prisma.$transaction(async (tx) => {
+      const job = await tx.fineTuneJob.update({
+        where: { id: req.params.id },
+        data: updates,
+        include: {
+          node: true,
+          clusterNodes: { include: { node: true }, orderBy: { role: "asc" } },
+          model: true,
+        },
+      });
+
+      if ("displayName" in updates && job.model) {
+        const stableName = `finetune-${job.id.slice(0, 8)}`;
+        const modelName = updates.displayName || stableName;
+        if (job.model.name !== modelName) {
+          await tx.model.update({
+            where: { id: job.model.id },
+            data: { name: modelName },
+          });
+          job.model = { ...job.model, name: modelName };
+        }
+      }
+
+      return job;
+    });
+  } catch (e: unknown) {
+    // P2002 = unique-constraint violation on Model.name. Both writes
+    // rolled back; return 409 so the user can pick a different name.
+    if (typeof e === "object" && e !== null && "code" in e && (e as { code: unknown }).code === "P2002") {
+      return res.status(409).json({
+        error: `A model with the requested name already exists. Choose a different displayName.`,
+      });
+    }
+    throw e;
+  }
+
+  sseBroadcast({ type: "finetune:updated", payload: result });
+  res.json(result);
 });
 
 finetuneRouter.post("/", async (req, res) => {
