@@ -610,7 +610,15 @@ export default function DeploymentsPage() {
                   className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
                 >
                   <option value="">Select a recipe...</option>
-                  {recipes.map((r) => {
+                  {recipes
+                    // Auto-generated fine-tune recipes (finetune-<12hex>) are
+                    // internal artifacts of the /finetune → Deploy flow, not
+                    // hand-curated recipes for direct selection. Hide them
+                    // from the dropdown so the list stays clean. Hand-named
+                    // ones (e.g. finetune-qwen3.6-50step) don't match the
+                    // pattern and stay visible.
+                    .filter((r) => !/^recipes\/finetune-[a-z0-9]{12}$/.test(r.file))
+                    .map((r) => {
                     const tp = r.defaults?.tensor_parallel as number | undefined;
                     const pp = r.defaults?.pipeline_parallel as number | undefined;
                     const suffix = [

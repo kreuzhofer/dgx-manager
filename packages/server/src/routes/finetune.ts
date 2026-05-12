@@ -1,10 +1,24 @@
 import { Router } from "express";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, unlinkSync, readdirSync } from "fs";
+import { join } from "path";
 import { prisma } from "../prisma.js";
 import { SHARED_STORAGE } from "../env.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import type { AgentHub } from "../ws/agent-hub.js";
 import { checkVllmVramAdmission, vramShortfallMessage } from "../admission/vram.js";
+
+// vLLM deploy infrastructure lives in a separate repo, mounted via NFS at
+// the same path as on each agent. The auto-generated finetune-<jobId-12>.yaml
+// files end up here whenever cmd:finetune:deploy fires on the head agent.
+const VLLM_REPO_PATH = `${SHARED_STORAGE}/src/github/spark-vllm-docker`;
+
+/**
+ * Path to the auto-generated vLLM recipe YAML for a given FineTuneJob.
+ * Must match `generateLocalModelRecipe` in packages/agent/src/runtime/vllm.ts.
+ */
+function generatedRecipePath(jobId: string): string {
+  return join(VLLM_REPO_PATH, "recipes", `finetune-${jobId.slice(0, 12)}.yaml`);
+}
 
 export const finetuneRouter = Router();
 
@@ -352,7 +366,22 @@ finetuneRouter.delete("/:id", async (req, res) => {
   }
 
   await prisma.fineTuneJob.delete({ where: { id: req.params.id } });
-  res.json({ deleted: true, filesRemoved, filesKept, filesError });
+
+  // Best-effort cleanup of the auto-generated vLLM recipe YAML so it
+  // doesn't linger in the dashboard's recipe dropdown after the job is
+  // gone. The file may not exist if the job was never deployed — that's
+  // fine, ENOENT is silently ignored.
+  let recipeRemoved = false;
+  try {
+    unlinkSync(generatedRecipePath(job.id));
+    recipeRemoved = true;
+  } catch (err: unknown) {
+    if (typeof err === "object" && err !== null && "code" in err && (err as { code: unknown }).code !== "ENOENT") {
+      console.error(`[finetune.delete] failed to remove recipe YAML: ${err}`);
+    }
+  }
+
+  res.json({ deleted: true, filesRemoved, filesKept, filesError, recipeRemoved });
 });
 
 finetuneRouter.get("/:id/disk-usage", async (req, res) => {
@@ -462,6 +491,59 @@ finetuneRouter.post("/cleanup-orphan-models", async (_req, res) => {
   }
 
   res.json({ backlinked, deleted, kept_due_to_deployment });
+});
+
+// POST /cleanup-orphan-recipes — one-shot maintenance op. Walks the vLLM
+// deploy repo's recipes dir for files matching the auto-generated
+// `finetune-<12alphanum>.yaml` pattern, and removes any whose id-prefix
+// doesn't correspond to a live FineTuneJob. Pairs with the DELETE-route
+// cleanup that handles future deletions automatically.
+//
+// Returns { scanned, deleted, kept_live, kept_unparseable }.
+finetuneRouter.post("/cleanup-orphan-recipes", async (_req, res) => {
+  const generatedPattern = /^finetune-([0-9a-z]{12})\.yaml$/;
+  const recipesDir = join(VLLM_REPO_PATH, "recipes");
+
+  let entries: string[];
+  try {
+    entries = readdirSync(recipesDir);
+  } catch (err: unknown) {
+    return res.status(500).json({ error: `recipes dir unreadable: ${String(err)}` });
+  }
+
+  const liveJobs = await prisma.fineTuneJob.findMany({ select: { id: true } });
+  const livePrefixes = new Set(liveJobs.map((j) => j.id.slice(0, 12)));
+
+  let scanned = 0;
+  let deleted = 0;
+  let kept_live = 0;
+  let kept_unparseable = 0;
+  const removed: string[] = [];
+
+  for (const name of entries) {
+    const m = generatedPattern.exec(name);
+    if (!m) {
+      // Not an auto-generated file (hand-curated recipe, e.g.
+      // finetune-qwen3.6-50step.yaml). Leave alone.
+      kept_unparseable++;
+      continue;
+    }
+    scanned++;
+    const prefix = m[1];
+    if (livePrefixes.has(prefix)) {
+      kept_live++;
+      continue;
+    }
+    try {
+      unlinkSync(join(recipesDir, name));
+      deleted++;
+      removed.push(name);
+    } catch (err) {
+      console.error(`[cleanup-orphan-recipes] failed to remove ${name}: ${err}`);
+    }
+  }
+
+  res.json({ scanned, deleted, kept_live, kept_unparseable, removed });
 });
 
 finetuneRouter.post("/:id/stop", async (req, res) => {
