@@ -41,3 +41,9 @@ next-env.d.ts
 # agent bundles (built by scripts/build-agent-bundles.sh)
 packages/server/agent-bundles/
 packages/server/agent-bundle.tar.gz
+
+# per-machine Claude Code state (settings.local.json, agent-room identity, etc.)
+.claude/settings.local.json
+.claude/agent-room/
+.claude/scheduled_tasks.lock
+.claude/retros/
