@@ -383,6 +383,86 @@ finetuneRouter.get("/:id/disk-usage", async (req, res) => {
   }
 });
 
+// POST /cleanup-orphan-models — one-shot maintenance op. Walks every Model
+// row whose name matches the legacy "finetune-<8alphanum>" pattern AND has
+// finetuneJobId = NULL, then either:
+//   - back-links the FK if the prefix matches an existing FineTuneJob, OR
+//   - deletes the row if no matching job AND no active Deployment uses it.
+//
+// "Active" here = the same TERMINAL_STATUSES list used elsewhere in DELETE:
+// any deployment whose status is NOT in ["stopped", "failed", "removed"]
+// counts as active and protects the Model from deletion. The user must
+// stop those deployments first, then re-run cleanup.
+//
+// Returns counts: { backlinked, deleted, kept_due_to_deployment }.
+finetuneRouter.post("/cleanup-orphan-models", async (_req, res) => {
+  const legacyPattern = /^finetune-([0-9a-z]{8})$/;
+  const TERMINAL_STATUSES = ["stopped", "failed", "removed"];
+
+  const candidates = await prisma.model.findMany({
+    where: { finetuneJobId: null, name: { startsWith: "finetune-" } },
+    include: { deployments: true },
+  });
+
+  let backlinked = 0;
+  let deleted = 0;
+  let kept_due_to_deployment = 0;
+
+  try {
+    for (const m of candidates) {
+      const match = legacyPattern.exec(m.name);
+      if (!match) continue;
+      const prefix = match[1];
+
+      // Find a job whose id starts with this prefix. cuid v2 IDs are unique
+      // across the first 8 chars in practice; if a collision happens, we
+      // back-link to the first match found.
+      const job = await prisma.fineTuneJob.findFirst({
+        where: { id: { startsWith: prefix } },
+      });
+
+      if (job) {
+        // P2002 is theoretically possible here if two candidate Model rows
+        // share the same 8-char id prefix AND map to the same FineTuneJob
+        // (the @unique on Model.finetuneJobId enforces one Model per job).
+        // cuid v2 makes a real collision astronomically unlikely; if it
+        // happens, the outer try/catch surfaces it with partial counts.
+        await prisma.model.update({
+          where: { id: m.id },
+          data: { finetuneJobId: job.id },
+        });
+        backlinked++;
+        continue;
+      }
+
+      const active = m.deployments.filter(
+        (d) => !TERMINAL_STATUSES.includes(d.status),
+      );
+      if (active.length > 0) {
+        kept_due_to_deployment++;
+        continue;
+      }
+
+      await prisma.model.delete({ where: { id: m.id } });
+      deleted++;
+    }
+  } catch (e: unknown) {
+    // Surface the failure with the partial counts so the caller knows how
+    // far the cleanup got. Re-running is idempotent (back-linked rows no
+    // longer match the filter; deleted rows are gone) so the caller can
+    // retry after fixing the underlying issue.
+    const message = e instanceof Error ? e.message : String(e);
+    return res.status(500).json({
+      error: `cleanup-orphan-models failed mid-loop: ${message}`,
+      backlinked,
+      deleted,
+      kept_due_to_deployment,
+    });
+  }
+
+  res.json({ backlinked, deleted, kept_due_to_deployment });
+});
+
 finetuneRouter.post("/:id/stop", async (req, res) => {
   const job = await prisma.fineTuneJob.findUnique({ where: { id: req.params.id } });
   if (!job) return res.status(404).json({ error: "Job not found" });

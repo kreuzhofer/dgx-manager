@@ -523,4 +523,58 @@ describe("finetune displayName + Model cleanup", () => {
     expect(await prisma.model.count({ where: { id: model.id } })).toBe(0);
     expect(await prisma.deployment.count({ where: { id: stoppedDep.id } })).toBe(0);
   });
+
+  it("POST /cleanup-orphan-models back-links legacy Model rows + deletes truly orphaned ones", async () => {
+    await wipeAll();
+    await seedNode();
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    // Case A: legacy Model row whose name matches an existing job's id-prefix
+    // (created before this migration). FK is null. Expected: back-linked.
+    const aliveJob = await prisma.fineTuneJob.create({
+      data: {
+        nodeId: "node-1", baseModel: "B", method: "lora", dataset: "/tmp/x",
+        mergeStatus: "completed", mergedPath: "/tmp/m",
+      },
+    });
+    await prisma.model.create({
+      data: { name: `finetune-${aliveJob.id.slice(0, 8)}`, runtime: "vllm" },
+    });
+
+    // Case B: legacy Model row for a job that no longer exists (orphan).
+    // FK is null, no Deployment references it. Expected: deleted.
+    await prisma.model.create({
+      data: { name: "finetune-deadbeef", runtime: "vllm" },
+    });
+
+    // Case C: legacy orphan WITH a still-active Deployment (rare but possible).
+    // Expected: kept (user must remove the deployment first).
+    const stuckModel = await prisma.model.create({
+      data: { name: "finetune-feedface", runtime: "vllm" },
+    });
+    await prisma.deployment.create({
+      data: { nodeId: "node-1", modelId: stuckModel.id, status: "running" },
+    });
+
+    const res = await request(app)
+      .post("/api/finetune/cleanup-orphan-models")
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      backlinked: 1,
+      deleted: 1,
+      kept_due_to_deployment: 1,
+    });
+
+    // A: now linked
+    const a = await prisma.model.findFirstOrThrow({ where: { finetuneJobId: aliveJob.id } });
+    expect(a.name).toBe(`finetune-${aliveJob.id.slice(0, 8)}`);
+
+    // B: gone
+    expect(await prisma.model.count({ where: { name: "finetune-deadbeef" } })).toBe(0);
+
+    // C: still there
+    expect(await prisma.model.count({ where: { name: "finetune-feedface" } })).toBe(1);
+  });
 });
