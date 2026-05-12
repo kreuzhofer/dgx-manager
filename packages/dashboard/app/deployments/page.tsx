@@ -617,7 +617,7 @@ export default function DeploymentsPage() {
                     // from the dropdown so the list stays clean. Hand-named
                     // ones (e.g. finetune-qwen3.6-50step) don't match the
                     // pattern and stay visible.
-                    .filter((r) => !/^recipes\/finetune-[a-z0-9]{12}$/.test(r.file))
+                    .filter((r) => !/^recipes\/finetune-[a-z0-9]{12}\.yaml$/.test(r.file))
                     .map((r) => {
                     const tp = r.defaults?.tensor_parallel as number | undefined;
                     const pp = r.defaults?.pipeline_parallel as number | undefined;

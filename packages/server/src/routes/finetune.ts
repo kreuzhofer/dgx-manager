@@ -20,6 +20,20 @@ function generatedRecipePath(jobId: string): string {
   return join(VLLM_REPO_PATH, "recipes", `finetune-${jobId.slice(0, 12)}.yaml`);
 }
 
+/**
+ * Broadcasts a recipe-rescan to every connected agent. Agents cache the
+ * recipe list in memory and only resend on rescan, so after we delete YAMLs
+ * server-side the dashboard's `/api/recipes` keeps showing them until the
+ * next rescan. Call this from any handler that mutates the recipes dir.
+ */
+function broadcastRecipeRescan(agentHub: AgentHub): number {
+  const nodeIds = agentHub.getConnectedNodeIds();
+  for (const nodeId of nodeIds) {
+    agentHub.sendToAgent(nodeId, { type: "cmd:rescan-recipes", payload: {} });
+  }
+  return nodeIds.length;
+}
+
 export const finetuneRouter = Router();
 
 finetuneRouter.get("/", async (_req, res) => {
@@ -380,6 +394,9 @@ finetuneRouter.delete("/:id", async (req, res) => {
       console.error(`[finetune.delete] failed to remove recipe YAML: ${err}`);
     }
   }
+  if (recipeRemoved) {
+    broadcastRecipeRescan(req.app.get("agentHub") as AgentHub);
+  }
 
   res.json({ deleted: true, filesRemoved, filesKept, filesError, recipeRemoved });
 });
@@ -500,7 +517,7 @@ finetuneRouter.post("/cleanup-orphan-models", async (_req, res) => {
 // cleanup that handles future deletions automatically.
 //
 // Returns { scanned, deleted, kept_live, kept_unparseable }.
-finetuneRouter.post("/cleanup-orphan-recipes", async (_req, res) => {
+finetuneRouter.post("/cleanup-orphan-recipes", async (req, res) => {
   const generatedPattern = /^finetune-([0-9a-z]{12})\.yaml$/;
   const recipesDir = join(VLLM_REPO_PATH, "recipes");
 
@@ -543,7 +560,12 @@ finetuneRouter.post("/cleanup-orphan-recipes", async (_req, res) => {
     }
   }
 
-  res.json({ scanned, deleted, kept_live, kept_unparseable, removed });
+  let agents_refreshed = 0;
+  if (deleted > 0) {
+    agents_refreshed = broadcastRecipeRescan(req.app.get("agentHub") as AgentHub);
+  }
+
+  res.json({ scanned, deleted, kept_live, kept_unparseable, removed, agents_refreshed });
 });
 
 finetuneRouter.post("/:id/stop", async (req, res) => {
