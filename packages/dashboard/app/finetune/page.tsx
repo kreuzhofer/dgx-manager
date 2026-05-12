@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { toast } from "sonner";
 import { apiFetch } from "@/lib/api";
 import { useSSE, type SseEvent } from "@/lib/sse";
 import { LogViewer } from "@/components/log-viewer";
@@ -318,10 +319,13 @@ export default function FinetunePage() {
       // Dedupe: SSE event may have already inserted this job
       setJobs((prev) => prev.some((j) => j.id === job.id) ? prev : [job, ...prev]);
       setViewingLogs(job.id);
+      toast.success(`Launched ${job.displayName || "fine-tune"}`, {
+        description: `${job.recipeFile?.split("/").pop() || "job"} on ${job.node?.name || job.nodeId}`,
+      });
       setDataset("");
       setNewJobName("");
     } catch (err) {
-      alert(String(err));
+      toast.error("Launch failed", { description: err instanceof Error ? err.message : String(err) });
     } finally {
       setSubmitting(false);
     }
@@ -375,7 +379,9 @@ export default function FinetunePage() {
       setJobs((prev) =>
         prev.map((j) => j.id === id ? { ...j, mergeStatus: "running" } : j)
       );
-    } catch (err) { alert(String(err)); }
+    } catch (err) {
+      toast.error("Merge failed", { description: err instanceof Error ? err.message : String(err) });
+    }
   };
 
   const openResume = async (job: FineTuneJob) => {
@@ -391,7 +397,7 @@ export default function FinetunePage() {
 
   const submitResume = async (job: FineTuneJob) => {
     if (resumeNodeIds.length === 0) {
-      alert("Pick at least one node");
+      toast.error("Pick at least one node");
       return;
     }
     setResumeSubmitting(true);
@@ -405,10 +411,13 @@ export default function FinetunePage() {
       });
       // Dedupe: SSE event may have already inserted this job
       setJobs((prev) => prev.some((j) => j.id === newJob.id) ? prev : [newJob, ...prev]);
+      toast.success("Resumed training", {
+        description: `${newJob.recipeFile?.split("/").pop() || "job"} on ${newJob.node?.name || newJob.nodeId}`,
+      });
       setResumingJobId(null);
       setResumeNodeIds([]);
     } catch (err) {
-      alert(String(err));
+      toast.error("Resume failed", { description: err instanceof Error ? err.message : String(err) });
     } finally {
       setResumeSubmitting(false);
     }
@@ -452,8 +461,11 @@ export default function FinetunePage() {
       });
       setJobs((prev) => prev.map((j) => (j.id === id ? { ...j, displayName: updated.displayName } : j)));
       cancelRename(id);
+      toast.success("Renamed", {
+        description: updated.displayName ? `Now: ${updated.displayName}` : "Name cleared",
+      });
     } catch (err) {
-      alert(String(err));
+      toast.error("Rename failed", { description: err instanceof Error ? err.message : String(err) });
     }
   };
 

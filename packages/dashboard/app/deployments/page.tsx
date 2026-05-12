@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
+import { toast } from "sonner";
 import { apiFetch } from "@/lib/api";
 import { useSSE, type SseEvent } from "@/lib/sse";
 import { LogViewer } from "@/components/log-viewer";
@@ -304,10 +305,25 @@ export default function DeploymentsPage() {
           body: JSON.stringify(ftBody),
         });
         setDeployments((prev) => prev.some((d) => d.id === result.id) ? prev : [result, ...prev]);
+        toast.success(`Deployed ${result.model?.name ?? "fine-tuned model"}`, {
+          description: needsClusterFt
+            ? `${tp * pp} nodes, head=${result.node?.name ?? "?"}`
+            : `on ${result.node?.name ?? "?"}`,
+        });
         setRuntimeMode("vllm");
         setFinetuneModel(null);
         setFinetuneJobId(null);
         setFinetuneDisplayName(null);
+        // Same reset the vLLM branch does after submit — without this the
+        // launch dialog comes back pre-populated with the prior session's
+        // node picks + TP/PP/memory overrides, which surprised users.
+        setSelectedNode("");
+        setSelectedClusterNodes(new Set());
+        setTensorParallel("");
+        setPipelineParallel("");
+        setMaxModelLen("");
+        setGpuMem("");
+        setPort("8000");
         // Clear URL params
         window.history.replaceState({}, "", "/deployments");
         setDeploying(false);
@@ -348,6 +364,11 @@ export default function DeploymentsPage() {
         body: JSON.stringify(body),
       });
       setDeployments((prev) => prev.some((d) => d.id === deployment.id) ? prev : [deployment, ...prev]);
+      toast.success(`Deployed ${deployment.model?.name ?? "model"}`, {
+        description: deployment.clusterMode
+          ? `${deployment.clusterNodes?.length ?? "?"} nodes, head=${deployment.node?.name ?? "?"}`
+          : `on ${deployment.node?.name ?? "?"}`,
+      });
       setSelectedRecipe("");
       setSelectedOllamaModel("");
       setTensorParallel("");
@@ -356,6 +377,7 @@ export default function DeploymentsPage() {
       setGpuMem("");
       setPort("8000");
       setSelectedNode("");
+      setSelectedClusterNodes(new Set());
       setViewingLogs(deployment.id);
       // Immediately remove consumed nodes from idle list
       const usedIds = new Set<string>([deployment.nodeId]);
@@ -364,7 +386,9 @@ export default function DeploymentsPage() {
       }
       setIdleNodes((prev) => prev.filter((n) => !usedIds.has(n.id)));
     } catch (err) {
-      alert(`Deploy failed:\n\n${err instanceof Error ? err.message : String(err)}`);
+      toast.error("Deploy failed", {
+        description: err instanceof Error ? err.message : String(err),
+      });
     } finally {
       setDeploying(false);
     }
@@ -398,7 +422,9 @@ export default function DeploymentsPage() {
       // Surface the error so it's visible on mobile too — apiFetch throws on
       // non-2xx (e.g. 409 from the VRAM admission check) and without this the
       // click looks silently broken.
-      alert(`Restart failed:\n\n${err instanceof Error ? err.message : String(err)}`);
+      toast.error("Restart failed", {
+        description: err instanceof Error ? err.message : String(err),
+      });
     }
   };
 

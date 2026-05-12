@@ -652,7 +652,14 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
 
   const result = await prisma.deployment.findUnique({
     where: { id: deployment.id },
-    include: { node: true, model: true },
+    include: {
+      node: true,
+      model: true,
+      // Without clusterNodes in the include, the live SSE event arrives
+      // with no cluster info and the dashboard card shows only the head
+      // until the user reloads. Matches the normal-deploy route's shape.
+      clusterNodes: { include: { node: true } },
+    },
   });
   sseBroadcast({ type: "deployment:created", payload: result });
   res.status(201).json(result);
