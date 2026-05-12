@@ -29,6 +29,13 @@ const NODE_ID_FILE = join(AGENT_DIR, "node-id");
 const FAST_NET_SUBNETS = (process.env.FAST_NET_SUBNETS || "192.168.100.0/24")
   .split(",").map((s) => s.trim()).filter(Boolean);
 
+// Absolute path to the fine-tune-recipes repo on the shared NFS mount. Used
+// to resolve a deploy-time `recipeFile` (the relative recipe directory the
+// training job ran out of) into an absolute path so the deploy step can
+// pick up that recipe's `inference.yaml`/`inference.j2` overrides.
+const FINETUNE_RECIPES_REPO = process.env.FINETUNE_RECIPES_REPO
+  || `${process.env.SHARED_STORAGE || "/mnt/tank"}/src/github/dgx-manager-fine-tune-recipes`;
+
 /**
  * Detect this node's IP on the fast inter-node fabric (e.g. 192.168.100.x),
  * if any. Returns null if no interface matches the configured subnets.
@@ -791,7 +798,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
     case "cmd:finetune:deploy": {
       const {
         jobId, deploymentId, modelPath, deployContainer, config,
-        clusterNodes, clusterNodeFastIps, modelName,
+        clusterNodes, clusterNodeFastIps, modelName, recipeFile,
       } = msg.payload as {
         jobId: string;
         deploymentId: string;
@@ -801,6 +808,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         clusterNodes?: string[];
         clusterNodeFastIps?: (string | null)[];
         modelName?: string;
+        recipeFile?: string;
       };
 
       const isCluster = Array.isArray(clusterNodes) && clusterNodes.length > 1;
@@ -810,10 +818,19 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
       const tensorParallel = config?.tensorParallel as number | undefined;
       const pipelineParallel = config?.pipelineParallel as number | undefined;
 
-      console.log(`[finetune] Deploying merged model from ${modelPath} (container: ${deployContainer || "vllm-node"}, cluster: ${isCluster ? clusterNodes!.length + " nodes" : "solo"})`);
+      console.log(`[finetune] Deploying merged model from ${modelPath} (container: ${deployContainer || "vllm-node"}, cluster: ${isCluster ? clusterNodes!.length + " nodes" : "solo"}${recipeFile ? `, recipe: ${recipeFile}` : ""})`);
 
       try {
-        const recipeFile = generateLocalModelRecipe({
+        // Resolve the training recipe's directory on the NFS share so
+        // generateLocalModelRecipe can pick up an `inference.yaml` /
+        // `inference.j2` override shipped alongside the recipe. Falls back
+        // to undefined → fully auto-generated recipe when the deploy
+        // payload doesn't carry a recipeFile.
+        const recipeDir = recipeFile
+          ? join(FINETUNE_RECIPES_REPO, recipeFile)
+          : undefined;
+
+        const generatedRecipeFile = generateLocalModelRecipe({
           jobId,
           modelPath,
           container: deployContainer || "vllm-node",
@@ -833,13 +850,14 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
           tensorParallel: tensorParallel ?? 1,
           pipelineParallel: pipelineParallel ?? 1,
           servedModelName: modelName,
+          recipeDir,
         });
 
         sendMsg("agent:deployment:status", { deploymentId, status: "starting" });
         let lastPhase = "starting";
         launchRecipe(
           deploymentId,
-          recipeFile,
+          generatedRecipeFile,
           {
             port,
             gpuMem,
