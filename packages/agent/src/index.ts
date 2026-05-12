@@ -776,19 +776,41 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
     }
 
     case "cmd:finetune:deploy": {
-      const { jobId, deploymentId, modelPath, deployContainer, config } = msg.payload as {
-        jobId: string; deploymentId: string; modelPath: string; deployContainer?: string; config?: Record<string, unknown>;
+      const {
+        jobId, deploymentId, modelPath, deployContainer, config,
+        clusterNodes, clusterNodeFastIps,
+      } = msg.payload as {
+        jobId: string;
+        deploymentId: string;
+        modelPath: string;
+        deployContainer?: string;
+        config?: Record<string, unknown>;
+        clusterNodes?: string[];
+        clusterNodeFastIps?: (string | null)[];
       };
 
-      console.log(`[finetune] Deploying merged model from ${modelPath} (container: ${deployContainer})`);
+      const isCluster = Array.isArray(clusterNodes) && clusterNodes.length > 1;
+      const port = (config?.port as number) ?? 8000;
+      const gpuMem = (config?.gpuMem as number) ?? 0.85;
+      const maxModelLen = (config?.maxModelLen as number) ?? 4096;
+      const tensorParallel = config?.tensorParallel as number | undefined;
+      const pipelineParallel = config?.pipelineParallel as number | undefined;
+
+      console.log(`[finetune] Deploying merged model from ${modelPath} (container: ${deployContainer || "vllm-node"}, cluster: ${isCluster ? clusterNodes!.length + " nodes" : "solo"})`);
+
       try {
         const recipeFile = generateLocalModelRecipe({
           jobId,
           modelPath,
           container: deployContainer || "vllm-node",
-          port: (config?.port as number) ?? 8000,
-          gpuMemoryUtilization: (config?.gpuMem as number) ?? 0.85,
-          maxModelLen: (config?.maxModelLen as number) ?? 4096,
+          port,
+          gpuMemoryUtilization: gpuMem,
+          maxModelLen,
+          // Mark the generated YAML's solo_only flag based on the topology
+          // we were given. Doesn't affect actual launch (CLI flags do that),
+          // just keeps the recipe metadata honest for any future re-launch
+          // via the recipe selector.
+          isCluster,
         });
 
         sendMsg("agent:deployment:status", { deploymentId, status: "starting" });
@@ -796,7 +818,16 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         launchRecipe(
           deploymentId,
           recipeFile,
-          { port: (config?.port as number) ?? 8000, skipSetup: true },
+          {
+            port,
+            gpuMem,
+            maxModelLen,
+            tensorParallel,
+            pipelineParallel,
+            clusterNodes: isCluster ? clusterNodes : undefined,
+            clusterNodeFastIps: isCluster ? clusterNodeFastIps : undefined,
+            skipSetup: true,
+          },
           (line) => {
             sendMsg("agent:deployment:log", { deploymentId, log: line });
             const phase = detectPhase(line);
