@@ -7,6 +7,7 @@ import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
 import { discoverRecipes } from "./recipes.js";
 import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, isStopping, getTrackedDeployments, reattachLogs, generateLocalModelRecipe, isLaunchInProgress } from "./runtime/vllm.js";
+import { removeDeployment } from "./runtime/deployment-store.js";
 import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth } from "./runtime/ollama.js";
 import { discoverTrainingRecipes } from "./training-recipes.js";
 import { startFinetuneJob, stopFinetuneJob, mergeLoraAdapter, reattachFinetuneJobs } from "./runtime/finetune.js";
@@ -272,6 +273,12 @@ function connect() {
               status: "failed",
               error: status.error || "Container stopped unexpectedly",
             });
+            // Untrack so the next health tick doesn't keep reporting this
+            // deployment as failed/running based on a shared vllm_node
+            // container. Without this, stale records from prior failed
+            // launches caused live containers to be misattributed across
+            // multiple deployment IDs.
+            removeDeployment(status.deploymentId);
           } else if (status.containerRunning) {
             // Report vramActual for running vLLM containers
             const m = await collectMetrics();
@@ -616,6 +623,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
                   status: "failed",
                   error: "Container not running after launch script exited",
                 });
+                removeDeployment(deploymentId);
               }
             } else {
               // Check if container started despite script error (e.g. download warning)
@@ -628,6 +636,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
                   status: "failed",
                   error: `Launch failed with exit code ${code}`,
                 });
+                removeDeployment(deploymentId);
               }
             }
           }
@@ -639,6 +648,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
           status: "failed",
           error: String(err),
         });
+        removeDeployment(deploymentId);
       }
       break;
     }
@@ -856,6 +866,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
                 deploymentId, status: "failed",
                 error: code === 0 ? "Container not running after launch" : `Launch failed with exit code ${code}`,
               });
+              removeDeployment(deploymentId);
             }
           }
         );
@@ -863,6 +874,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         sendMsg("agent:deployment:status", {
           deploymentId, status: "failed", error: String(err),
         });
+        removeDeployment(deploymentId);
       }
       break;
     }
