@@ -19,6 +19,13 @@ export interface OllamaCatalogEntry {
    * "vision", "embedding", "audio". Useful for UI badges and filtering.
    */
   capabilities: string[];
+  /**
+   * ISO timestamp of the last tag update for this model, parsed from the
+   * card's `x-test-updated` tooltip ("Nov 30, 2024 10:34 PM UTC"). Null when
+   * the card has no recognizable date — the UI sorts those last in newest-
+   * first views.
+   */
+  updatedAt: string | null;
 }
 
 /**
@@ -85,7 +92,21 @@ export function parseCatalogHtml(html: string): OllamaCatalogEntry[] {
         ? "embedding"
         : "chat";
 
-      entries.push({ name, description, type, sizes, capabilities });
+      // Updated-at: Ollama wraps the date inside the `x-test-updated` span's
+      // parent, in a `title="Nov 30, 2024 10:34 PM UTC"` attribute. Walk the
+      // card's [title] elements and pick the first one whose value parses as
+      // a real date — the x-test-model-title's title is the bare slug and
+      // intentionally fails the Date.parse check.
+      let updatedAt: string | null = null;
+      $(el).find("[title]").each((_i, t) => {
+        if (updatedAt) return;
+        const v = $(t).attr("title");
+        if (!v) return;
+        const ms = Date.parse(v);
+        if (!Number.isNaN(ms)) updatedAt = new Date(ms).toISOString();
+      });
+
+      entries.push({ name, description, type, sizes, capabilities, updatedAt });
     });
 
     // Dedupe by name (defensive — the library page renders each card once,

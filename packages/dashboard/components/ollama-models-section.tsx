@@ -10,6 +10,9 @@ interface CatalogEntry {
   type: "chat" | "embedding";
   sizes: string[];
   capabilities: string[];
+  /** ISO timestamp from Ollama's card tooltip. May be absent on entries
+   * persisted by an older parser; treat as null in that case. */
+  updatedAt?: string | null;
 }
 
 interface CatalogResponse {
@@ -18,6 +21,7 @@ interface CatalogResponse {
 }
 
 type SaveState = "idle" | "saving" | "saved" | "error";
+type SortMode = "alpha" | "newest";
 
 interface Row {
   tag: string;          // "llama3.1:8b" or "nomic-embed-text"
@@ -26,21 +30,47 @@ interface Row {
   description: string;
   type: "chat" | "embedding";
   capabilities: string[];
+  updatedAt: string | null;
 }
 
-/** Flatten catalog entries into one row per deployable tag, alphabetised by tag. */
+/** Flatten catalog entries into one row per deployable tag (unsorted). */
 function flatten(entries: CatalogEntry[]): Row[] {
   const rows: Row[] = [];
   for (const e of entries) {
+    const updatedAt = e.updatedAt ?? null;
     if (e.sizes.length === 0) {
-      rows.push({ tag: e.name, modelName: e.name, size: null, description: e.description, type: e.type, capabilities: e.capabilities });
+      rows.push({ tag: e.name, modelName: e.name, size: null, description: e.description, type: e.type, capabilities: e.capabilities, updatedAt });
     } else {
       for (const size of e.sizes) {
-        rows.push({ tag: `${e.name}:${size}`, modelName: e.name, size, description: e.description, type: e.type, capabilities: e.capabilities });
+        rows.push({ tag: `${e.name}:${size}`, modelName: e.name, size, description: e.description, type: e.type, capabilities: e.capabilities, updatedAt });
       }
     }
   }
-  return rows.sort((a, b) => a.tag.localeCompare(b.tag));
+  return rows;
+}
+
+/** Sort by tag ascending. */
+function sortAlpha(a: Row, b: Row): number {
+  return a.tag.localeCompare(b.tag);
+}
+
+/** Sort newest-first by updatedAt, tag asc as tiebreaker; null dates last. */
+function sortNewest(a: Row, b: Row): number {
+  if (a.updatedAt === b.updatedAt) return a.tag.localeCompare(b.tag);
+  if (a.updatedAt === null) return 1;
+  if (b.updatedAt === null) return -1;
+  return b.updatedAt.localeCompare(a.updatedAt); // ISO strings sort lex == chrono
+}
+
+/** Coarse relative-time string ("3d ago", "2mo ago", "1y ago"). */
+function formatRelative(iso: string): string {
+  const diffMs = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(diffMs) || diffMs < 0) return "";
+  const d = diffMs / 86_400_000;
+  if (d < 1) return "today";
+  if (d < 30) return `${Math.round(d)}d ago`;
+  if (d < 365) return `${Math.round(d / 30)}mo ago`;
+  return `${Math.round(d / 365)}y ago`;
 }
 
 /**
@@ -65,12 +95,13 @@ export function OllamaModelsSection() {
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [filter, setFilter] = useState("");
+  const [sortMode, setSortMode] = useState<SortMode>("alpha");
 
   const rows = useMemo(() => flatten(catalog), [catalog]);
-  const visibleRows = useMemo(
-    () => rows.filter((r) => fuzzyMatch(r, filter)),
-    [rows, filter],
-  );
+  const visibleRows = useMemo(() => {
+    const filtered = rows.filter((r) => fuzzyMatch(r, filter));
+    return filtered.sort(sortMode === "alpha" ? sortAlpha : sortNewest);
+  }, [rows, filter, sortMode]);
 
   const load = useCallback(async () => {
     try {
@@ -176,13 +207,33 @@ export function OllamaModelsSection() {
         </p>
       ) : (
         <>
-          <input
-            type="text"
-            placeholder="Filter by name or description"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            className="w-full mb-2 bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-xs focus:outline-none focus:border-green-500"
-          />
+          <div className="flex items-center gap-2 mb-2">
+            <input
+              type="text"
+              placeholder="Filter by name or description"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              className="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-xs focus:outline-none focus:border-green-500"
+            />
+            <div className="inline-flex rounded border border-gray-700 overflow-hidden text-xs" role="group" aria-label="Sort order">
+              <button
+                type="button"
+                onClick={() => setSortMode("alpha")}
+                className={`px-2.5 py-1.5 transition-colors ${sortMode === "alpha" ? "bg-green-700/40 text-green-200" : "bg-gray-800 text-gray-400 hover:text-gray-200"}`}
+                aria-pressed={sortMode === "alpha"}
+              >
+                A–Z
+              </button>
+              <button
+                type="button"
+                onClick={() => setSortMode("newest")}
+                className={`px-2.5 py-1.5 border-l border-gray-700 transition-colors ${sortMode === "newest" ? "bg-green-700/40 text-green-200" : "bg-gray-800 text-gray-400 hover:text-gray-200"}`}
+                aria-pressed={sortMode === "newest"}
+              >
+                Newest
+              </button>
+            </div>
+          </div>
           <ul className="max-h-96 overflow-y-auto divide-y divide-gray-800/60 border border-gray-800 rounded">
             {visibleRows.map((r) => {
               const checked = enabled.has(r.tag);
@@ -208,6 +259,14 @@ export function OllamaModelsSection() {
                     </div>
                     <div className="text-xs text-gray-500 truncate">{r.description}</div>
                   </div>
+                  {r.updatedAt && (
+                    <div
+                      className="text-[10px] text-gray-500 tabular-nums whitespace-nowrap"
+                      title={new Date(r.updatedAt).toLocaleString()}
+                    >
+                      {formatRelative(r.updatedAt)}
+                    </div>
+                  )}
                 </li>
               );
             })}

@@ -28,6 +28,9 @@ const SAMPLE_LIBRARY_HTML = `
           <span x-test-size>8b</span>
           <span x-test-size>70b</span>
           <span x-test-size>405b</span>
+          <span class="flex items-center" title="Nov 30, 2024 10:34 PM UTC">
+            <span x-test-updated>11 months ago</span>
+          </span>
         </div>
       </a>
     </li>
@@ -40,6 +43,9 @@ const SAMPLE_LIBRARY_HTML = `
         <div>
           <span x-test-capability>embedding</span>
           <span x-test-size>137m</span>
+          <span class="flex items-center" title="Feb 21, 2024 5:26 PM UTC">
+            <span x-test-updated>2 years ago</span>
+          </span>
         </div>
       </a>
     </li>
@@ -119,6 +125,20 @@ describe("parseCatalogHtml", () => {
   it("drops cloud-only models (cloud marker + no x-test-size)", () => {
     const entries = parseCatalogHtml(SAMPLE_LIBRARY_HTML);
     expect(entries.map((e) => e.name)).not.toContain("kimi-k2");
+  });
+
+  it("parses updatedAt from the card's date tooltip", () => {
+    const entries = parseCatalogHtml(SAMPLE_LIBRARY_HTML);
+    const llama = entries.find((e) => e.name === "llama3.1")!;
+    expect(llama.updatedAt).toBe(new Date("Nov 30, 2024 10:34 PM UTC").toISOString());
+    const nomic = entries.find((e) => e.name === "nomic-embed-text")!;
+    expect(nomic.updatedAt).toBe(new Date("Feb 21, 2024 5:26 PM UTC").toISOString());
+  });
+
+  it("returns updatedAt=null when no date tooltip is present", () => {
+    const entries = parseCatalogHtml(SAMPLE_LIBRARY_HTML);
+    const wizard = entries.find((e) => e.name === "wizardlm")!;
+    expect(wizard.updatedAt).toBeNull();
   });
 
   it("keeps local-only models that happen to have no size badge", () => {
