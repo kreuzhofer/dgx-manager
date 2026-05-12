@@ -123,6 +123,8 @@ ${envBlock}command: |
     -tp {tensor_parallel} \\
     -pp {pipeline_parallel} \\
     --served-model-name {served_model_name} \\
+    --enable-auto-tool-choice \\
+    --tool-call-parser qwen3_xml \\
 ${rayBackendFlag}    --dtype auto
 `;
 
