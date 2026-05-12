@@ -810,11 +810,18 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
           port,
           gpuMemoryUtilization: gpuMem,
           maxModelLen,
-          // Mark the generated YAML's solo_only flag based on the topology
-          // we were given. Doesn't affect actual launch (CLI flags do that),
-          // just keeps the recipe metadata honest for any future re-launch
-          // via the recipe selector.
+          // For cluster mode, both the recipe YAML's solo_only marker AND
+          // the actual launch topology need to be set. The YAML drops
+          // solo_only; the command gains `--distributed-executor-backend
+          // ray` + a SPREAD placement env. tensorParallel/pipelineParallel
+          // are embedded as `defaults` AND substituted into the command
+          // template — without this, run-recipe.py silently dropped the
+          // `--tp N` CLI override (no `{tensor_parallel}` placeholder to
+          // substitute into) and vLLM defaulted to TP=1 even though Ray
+          // was correctly spanning the cluster.
           isCluster,
+          tensorParallel: tensorParallel ?? 1,
+          pipelineParallel: pipelineParallel ?? 1,
         });
 
         sendMsg("agent:deployment:status", { deploymentId, status: "starting" });

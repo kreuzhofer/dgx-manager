@@ -1,6 +1,6 @@
 {
   "name": "@dgx-manager/agent",
-  "version": "0.5.315",
+  "version": "0.5.318",
   "private": true,
   "type": "module",
   "scripts": {

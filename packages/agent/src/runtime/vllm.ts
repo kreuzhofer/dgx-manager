@@ -54,10 +54,18 @@ export function generateLocalModelRecipe(params: {
   gpuMemoryUtilization?: number;
   maxModelLen?: number;
   // When true, omit the `solo_only: true` marker so the dashboard's
-  // recipe selector lists this as a cluster-capable recipe. The actual
-  // launch topology is decided by the CLI flags launchRecipe builds,
-  // not by this marker — this just keeps recipe metadata honest.
+  // recipe selector lists this as a cluster-capable recipe. Also flips
+  // the command to include `--distributed-executor-backend ray` + the
+  // SPREAD placement env var so vLLM uses Ray across nodes.
   isCluster?: boolean;
+  // Default tensor_parallel for the recipe. `run-recipe.py` substitutes
+  // `{tensor_parallel}` in the command from either the recipe's
+  // `defaults.tensor_parallel` OR an `--tp N` CLI override. Without a
+  // `{tensor_parallel}` placeholder in the command, the override is
+  // silently dropped and vLLM defaults to TP=1 — which presented as
+  // "cluster launches that only used the head GPU".
+  tensorParallel?: number;
+  pipelineParallel?: number;
 }): string {
   const recipeName = `finetune-${params.jobId.slice(0, 12)}`;
   const recipeFile = `recipes/${recipeName}.yaml`;
@@ -69,7 +77,19 @@ export function generateLocalModelRecipe(params: {
   const gpuMem = params.gpuMemoryUtilization ?? 0.85;
   const maxLen = params.maxModelLen ?? 4096;
   const container = params.container || "vllm-node";
+  const tp = params.tensorParallel ?? 1;
+  const pp = params.pipelineParallel ?? 1;
   const soloLine = params.isCluster ? "" : "solo_only: true\n";
+
+  // For cluster, add Ray placement env + the executor-backend flag.
+  // Matches the pattern used by hand-written cluster recipes
+  // (e.g. 4x-spark-cluster/qwen3.5-397b-a17B-fp8.yaml).
+  const envBlock = params.isCluster
+    ? "env:\n  VLLM_DISTRIBUTED_EXECUTOR_CONFIG: '{\"placement_group_options\":{\"strategy\":\"SPREAD\"}}'\n\n"
+    : "";
+  const rayBackendFlag = params.isCluster
+    ? "    --distributed-executor-backend ray \\\n"
+    : "";
 
   const yaml = `# Auto-generated recipe for fine-tuned model
 recipe_version: "1"
@@ -83,14 +103,18 @@ defaults:
   host: 0.0.0.0
   gpu_memory_utilization: ${gpuMem}
   max_model_len: ${maxLen}
+  tensor_parallel: ${tp}
+  pipeline_parallel: ${pp}
 
-command: |
+${envBlock}command: |
   vllm serve ${containerModelPath} \\
     --host {host} \\
     --port {port} \\
     --max-model-len {max_model_len} \\
     --gpu-memory-utilization {gpu_memory_utilization} \\
-    --dtype auto
+    -tp {tensor_parallel} \\
+    -pp {pipeline_parallel} \\
+${rayBackendFlag}    --dtype auto
 `;
 
   mkdirSync(join(VLLM_REPO_PATH, "recipes"), { recursive: true });
