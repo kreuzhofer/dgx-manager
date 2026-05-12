@@ -7,7 +7,7 @@ import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
 import { discoverRecipes } from "./recipes.js";
 import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, isStopping, getTrackedDeployments, reattachLogs, generateLocalModelRecipe, isLaunchInProgress } from "./runtime/vllm.js";
-import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth, getOllamaModels } from "./runtime/ollama.js";
+import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth } from "./runtime/ollama.js";
 import { discoverTrainingRecipes } from "./training-recipes.js";
 import { startFinetuneJob, stopFinetuneJob, mergeLoraAdapter, reattachFinetuneJobs } from "./runtime/finetune.js";
 import { selfAudit } from "./self-audit.js";
@@ -219,15 +219,6 @@ function connect() {
       ws!.send(JSON.stringify({
         type: "agent:training-recipes",
         payload: { recipes: trainingRecipes },
-      }));
-    }
-
-    // Report available Ollama models
-    const ollamaModels = getOllamaModels();
-    if (ollamaModels.length > 0) {
-      ws!.send(JSON.stringify({
-        type: "agent:ollama-models",
-        payload: { models: ollamaModels },
       }));
     }
 

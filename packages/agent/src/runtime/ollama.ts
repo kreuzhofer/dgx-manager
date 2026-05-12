@@ -1,5 +1,4 @@
-import { readFileSync } from "fs";
-import { dirname, join } from "path";
+import { dirname } from "path";
 import { fileURLToPath } from "url";
 import http from "http";
 
@@ -36,13 +35,12 @@ export interface OllamaPullProgress {
 const activeDeployments = new Map<string, string>(); // deploymentId → modelName
 const activeAbortControllers = new Map<string, AbortController>(); // deploymentId → AbortController
 
-/** Load curated model list. */
+/**
+ * Legacy: the manager's Settings page is now the source of truth for the
+ * Ollama catalog. Kept exported so callers don't break; always returns [].
+ */
 export function getOllamaModels(): OllamaModel[] {
-  try {
-    return JSON.parse(readFileSync(join(__dirname, "../../ollama-models.json"), "utf-8"));
-  } catch {
-    return [];
-  }
+  return [];
 }
 
 /** Simple fetch helper for Ollama API. */
