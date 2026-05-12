@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import OnboardingCommand, { getServerHost } from "@/components/onboarding-command";
+import { OllamaModelsSection } from "@/components/ollama-models-section";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 
@@ -126,6 +127,8 @@ export default function SettingsPage() {
           curl -sL http://{serverHost}/api/agent/install.sh | sudo bash -s -- --token TOKEN
         </div>
       </section>
+
+      <OllamaModelsSection />
     </div>
   );
 }
