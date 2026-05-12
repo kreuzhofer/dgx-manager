@@ -42,6 +42,32 @@ interface AgentConnection {
   nodeId: string;
 }
 
+export interface OllamaPullProgressMsg {
+  deploymentId: string;
+  status: string;
+  percent: number | null;
+  current: number | null;
+  total: number | null;
+}
+
+/**
+ * Translate an `agent:ollama:pull-progress` payload into the canonical
+ * `deployment:progress` SSE shape the dashboard already renders. Kept as a
+ * named export so it can be unit-tested without spinning up a WebSocket.
+ */
+export function handleOllamaPullProgress(payload: OllamaPullProgressMsg): void {
+  sseBroadcast({
+    type: "deployment:progress",
+    payload: {
+      deploymentId: payload.deploymentId,
+      phase: payload.status === "downloading" ? "downloading" : payload.status,
+      phaseProgress: payload.percent ?? 0,
+      current: payload.current,
+      total: payload.total,
+    },
+  });
+}
+
 export class AgentHub {
   private wss: WebSocketServer;
   private agents = new Map<string, AgentConnection>();
@@ -416,6 +442,11 @@ export class AgentHub {
             // In-flight phase progress (e.g. HF download %). No DB persistence
             // — this is ephemeral state, just rebroadcast for the UI.
             sseBroadcast({ type: "deployment:progress", payload: msg.payload });
+            break;
+          }
+
+          case "agent:ollama:pull-progress": {
+            handleOllamaPullProgress(msg.payload as OllamaPullProgressMsg);
             break;
           }
 
