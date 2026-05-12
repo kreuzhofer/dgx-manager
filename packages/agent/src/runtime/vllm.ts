@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { SHARED_STORAGE, WORKSPACE } from "../env.js";
 import { saveDeployment, removeDeployment, loadDeployments, clearDeployments, type TrackedDeployment } from "./deployment-store.js";
+import { findInferenceTemplate, applyFinetuneSubstitutions } from "./inference-template.js";
 
 const VLLM_REPO_PATH =
   process.env.VLLM_REPO_PATH || `${SHARED_STORAGE}/src/github/spark-vllm-docker`;
@@ -72,10 +73,38 @@ export function generateLocalModelRecipe(params: {
   // `/workspace/outputs/<id>/merged`), which is unreadable for downstream
   // tooling. Falls back to the recipe name (`finetune-<id-12>`) if absent.
   servedModelName?: string;
+  // Absolute filesystem path to the training recipe's directory (e.g.
+  // `<fine-tune-recipes>/recipes/qwen3.6-27b-base-lora-attn-mlp`). If this
+  // directory contains an `inference.yaml`, that file is used verbatim as
+  // the serve template — only `{{MERGED_MODEL_PATH}}` is substituted and
+  // `served_model_name` is injected into the defaults block. If absent or
+  // the file doesn't exist, the existing minimal auto-gen path runs.
+  recipeDir?: string;
 }): string {
   const recipeName = `finetune-${params.jobId.slice(0, 12)}`;
   const recipeFile = `recipes/${recipeName}.yaml`;
   const fullPath = join(VLLM_REPO_PATH, recipeFile);
+
+  // Prefer a hand-authored inference.yaml colocated with the training
+  // recipe. Lets each fine-tune family own its full lifecycle (train +
+  // merge + serve) with the right vLLM flags for its weights.
+  if (params.recipeDir) {
+    const templatePath = findInferenceTemplate(params.recipeDir);
+    if (templatePath) {
+      const tmpl = readFileSync(templatePath, "utf-8");
+      const materialized = applyFinetuneSubstitutions(tmpl, {
+        modelPath: params.modelPath.replace(`${SHARED_STORAGE}/`, `${WORKSPACE}/`),
+        servedModelName: params.servedModelName || recipeName,
+      });
+      mkdirSync(join(VLLM_REPO_PATH, "recipes"), { recursive: true });
+      writeFileSync(fullPath, materialized, "utf-8");
+      console.log(
+        `Generated vLLM recipe from template: ${fullPath} ` +
+        `(source=${templatePath})`
+      );
+      return recipeFile;
+    }
+  }
 
   const containerModelPath = params.modelPath.replace(`${SHARED_STORAGE}/`, `${WORKSPACE}/`);
 
