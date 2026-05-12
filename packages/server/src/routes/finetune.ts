@@ -91,6 +91,43 @@ finetuneRouter.get("/:id/metrics", async (req, res) => {
   res.json(metrics);
 });
 
+// PATCH /:id — mutate user-editable fields on the job. Currently scoped to
+// displayName; extend the allowed fields here as future rename-able
+// attributes are added. Trims whitespace; empty/whitespace-only strings
+// clear the name (back to null → dashboard falls back to derived label).
+finetuneRouter.patch("/:id", async (req, res) => {
+  const job = await prisma.fineTuneJob.findUnique({ where: { id: req.params.id } });
+  if (!job) return res.status(404).json({ error: "Job not found" });
+
+  const updates: { displayName?: string | null } = {};
+  if ("displayName" in req.body) {
+    const raw = req.body.displayName;
+    if (raw === null) {
+      updates.displayName = null;
+    } else if (typeof raw === "string") {
+      const trimmed = raw.trim();
+      updates.displayName = trimmed.length ? trimmed : null;
+    } else {
+      return res.status(400).json({ error: "displayName must be a string or null" });
+    }
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({ error: "no allowed fields provided" });
+  }
+
+  const updated = await prisma.fineTuneJob.update({
+    where: { id: req.params.id },
+    data: updates,
+    include: {
+      node: true,
+      clusterNodes: { include: { node: true }, orderBy: { role: "asc" } },
+    },
+  });
+  sseBroadcast({ type: "finetune:updated", payload: updated });
+  res.json(updated);
+});
+
 finetuneRouter.post("/", async (req, res) => {
   const { nodeId, nodeIds, recipeFile, dataset, config, resumeFromJobId, displayName } = req.body;
 

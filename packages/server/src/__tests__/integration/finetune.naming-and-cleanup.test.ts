@@ -129,4 +129,55 @@ describe("finetune displayName + Model cleanup", () => {
     const row = await prisma.fineTuneJob.findUnique({ where: { id: res.body.id } });
     expect(row?.displayName).toBe("build123d-v1");
   });
+
+  it("PATCH /:id can set displayName on an existing job", async () => {
+    await wipeAll();
+    await seedNode();
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    const create = await request(app)
+      .post("/api/finetune")
+      .send({ nodeId: "node-1", recipeFile: RECIPE.file, dataset: "/tmp/fake.jsonl" });
+    expect(create.body.displayName).toBeNull();
+
+    const patch = await request(app)
+      .patch(`/api/finetune/${create.body.id}`)
+      .send({ displayName: "renamed-via-patch" });
+    expect(patch.status).toBe(200);
+    expect(patch.body.displayName).toBe("renamed-via-patch");
+
+    const get = await request(app).get(`/api/finetune/${create.body.id}`);
+    expect(get.body.displayName).toBe("renamed-via-patch");
+  });
+
+  it("PATCH /:id trims whitespace and treats empty string as clearing", async () => {
+    await wipeAll();
+    await seedNode();
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    const create = await request(app)
+      .post("/api/finetune")
+      .send({ nodeId: "node-1", recipeFile: RECIPE.file, dataset: "/tmp/fake.jsonl",
+              displayName: "initial" });
+    expect(create.body.displayName).toBe("initial");
+
+    const clear = await request(app)
+      .patch(`/api/finetune/${create.body.id}`)
+      .send({ displayName: "   " });
+    expect(clear.status).toBe(200);
+    expect(clear.body.displayName).toBeNull();
+  });
+
+  it("PATCH /:id returns 404 when the job doesn't exist", async () => {
+    await wipeAll();
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    const res = await request(app)
+      .patch("/api/finetune/does-not-exist")
+      .send({ displayName: "x" });
+    expect(res.status).toBe(404);
+  });
 });
