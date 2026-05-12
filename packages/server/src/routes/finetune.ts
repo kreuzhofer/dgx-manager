@@ -746,6 +746,12 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
       // --served-model-name so /v1/models reports the readable name
       // instead of the on-disk path.
       modelName: model.name,
+      // Relative path of the training recipe (e.g.
+      // "recipes/qwen3.6-27b-base-lora-attn-mlp"). The agent resolves this
+      // to an absolute dir and looks for a sibling inference.yaml to use
+      // as the vLLM serve template. If absent, deploy falls back to the
+      // legacy minimal auto-gen.
+      recipeFile: job.recipeFile,
       // clusterNodes / clusterNodeFastIps are undefined for solo deploys and
       // set to arrays for multi-node — computed above from Task 3's nodeIds[].
       clusterNodes: clusterNodeIps,
