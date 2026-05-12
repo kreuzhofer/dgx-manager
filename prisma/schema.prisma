@@ -55,6 +55,12 @@ model Model {
   name        String       @unique
   runtime     String
   parameters  String?
+  // FK to the FineTuneJob this Model row represents. Null for non-finetune
+  // models (hand-created, Ollama, etc.). Enables (a) cascade-delete so a
+  // deleted job doesn't leave orphan Model rows in the deployable list,
+  // and (b) explicit linkage instead of name-prefix string magic.
+  finetuneJobId String?      @unique
+  finetuneJob   FineTuneJob? @relation(fields: [finetuneJobId], references: [id], onDelete: Cascade)
   createdAt   DateTime     @default(now())
   deployments Deployment[]
 }
@@ -133,6 +139,11 @@ model LoadBalancerEndpoint {
 model FineTuneJob {
   id           String    @id @default(cuid())
   nodeId       String
+  // User-facing name for the fine-tune. Settable at creation and via PATCH.
+  // When null, the dashboard falls back to a derived label (recipe name +
+  // job-id prefix). Mirrors into the associated Model.name on deploy so the
+  // deployable-models list shows the user's chosen label.
+  displayName  String?
   recipeFile   String?
   baseModel    String
   method       String
@@ -150,6 +161,7 @@ model FineTuneJob {
   completedAt  DateTime?
   createdAt    DateTime  @default(now())
   node         Node      @relation(fields: [nodeId], references: [id])
+  model        Model?
   metrics      TrainingMetric[]
   // For multi-node runs, one row per participating node (head + workers).
   // Single-node runs leave this empty; the head can be inferred from
