@@ -125,6 +125,7 @@ ${envBlock}command: |
     --served-model-name {served_model_name} \\
     --enable-auto-tool-choice \\
     --tool-call-parser qwen3_xml \\
+    --reasoning-parser qwen3 \\
 ${rayBackendFlag}    --dtype auto
 `;
 
