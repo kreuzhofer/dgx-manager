@@ -111,6 +111,10 @@ export default function FinetunePage() {
     etaSeconds?: number;
   }>>({});
 
+  // Map of jobId -> current draft display name while the user is editing it.
+  // Presence of the key means "editing"; absence means "not editing".
+  const [renameDraft, setRenameDraft] = useState<Record<string, string>>({});
+
   // Per-job training metrics for loss curve
   const [jobMetrics, setJobMetrics] = useState<Record<string, {
     steps: number[];
@@ -424,6 +428,32 @@ export default function FinetunePage() {
       baseModel: job.baseModel,
     });
     window.location.href = `/deployments?${params.toString()}`;
+  };
+
+  const startRename = (job: FineTuneJob) => {
+    setRenameDraft((prev) => ({ ...prev, [job.id]: job.displayName ?? "" }));
+  };
+
+  const cancelRename = (id: string) => {
+    setRenameDraft((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  };
+
+  const submitRename = async (id: string) => {
+    const draft = renameDraft[id] ?? "";
+    try {
+      const updated = await apiFetch<FineTuneJob>(`/api/finetune/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ displayName: draft.trim() || null }),
+      });
+      setJobs((prev) => prev.map((j) => (j.id === id ? { ...j, displayName: updated.displayName } : j)));
+      cancelRename(id);
+    } catch (err) {
+      alert(String(err));
+    }
   };
 
   const formatEta = (seconds: number | undefined) => {
@@ -766,6 +796,36 @@ export default function FinetunePage() {
                         </span>
                         <span className="break-all">{job.baseModel}</span>
                       </h3>
+                      <div className="mt-0.5 mb-0.5">
+                        {renameDraft[job.id] !== undefined ? (
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              value={renameDraft[job.id]}
+                              onChange={(e) => setRenameDraft((prev) => ({ ...prev, [job.id]: e.target.value }))}
+                              placeholder="(no name)"
+                              className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white w-48"
+                              autoFocus
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") submitRename(job.id);
+                                if (e.key === "Escape") cancelRename(job.id);
+                              }}
+                            />
+                            <button
+                              onClick={() => submitRename(job.id)}
+                              className="text-xs px-2 py-1 rounded bg-green-900/50 hover:bg-green-800 text-green-300"
+                            >Save</button>
+                            <button
+                              onClick={() => cancelRename(job.id)}
+                              className="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400"
+                            >Cancel</button>
+                          </div>
+                        ) : (
+                          <span className="text-sm font-medium text-gray-200">
+                            {job.displayName || `${job.recipeFile?.split("/").pop() || "job"}-${job.id.slice(0, 8)}`}
+                          </span>
+                        )}
+                      </div>
                       <p className="text-xs text-gray-500 mt-0.5 break-all">
                         <button
                           onClick={() => navigator.clipboard.writeText(job.id)}
@@ -855,6 +915,14 @@ export default function FinetunePage() {
                         className="text-xs px-2 py-1 rounded bg-amber-900/50 hover:bg-amber-800 text-amber-300 transition-colors"
                       >
                         Resume
+                      </button>
+                    )}
+                    {!isActive && !isStopping && (
+                      <button
+                        onClick={() => startRename(job)}
+                        className="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors"
+                      >
+                        Rename
                       </button>
                     )}
                     {!isActive && !isStopping && (
