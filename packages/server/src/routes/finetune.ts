@@ -92,7 +92,7 @@ finetuneRouter.get("/:id/metrics", async (req, res) => {
 });
 
 finetuneRouter.post("/", async (req, res) => {
-  const { nodeId, nodeIds, recipeFile, dataset, config, resumeFromJobId } = req.body;
+  const { nodeId, nodeIds, recipeFile, dataset, config, resumeFromJobId, displayName } = req.body;
 
   // Resume mode: inherit recipe/dataset/config/outputDir from the previous job
   // so HF Trainer can find the checkpoint-* dirs. The caller only needs to
@@ -133,6 +133,7 @@ finetuneRouter.post("/", async (req, res) => {
       recipeFile: effectiveRecipeFile,
       baseModel,
       method,
+      displayName: typeof displayName === "string" && displayName.trim() ? displayName.trim() : null,
       dataset: effectiveDataset,
       config: Object.keys(mergedConfig).length ? JSON.stringify(mergedConfig) : null,
       status: "pending",
