@@ -5,6 +5,8 @@ import { toast } from "sonner";
 import { apiFetch } from "@/lib/api";
 import { useSSE, type SseEvent } from "@/lib/sse";
 import { LogViewer } from "@/components/log-viewer";
+import { formatClusterSummary } from "@/lib/cluster-summary";
+import { parseLaunchConfig } from "@/lib/launch-config";
 
 interface TrainingRecipe {
   file: string;
@@ -54,7 +56,11 @@ interface FineTuneJob {
   startedAt: string | null;
   completedAt: string | null;
   createdAt: string;
-  node?: { name: string; ipAddress: string };
+  node?: { name: string; ipAddress: string } | null;
+  clusterNodes: Array<{
+    node: { name: string; ipAddress: string };
+    role: string;
+  }>;
 }
 
 const statusStyles: Record<string, string> = {
@@ -115,6 +121,12 @@ export default function FinetunePage() {
   // Map of jobId -> current draft display name while the user is editing it.
   // Presence of the key means "editing"; absence means "not editing".
   const [renameDraft, setRenameDraft] = useState<Record<string, string>>({});
+
+  const [detailsExpanded, setDetailsExpanded] = useState<Record<string, boolean>>({});
+
+  const toggleDetails = useCallback((jobId: string) => {
+    setDetailsExpanded((prev) => ({ ...prev, [jobId]: !prev[jobId] }));
+  }, []);
 
   // Per-job training metrics for loss curve
   const [jobMetrics, setJobMetrics] = useState<Record<string, {
@@ -946,8 +958,81 @@ export default function FinetunePage() {
                         Delete
                       </button>
                     )}
+                    <button
+                      type="button"
+                      onClick={() => toggleDetails(job.id)}
+                      aria-expanded={!!detailsExpanded[job.id]}
+                      aria-controls={`details-${job.id}`}
+                      className="text-xs text-gray-400 hover:text-gray-200 transition-colors px-2 py-1 rounded border border-gray-700 hover:border-gray-500"
+                    >
+                      {detailsExpanded[job.id] ? "▾ Details" : "▸ Details"}
+                    </button>
                   </div>
                 </div>
+
+                {detailsExpanded[job.id] && (
+                  <div
+                    id={`details-${job.id}`}
+                    className="mt-2 border-t border-gray-800 pt-2 space-y-1 text-xs"
+                  >
+                    <div>
+                      <span className="text-gray-500">Launch config: </span>
+                      {(() => {
+                        const entries = parseLaunchConfig(job.config);
+                        if (entries.length === 0) {
+                          return <span className="text-gray-400">(none; recipe defaults applied)</span>;
+                        }
+                        return (
+                          <span className="text-gray-200">
+                            {entries.map((e, i) => (
+                              <span key={e.key}>
+                                {i > 0 && <span className="text-gray-600">, </span>}
+                                <span className="text-gray-400">{e.label}:</span>{" "}
+                                <span className="font-mono">{String(e.value)}</span>
+                              </span>
+                            ))}
+                          </span>
+                        );
+                      })()}
+                    </div>
+
+                    <div>
+                      <span className="text-gray-500">Dataset: </span>
+                      <span className="font-mono text-gray-200 break-all">{job.dataset}</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Recipe: </span>
+                      <span className="font-mono text-gray-200">{job.recipeFile ?? "—"}</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Base model: </span>
+                      <span className="text-gray-200">{job.baseModel}</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Method: </span>
+                      <span className="text-gray-200">{job.method}</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Cluster: </span>
+                      <span className="text-gray-200">{formatClusterSummary(job)}</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Output dir: </span>
+                      <span className="font-mono text-gray-200 break-all">{job.outputDir ?? "—"}</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Created: </span>
+                      <span className="text-gray-200">{new Date(job.createdAt).toLocaleString()}</span>
+                      {job.startedAt && (
+                        <>
+                          <span className="text-gray-600"> · </span>
+                          <span className="text-gray-500">Started: </span>
+                          <span className="text-gray-200">{new Date(job.startedAt).toLocaleString()}</span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {/* Resume panel: checkpoints + node selection */}
                 {resumingJobId === job.id && (
