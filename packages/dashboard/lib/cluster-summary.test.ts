@@ -36,6 +36,19 @@ describe("formatClusterSummary", () => {
     ).toBe("3 nodes: dgx-spark-02 (head), dgx-spark-03, dgx-spark-04");
   });
 
+  it("renders all-worker clusters without a head label", () => {
+    expect(
+      formatClusterSummary({
+        nodeId: "n1",
+        node: { name: "dgx-spark-01", ipAddress: "10.0.0.1" },
+        clusterNodes: [
+          { node: { name: "dgx-spark-01", ipAddress: "10.0.0.1" }, role: "worker" },
+          { node: { name: "dgx-spark-02", ipAddress: "10.0.0.2" }, role: "worker" },
+        ],
+      }),
+    ).toBe("2 nodes: dgx-spark-01, dgx-spark-02");
+  });
+
   it("handles a single clusterNodes entry as N=1", () => {
     expect(
       formatClusterSummary({

@@ -10,17 +10,17 @@
 
 interface ClusterNodeRow {
   node: { name: string; ipAddress: string };
-  role: "head" | "worker" | string;
+  role: string;
 }
 
 export interface JobClusterShape {
   nodeId: string;
-  node: { name: string; ipAddress: string } | null;
+  node?: { name: string; ipAddress: string } | null;
   clusterNodes: ClusterNodeRow[];
 }
 
 export function formatClusterSummary(job: JobClusterShape): string {
-  if (!job.clusterNodes || job.clusterNodes.length === 0) {
+  if (job.clusterNodes.length === 0) {
     return job.node?.name ?? job.nodeId;
   }
 
