@@ -537,31 +537,10 @@ export class AgentHub {
             break;
           }
 
-          case "agent:finetune:quantize-progress": {
-            const { jobId, phase, phaseProgress, log } = msg.payload;
-            sseBroadcast({ type: "finetune:quantize-progress", payload: { jobId, phase, phaseProgress, log } });
+          case "agent:finetune:quantize-progress":
+          case "agent:finetune:quantize-complete":
+            await this.dispatchFinetuneQuantizeMessage(msg);
             break;
-          }
-
-          case "agent:finetune:quantize-complete": {
-            const { jobId, status, quantizedPath, error } = msg.payload as {
-              jobId: string;
-              status: "completed" | "failed";
-              quantizedPath: string | null;
-              error?: string;
-            };
-            await prisma.fineTuneJob.update({
-              where: { id: jobId },
-              data: {
-                quantizationStatus: status === "completed" ? "quantized" : "failed",
-                quantizedPath: status === "completed" ? quantizedPath : null,
-                quantizationLog: error ?? null,
-                quantizedAt: status === "completed" ? new Date() : null,
-              },
-            });
-            sseBroadcast({ type: "finetune:quantize-status", payload: { jobId, status, quantizedPath, error } });
-            break;
-          }
         }
       } catch (err) {
         console.error("Agent message error:", err);
@@ -582,15 +561,29 @@ export class AgentHub {
   }
 
   /**
-   * Exposed for integration testing: process a parsed agent message directly
-   * without a real WebSocket connection. Mirrors the inner switch in
-   * handleConnection so tests can call it synchronously with a stub payload.
+   * Test-only entry point: lets unit tests invoke the agent-message
+   * dispatcher without spinning up a real WebSocket. Routes to the
+   * same private dispatchers used by handleConnection's switch.
    */
   async handleAgentMessage(msg: { type: string; payload: Record<string, unknown> }): Promise<void> {
-    // Re-uses the same switch body — delegate via a synthetic WS message event
-    // by extracting the shared logic through the existing private handler.
-    // The simplest approach: fake a WS emit on an existing connection, but
-    // since we have no real WS here, we handle the quantize cases directly.
+    switch (msg.type) {
+      case "agent:finetune:quantize-progress":
+      case "agent:finetune:quantize-complete":
+        await this.dispatchFinetuneQuantizeMessage(msg);
+        break;
+
+      default:
+        // Other message types are handled via the WebSocket connection path
+        break;
+    }
+  }
+
+  /**
+   * Shared handler for quantize-progress and quantize-complete messages.
+   * Called from both handleConnection's switch and the test-only
+   * handleAgentMessage entry point so the logic lives in exactly one place.
+   */
+  private async dispatchFinetuneQuantizeMessage(msg: { type: string; payload: Record<string, unknown> }): Promise<void> {
     switch (msg.type) {
       case "agent:finetune:quantize-progress": {
         const { jobId, phase, phaseProgress, log } = msg.payload;
@@ -617,10 +610,6 @@ export class AgentHub {
         sseBroadcast({ type: "finetune:quantize-status", payload: { jobId, status, quantizedPath, error } });
         break;
       }
-
-      default:
-        // Other message types are handled via the WebSocket connection path
-        break;
     }
   }
 
