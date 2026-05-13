@@ -25,6 +25,10 @@ export interface TrainingRecipe {
     launch: string;
     ds_config?: string;
     merge?: string;
+    /** Post-merge FP8 quantization wrapper (shared scripts/quantize_fp8.py).
+     *  Repo-relative. When absent, POST /api/finetune/:id/quantize returns
+     *  501 for that recipe — opt-in per recipe. */
+    quantize_fp8?: string;
   };
   defaults: Record<string, unknown>;
   hardware: { min_nodes: number; gpus_per_node: number; vram_estimate_mb: number };
@@ -172,6 +176,7 @@ export function discoverTrainingRecipes(): TrainingRecipe[] {
           launch: (scripts.launch as string) || "launch.sh",
           ds_config: scripts.ds_config as string | undefined,
           merge: scripts.merge as string | undefined,
+          quantize_fp8: scripts.quantize_fp8 as string | undefined,
         },
         defaults,
         hardware: {

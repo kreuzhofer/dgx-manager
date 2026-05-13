@@ -96,4 +96,33 @@ scripts:
     expect(result.scripts).toEqual({ train: "train.py" });
     expect(result.train).toBeUndefined();
   });
+
+  it("parses scripts.quantize_fp8 when present", () => {
+    // Ensures the parser forwards quantize_fp8 so the recipe loader can
+    // surface it via TrainingRecipe.scripts.quantize_fp8.
+    const result = parseRecipeYaml(`
+scripts:
+  entrypoint: entrypoint.sh
+  train: train.py
+  launch: launch.sh
+  merge: scripts/merge.py
+  quantize_fp8: scripts/quantize_fp8.py
+`);
+    const scripts = result.scripts as Record<string, unknown>;
+    expect(scripts.quantize_fp8).toBe("scripts/quantize_fp8.py");
+    expect(scripts.merge).toBe("scripts/merge.py");
+  });
+
+  it("leaves quantize_fp8 absent when recipe omits it", () => {
+    // The field is optional — recipes that don't support FP8 quantization
+    // simply don't include it, and the loader must treat it as undefined.
+    const result = parseRecipeYaml(`
+scripts:
+  entrypoint: entrypoint.sh
+  train: train.py
+  launch: launch.sh
+`);
+    const scripts = result.scripts as Record<string, unknown>;
+    expect(scripts.quantize_fp8).toBeUndefined();
+  });
 });
