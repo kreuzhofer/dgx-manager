@@ -5,13 +5,22 @@
  * stub agent hub, supertest against an Express app that mounts only
  * the finetune router.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { execSync } from "child_process";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import express from "express";
 import request from "supertest";
+
+// Capture SSE broadcasts instead of writing to real HTTP response streams.
+const broadcasts: { type: string; payload: unknown }[] = [];
+vi.mock("../../sse.js", () => ({
+  broadcast: (event: { type: string; payload: unknown }) => {
+    broadcasts.push(event);
+  },
+  sseHandler: vi.fn(),
+}));
 
 const TMP_DIR = mkdtempSync(join(tmpdir(), "dgx-quantize-test-"));
 const DB_PATH = join(TMP_DIR, "test.db");
@@ -162,5 +171,80 @@ describe("POST /api/finetune/:id/quantize", () => {
     const res = await request(app).post(`/api/finetune/${job.id}/quantize`).send({});
     expect(res.status).toBe(409);
     expect(sent).toHaveLength(0);
+  });
+});
+
+describe("AgentHub: quantize-complete persists state", () => {
+  let AgentHub: typeof import("../../ws/agent-hub.js").AgentHub;
+
+  beforeAll(async () => {
+    ({ AgentHub } = await import("../../ws/agent-hub.js"));
+  });
+
+  it("transitions to quantized and stores quantizedPath", async () => {
+    broadcasts.length = 0;
+    const node = await prisma.node.create({
+      data: { id: "n2", name: "n2", ipAddress: "10.0.0.2", agentPort: 8089, status: "online", vramTotal: 122000 },
+    });
+    const job = await prisma.fineTuneJob.create({
+      data: {
+        nodeId: node.id,
+        recipeFile: "recipes/test",
+        baseModel: "Qwen/Qwen3.6-27B",
+        method: "lora",
+        dataset: "/tmp/ds.jsonl",
+        status: "completed",
+        mergeStatus: "completed",
+        mergedPath: "/mnt/tank/outputs/job-2/merged",
+        outputDir: "/mnt/tank/outputs/job-2",
+        quantizationStatus: "quantizing",
+        quantizedPath: null,
+      },
+    });
+
+    const hub = new AgentHub();
+    await hub.handleAgentMessage({
+      type: "agent:finetune:quantize-complete",
+      payload: { jobId: job.id, status: "completed", quantizedPath: "/mnt/tank/outputs/job-2/merged-fp8" },
+    });
+
+    const updated = await prisma.fineTuneJob.findUnique({ where: { id: job.id } });
+    expect(updated?.quantizationStatus).toBe("quantized");
+    expect(updated?.quantizedPath).toBe("/mnt/tank/outputs/job-2/merged-fp8");
+    expect(updated?.quantizedAt).toBeTruthy();
+    expect(broadcasts.find((b) => b.type === "finetune:quantize-status")).toBeTruthy();
+  });
+
+  it("failed status clears quantizedPath and stores error in quantizationLog", async () => {
+    broadcasts.length = 0;
+    const node = await prisma.node.create({
+      data: { id: "n3", name: "n3", ipAddress: "10.0.0.3", agentPort: 8089, status: "online", vramTotal: 122000 },
+    });
+    const job = await prisma.fineTuneJob.create({
+      data: {
+        nodeId: node.id,
+        recipeFile: "recipes/test",
+        baseModel: "Qwen/Qwen3.6-27B",
+        method: "lora",
+        dataset: "/tmp/ds.jsonl",
+        status: "completed",
+        mergeStatus: "completed",
+        mergedPath: "/mnt/tank/outputs/job-3/merged",
+        outputDir: "/mnt/tank/outputs/job-3",
+        quantizationStatus: "quantizing",
+        quantizedPath: "/mnt/tank/outputs/job-3/merged-fp8",
+      },
+    });
+
+    const hub = new AgentHub();
+    await hub.handleAgentMessage({
+      type: "agent:finetune:quantize-complete",
+      payload: { jobId: job.id, status: "failed", quantizedPath: null, error: "OOM at FP8 cast" },
+    });
+
+    const updated = await prisma.fineTuneJob.findUnique({ where: { id: job.id } });
+    expect(updated?.quantizationStatus).toBe("failed");
+    expect(updated?.quantizedPath).toBeNull();
+    expect(updated?.quantizationLog).toBe("OOM at FP8 cast");
   });
 });
