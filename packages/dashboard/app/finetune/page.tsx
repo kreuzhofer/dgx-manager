@@ -51,6 +51,10 @@ interface FineTuneJob {
   outputPath: string | null;
   mergeStatus: string | null;
   mergedPath: string | null;
+  quantizationStatus: string | null; // null | pending | quantizing | quantized | failed
+  quantizedPath: string | null;
+  quantizationLog: string | null;
+  quantizedAt: string | null;
   deploymentId: string | null;
   logs: string | null;
   startedAt: string | null;
@@ -123,6 +127,7 @@ export default function FinetunePage() {
   const [renameDraft, setRenameDraft] = useState<Record<string, string>>({});
 
   const [detailsExpanded, setDetailsExpanded] = useState<Record<string, boolean>>({});
+  const [selectedVariant, setSelectedVariant] = useState<Record<string, "bf16" | "fp8">>({});
 
   const toggleDetails = useCallback((jobId: string) => {
     setDetailsExpanded((prev) => ({ ...prev, [jobId]: !prev[jobId] }));
@@ -277,6 +282,22 @@ export default function FinetunePage() {
         prev.map((j) => j.id === jobId ? { ...j, mergeStatus: status, mergedPath: mergedPath ?? j.mergedPath } : j)
       );
     }
+    if (event.type === "finetune:quantize-progress") {
+      // No-op for now — we don't render quantize progress live, just status.
+      return;
+    }
+    if (event.type === "finetune:quantize-status") {
+      const { jobId, status, quantizedPath } = event.payload as {
+        jobId: string; status: string; quantizedPath?: string;
+      };
+      setJobs((prev) =>
+        prev.map((j) => j.id === jobId
+          ? { ...j, quantizationStatus: status === "completed" ? "quantized" : "failed",
+              quantizedPath: quantizedPath ?? j.quantizedPath }
+          : j),
+      );
+      return;
+    }
   }, []);
 
   const { connected } = useSSE(handleSSE, loadData);
@@ -396,6 +417,17 @@ export default function FinetunePage() {
     }
   };
 
+  const quantizeJob = async (id: string) => {
+    try {
+      await apiFetch(`/api/finetune/${id}/quantize`, { method: "POST" });
+      setJobs((prev) =>
+        prev.map((j) => j.id === id ? { ...j, quantizationStatus: "quantizing" } : j)
+      );
+    } catch (err) {
+      toast.error("Quantize failed", { description: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
   const openResume = async (job: FineTuneJob) => {
     setResumingJobId(job.id);
     setResumeNodeIds([job.nodeId]);
@@ -442,11 +474,15 @@ export default function FinetunePage() {
   };
 
   const deployJob = (job: FineTuneJob) => {
-    const modelPath = job.mergedPath || `${job.outputDir}/merged`;
+    const variant = selectedVariant[job.id] ?? "bf16";
+    const modelPath = variant === "fp8" && job.quantizedPath
+      ? job.quantizedPath
+      : (job.mergedPath || `${job.outputDir}/merged`);
     const params = new URLSearchParams({
       finetuneModel: modelPath,
       finetuneJobId: job.id,
       baseModel: job.baseModel,
+      artifactVariant: variant,
     });
     if (job.displayName) params.set("displayName", job.displayName);
     window.location.href = `/deployments?${params.toString()}`;
@@ -926,6 +962,30 @@ export default function FinetunePage() {
                         Merging...
                       </span>
                     )}
+                    {job.mergeStatus === "completed" && job.quantizationStatus === "quantized" && (
+                      <div className="flex gap-3 text-xs">
+                        <label className="flex items-center gap-1 cursor-pointer">
+                          <input
+                            type="radio"
+                            name={`variant-${job.id}`}
+                            value="bf16"
+                            checked={(selectedVariant[job.id] ?? "bf16") === "bf16"}
+                            onChange={() => setSelectedVariant((p) => ({ ...p, [job.id]: "bf16" }))}
+                          />
+                          <span className="text-gray-300">BF16</span>
+                        </label>
+                        <label className="flex items-center gap-1 cursor-pointer">
+                          <input
+                            type="radio"
+                            name={`variant-${job.id}`}
+                            value="fp8"
+                            checked={selectedVariant[job.id] === "fp8"}
+                            onChange={() => setSelectedVariant((p) => ({ ...p, [job.id]: "fp8" }))}
+                          />
+                          <span className="text-purple-300">FP8</span>
+                        </label>
+                      </div>
+                    )}
                     {job.mergeStatus === "completed" && (
                       <button
                         onClick={() => deployJob(job)}
@@ -933,6 +993,23 @@ export default function FinetunePage() {
                       >
                         Deploy
                       </button>
+                    )}
+                    {job.mergeStatus === "completed" && (!job.quantizationStatus || job.quantizationStatus === "failed") && (
+                      <button
+                        onClick={() => quantizeJob(job.id)}
+                        className="text-xs px-2 py-1 rounded bg-purple-900/50 hover:bg-purple-800 text-purple-300 transition-colors border border-purple-500/40"
+                      >
+                        Quantize to FP8
+                      </button>
+                    )}
+                    {job.quantizationStatus === "quantizing" && (
+                      <span className="text-xs text-purple-300 animate-pulse">Quantizing FP8…</span>
+                    )}
+                    {job.quantizationStatus === "quantized" && (
+                      <span className="text-xs text-purple-300">FP8 ready ✓</span>
+                    )}
+                    {job.quantizationStatus === "failed" && (
+                      <span className="text-xs text-red-400">FP8 quantize failed</span>
                     )}
                     {(job.status === "failed" || job.status === "stopped") && (
                       <button
