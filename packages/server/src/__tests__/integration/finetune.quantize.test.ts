@@ -174,6 +174,74 @@ describe("POST /api/finetune/:id/quantize", () => {
   });
 });
 
+describe("POST /api/finetune/:id/deploy with artifactVariant", () => {
+  async function seedQuantizedJob() {
+    const node = await prisma.node.create({
+      data: { id: "nd1", name: "nd1", ipAddress: "10.0.1.1", agentPort: 8089, status: "online", vramTotal: 122000 },
+    });
+    return prisma.fineTuneJob.create({
+      data: {
+        nodeId: node.id, recipeFile: "recipes/test", baseModel: "Qwen/Qwen3.6-27B",
+        method: "lora", dataset: "/tmp/ds.jsonl", displayName: "test-deploy",
+        status: "completed", mergeStatus: "completed",
+        mergedPath: "/mnt/tank/outputs/job-d/merged",
+        outputDir: "/mnt/tank/outputs/job-d",
+        quantizationStatus: "quantized",
+        quantizedPath: "/mnt/tank/outputs/job-d/merged-fp8",
+        quantizedAt: new Date(),
+      },
+    });
+  }
+
+  it("defaults to bf16 (merged path) when artifactVariant is omitted", async () => {
+    const { hub, sent } = makeStubHub({ file: "recipes/test", scripts: { quantize_fp8: "scripts/quantize_fp8.py" } });
+    const app = makeApp(hub);
+    const job = await seedQuantizedJob();
+
+    const res = await request(app).post(`/api/finetune/${job.id}/deploy`).send({ nodeId: job.nodeId });
+    expect(res.status).toBe(201);
+    const cmd = sent.find((s) => (s.message as { type: string }).type === "cmd:finetune:deploy");
+    expect(cmd).toBeTruthy();
+    const payload = (cmd!.message as { payload: { artifactVariant?: string; modelPath: string } }).payload;
+    expect(payload.artifactVariant ?? "bf16").toBe("bf16");
+    expect(payload.modelPath).toBe("/mnt/tank/outputs/job-d/merged");
+  });
+
+  it("uses fp8 path when artifactVariant=fp8 and quantizedPath exists", async () => {
+    const { hub, sent } = makeStubHub({ file: "recipes/test", scripts: { quantize_fp8: "scripts/quantize_fp8.py" } });
+    const app = makeApp(hub);
+    const job = await seedQuantizedJob();
+
+    const res = await request(app).post(`/api/finetune/${job.id}/deploy`).send({ nodeId: job.nodeId, artifactVariant: "fp8" });
+    expect(res.status).toBe(201);
+    const cmd = sent.find((s) => (s.message as { type: string }).type === "cmd:finetune:deploy");
+    const payload = (cmd!.message as { payload: { artifactVariant: string; modelPath: string } }).payload;
+    expect(payload.artifactVariant).toBe("fp8");
+    expect(payload.modelPath).toBe("/mnt/tank/outputs/job-d/merged-fp8");
+  });
+
+  it("returns 400 when artifactVariant=fp8 but quantizedPath is missing", async () => {
+    const { hub } = makeStubHub({ file: "recipes/test", scripts: { quantize_fp8: "scripts/quantize_fp8.py" } });
+    const app = makeApp(hub);
+    const node = await prisma.node.create({
+      data: { id: "nd2", name: "nd2", ipAddress: "10.0.1.2", agentPort: 8089, status: "online", vramTotal: 122000 },
+    });
+    const job = await prisma.fineTuneJob.create({
+      data: {
+        nodeId: node.id, recipeFile: "recipes/test", baseModel: "Qwen/Qwen3.6-27B",
+        method: "lora", dataset: "/tmp/ds.jsonl",
+        status: "completed", mergeStatus: "completed",
+        mergedPath: "/mnt/tank/outputs/job-nq/merged",
+        outputDir: "/mnt/tank/outputs/job-nq",
+      },
+    });
+
+    const res = await request(app).post(`/api/finetune/${job.id}/deploy`).send({ nodeId: job.nodeId, artifactVariant: "fp8" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/quantiz/i);
+  });
+});
+
 describe("AgentHub: quantize-complete persists state", () => {
   let AgentHub: typeof import("../../ws/agent-hub.js").AgentHub;
 

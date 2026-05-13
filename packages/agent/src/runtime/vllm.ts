@@ -75,11 +75,13 @@ export function generateLocalModelRecipe(params: {
   servedModelName?: string;
   // Absolute filesystem path to the training recipe's directory (e.g.
   // `<fine-tune-recipes>/recipes/qwen3.6-27b-base-lora-attn-mlp`). If this
-  // directory contains an `inference.yaml`, that file is used verbatim as
-  // the serve template — only `{{MERGED_MODEL_PATH}}` is substituted and
-  // `served_model_name` is injected into the defaults block. If absent or
+  // directory contains an `inference.yaml` (bf16) or `inference-fp8.yaml`
+  // (fp8), that file is used verbatim as the serve template. If absent or
   // the file doesn't exist, the existing minimal auto-gen path runs.
   recipeDir?: string;
+  // Which artifact variant to serve. Drives which inference template file
+  // is selected: bf16 → inference.yaml, fp8 → inference-fp8.yaml.
+  artifactVariant?: "bf16" | "fp8";
 }): string {
   const recipeName = `finetune-${params.jobId.slice(0, 12)}`;
   const recipeFile = `recipes/${recipeName}.yaml`;
@@ -89,7 +91,7 @@ export function generateLocalModelRecipe(params: {
   // recipe. Lets each fine-tune family own its full lifecycle (train +
   // merge + serve) with the right vLLM flags for its weights.
   if (params.recipeDir) {
-    const templatePath = findInferenceTemplate(params.recipeDir);
+    const templatePath = findInferenceTemplate(params.recipeDir, params.artifactVariant ?? "bf16");
     if (templatePath) {
       const tmpl = readFileSync(templatePath, "utf-8");
       const materialized = applyFinetuneSubstitutions(tmpl, {

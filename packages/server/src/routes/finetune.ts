@@ -681,17 +681,33 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
   });
   if (!job) return res.status(404).json({ error: "Job not found" });
 
-  const { nodeId, nodeIds, config } = req.body;
+  const { nodeId, nodeIds, config, artifactVariant } = req.body as {
+    nodeId?: string;
+    nodeIds?: string[];
+    config?: Record<string, unknown>;
+    artifactVariant?: "bf16" | "fp8";
+  };
   const isCluster = Array.isArray(nodeIds) && nodeIds.length > 1;
   const headNodeId = isCluster ? nodeIds[0] : (nodeId || job.nodeId);
   if (!headNodeId) {
     return res.status(400).json({ error: "nodeId or nodeIds required" });
   }
 
-  // Determine model path — use merged if available, otherwise adapter
-  const modelPath = job.mergedPath || (job.outputDir ? `${job.outputDir}/merged` : null);
-  if (!modelPath || job.mergeStatus !== "completed") {
-    return res.status(400).json({ error: "Model must be merged before deployment. Call POST /merge first." });
+  const variant: "bf16" | "fp8" = artifactVariant === "fp8" ? "fp8" : "bf16";
+
+  let modelPath: string | null;
+  if (variant === "fp8") {
+    if (job.quantizationStatus !== "quantized" || !job.quantizedPath) {
+      return res.status(400).json({
+        error: "FP8 deploy requested but no quantized artifact exists. Call POST /quantize first.",
+      });
+    }
+    modelPath = job.quantizedPath;
+  } else {
+    modelPath = job.mergedPath || (job.outputDir ? `${job.outputDir}/merged` : null);
+    if (!modelPath || job.mergeStatus !== "completed") {
+      return res.status(400).json({ error: "Model must be merged before deployment. Call POST /merge first." });
+    }
   }
 
   // Look up the training recipe's deploy config for container/defaults
@@ -800,10 +816,13 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
       modelName: model.name,
       // Relative path of the training recipe (e.g.
       // "recipes/qwen3.6-27b-base-lora-attn-mlp"). The agent resolves this
-      // to an absolute dir and looks for a sibling inference.yaml to use
-      // as the vLLM serve template. If absent, deploy falls back to the
-      // legacy minimal auto-gen.
+      // to an absolute dir and looks for a sibling inference.yaml (bf16) or
+      // inference-fp8.yaml (fp8) to use as the vLLM serve template.
+      // If absent, deploy falls back to the legacy minimal auto-gen.
       recipeFile: job.recipeFile,
+      // Which artifact variant to serve: bf16 uses the merged path,
+      // fp8 uses the quantized path. Drives template selection on the agent.
+      artifactVariant: variant,
       // clusterNodes / clusterNodeFastIps are undefined for solo deploys and
       // set to arrays for multi-node — computed above from Task 3's nodeIds[].
       clusterNodes: clusterNodeIps,

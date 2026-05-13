@@ -123,3 +123,35 @@ describe("findInferenceTemplate", () => {
     expect(findInferenceTemplate("/nonexistent/path/never/created")).toBeNull();
   });
 });
+
+describe("findInferenceTemplate(variant)", () => {
+  it("returns inference.yaml when variant is bf16 (or omitted)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tpl-"));
+    writeFileSync(join(dir, "inference.yaml"), "name: bf16\n");
+    expect(findInferenceTemplate(dir, "bf16")).toBe(join(dir, "inference.yaml"));
+    expect(findInferenceTemplate(dir)).toBe(join(dir, "inference.yaml"));
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("returns inference-fp8.yaml when variant is fp8 and file exists", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tpl-"));
+    writeFileSync(join(dir, "inference.yaml"), "name: bf16\n");
+    writeFileSync(join(dir, "inference-fp8.yaml"), "name: fp8\n");
+    expect(findInferenceTemplate(dir, "fp8")).toBe(join(dir, "inference-fp8.yaml"));
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("returns null when variant is fp8 but inference-fp8.yaml is missing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tpl-"));
+    writeFileSync(join(dir, "inference.yaml"), "name: bf16\n");
+    expect(findInferenceTemplate(dir, "fp8")).toBeNull();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("returns null when neither variant exists", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tpl-"));
+    expect(findInferenceTemplate(dir, "bf16")).toBeNull();
+    expect(findInferenceTemplate(dir, "fp8")).toBeNull();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

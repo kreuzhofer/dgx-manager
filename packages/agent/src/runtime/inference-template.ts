@@ -50,12 +50,20 @@ export function applyFinetuneSubstitutions(
 }
 
 /**
- * Return the absolute path to `<recipeDir>/inference.yaml` if it exists,
- * else null. Used by the deploy path to decide whether to inherit a
- * hand-authored serve config (Task 5 caller) or fall through to the
- * minimal auto-gen.
+ * Return the absolute path to the inference template for a given
+ * artifact variant, or null if no template exists for it.
+ *
+ *   bf16 (default) → <recipeDir>/inference.yaml
+ *   fp8            → <recipeDir>/inference-fp8.yaml
+ *
+ * Used by the deploy path to decide whether to inherit a hand-authored
+ * serve config or fall through to the minimal auto-gen.
  */
-export function findInferenceTemplate(recipeDir: string): string | null {
-  const candidate = join(recipeDir, "inference.yaml");
+export function findInferenceTemplate(
+  recipeDir: string,
+  variant: "bf16" | "fp8" = "bf16",
+): string | null {
+  const filename = variant === "fp8" ? "inference-fp8.yaml" : "inference.yaml";
+  const candidate = join(recipeDir, filename);
   return existsSync(candidate) ? candidate : null;
 }

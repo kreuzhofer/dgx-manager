@@ -818,7 +818,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
     case "cmd:finetune:deploy": {
       const {
         jobId, deploymentId, modelPath, deployContainer, config,
-        clusterNodes, clusterNodeFastIps, modelName, recipeFile,
+        clusterNodes, clusterNodeFastIps, modelName, recipeFile, artifactVariant,
       } = msg.payload as {
         jobId: string;
         deploymentId: string;
@@ -829,6 +829,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         clusterNodeFastIps?: (string | null)[];
         modelName?: string;
         recipeFile?: string;
+        artifactVariant?: "bf16" | "fp8";
       };
 
       const isCluster = Array.isArray(clusterNodes) && clusterNodes.length > 1;
@@ -871,6 +872,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
           pipelineParallel: pipelineParallel ?? 1,
           servedModelName: modelName,
           recipeDir,
+          artifactVariant: artifactVariant ?? "bf16",
         });
 
         sendMsg("agent:deployment:status", { deploymentId, status: "starting" });
