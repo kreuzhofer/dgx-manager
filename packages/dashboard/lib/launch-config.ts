@@ -12,6 +12,9 @@
  *   - config === ""   (older rows, edge case)
  *   - malformed JSON  (returns [] rather than throwing)
  *   - value === null  (JSON-stringified explicit nulls — filtered out)
+ *
+ * Note: JSON.parse never produces `undefined` property values (undefined
+ * is not a JSON value), so there is no explicit undefined-filter.
  */
 
 export const LAUNCH_CONFIG_LABELS: Record<string, string> = {
@@ -38,19 +41,17 @@ export function parseLaunchConfig(raw: string | null | undefined): LaunchConfigE
   } catch {
     return [];
   }
-  if (!parsed || typeof parsed !== "object") return [];
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
 
   const out: LaunchConfigEntry[] = [];
-  // First: canonical-order keys present in the config.
   for (const key of Object.keys(LAUNCH_CONFIG_LABELS)) {
-    if (key in parsed && parsed[key] !== null && parsed[key] !== undefined) {
+    if (key in parsed && parsed[key] !== null) {
       out.push({ key, label: LAUNCH_CONFIG_LABELS[key]!, value: parsed[key] });
     }
   }
-  // Then: any extra keys we don't have labels for, raw.
   for (const key of Object.keys(parsed)) {
     if (key in LAUNCH_CONFIG_LABELS) continue;
-    if (parsed[key] === null || parsed[key] === undefined) continue;
+    if (parsed[key] === null) continue;
     out.push({ key, label: key, value: parsed[key] });
   }
   return out;

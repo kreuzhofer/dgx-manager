@@ -14,6 +14,17 @@ describe("parseLaunchConfig", () => {
     expect(parseLaunchConfig("{not json")).toEqual([]);
   });
 
+  it("returns an empty array when config parses to an empty object", () => {
+    expect(parseLaunchConfig("{}")).toEqual([]);
+  });
+
+  it("returns an empty array when config parses to a JSON array", () => {
+    // Defensive: typeof [] === "object" so the type guard must check
+    // Array.isArray explicitly; otherwise array indices would be
+    // emitted as bogus entries.
+    expect(parseLaunchConfig("[1,2,3]")).toEqual([]);
+  });
+
   it("returns labeled key-value pairs in canonical order", () => {
     const cfg = JSON.stringify({
       lora_alpha: 32,
@@ -29,10 +40,8 @@ describe("parseLaunchConfig", () => {
     ]);
   });
 
-  it("skips keys whose value is undefined or null", () => {
-    const cfg = JSON.stringify({ learning_rate: null, batch_size: 1, max_steps: undefined });
-    // Undefined fields are dropped by JSON.stringify; null fields are
-    // returned by JSON.parse but should be filtered out here.
+  it("skips keys whose value is null", () => {
+    const cfg = JSON.stringify({ learning_rate: null, batch_size: 1 });
     expect(parseLaunchConfig(cfg)).toEqual([
       { key: "batch_size", label: "Batch size", value: 1 },
     ]);
@@ -43,6 +52,14 @@ describe("parseLaunchConfig", () => {
     expect(parseLaunchConfig(cfg)).toEqual([
       { key: "learning_rate", label: "Learning rate", value: 1e-4 },
       { key: "save_steps", label: "save_steps", value: 50 },
+    ]);
+  });
+
+  it("emits only unknown keys when no canonical keys are present", () => {
+    const cfg = JSON.stringify({ save_steps: 50, warmup_ratio: 0.1 });
+    expect(parseLaunchConfig(cfg)).toEqual([
+      { key: "save_steps", label: "save_steps", value: 50 },
+      { key: "warmup_ratio", label: "warmup_ratio", value: 0.1 },
     ]);
   });
 
