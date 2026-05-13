@@ -153,9 +153,16 @@ model FineTuneJob {
   progress     Float?
   outputDir    String?
   outputPath   String?
-  mergeStatus  String?
-  mergedPath   String?
-  deploymentId String?
+  mergeStatus          String?
+  mergedPath           String?
+  // FP8 quantization (post-merge). Defaults to null until POST /api/finetune/:id/quantize
+  // fires; transitions to "quantizing"→"quantized"|"failed". Independent of mergeStatus so
+  // the BF16 deploy path can ignore it entirely.
+  quantizationStatus   String?   // null | "pending" | "quantizing" | "quantized" | "failed"
+  quantizedPath        String?
+  quantizationLog      String?
+  quantizedAt          DateTime?
+  deploymentId         String?
   logs         String?
   startedAt    DateTime?
   completedAt  DateTime?
