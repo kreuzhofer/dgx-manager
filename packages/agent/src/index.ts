@@ -11,6 +11,7 @@ import { removeDeployment } from "./runtime/deployment-store.js";
 import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth } from "./runtime/ollama.js";
 import { discoverTrainingRecipes } from "./training-recipes.js";
 import { startFinetuneJob, stopFinetuneJob, mergeLoraAdapter, reattachFinetuneJobs } from "./runtime/finetune.js";
+import { quantizeMergedToFp8 } from "./runtime/finetune-quantize.js";
 import { selfAudit } from "./self-audit.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -792,6 +793,25 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
           });
         },
       }, mergeScript);
+      break;
+    }
+
+    case "cmd:finetune:quantize": {
+      const { jobId, mergedPath, quantizedOutputDir, quantizeScript } = msg.payload as {
+        jobId: string; mergedPath: string; quantizedOutputDir: string; quantizeScript: string;
+      };
+
+      console.log(`[finetune] Quantizing job ${jobId}: ${mergedPath} -> ${quantizedOutputDir} (script=${quantizeScript})`);
+      quantizeMergedToFp8(jobId, mergedPath, quantizedOutputDir, {
+        onLog: (line) => sendMsg("agent:finetune:quantize-progress", { jobId, log: line }),
+        onProgress: (phase, phaseProgress) => sendMsg("agent:finetune:quantize-progress", { jobId, phase, phaseProgress }),
+        onComplete: (status, outputPath, error) => {
+          console.log(`[finetune] Quantize ${jobId} ${status}${error ? `: ${error}` : ""}`);
+          sendMsg("agent:finetune:quantize-complete", {
+            jobId, status, quantizedPath: outputPath ?? null, error: error ?? undefined,
+          });
+        },
+      }, quantizeScript);
       break;
     }
 
