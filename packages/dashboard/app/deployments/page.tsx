@@ -100,6 +100,7 @@ export default function DeploymentsPage() {
   const [finetuneJobId, setFinetuneJobId] = useState<string | null>(null);
   const [finetuneBaseModel, setFinetuneBaseModel] = useState<string | null>(null);
   const [finetuneDisplayName, setFinetuneDisplayName] = useState<string | null>(null);
+  const [finetuneArtifactVariant, setFinetuneArtifactVariant] = useState<string | null>(null);
 
   // Deploy form state
   const [runtimeMode, setRuntimeMode] = useState<"vllm" | "ollama" | "finetune">("vllm");
@@ -183,6 +184,8 @@ export default function DeploymentsPage() {
     }
     const fn = params.get("displayName");
     if (fn) setFinetuneDisplayName(fn);
+    const fav = params.get("artifactVariant");
+    if (fav === "bf16" || fav === "fp8") setFinetuneArtifactVariant(fav);
   }, []);
 
   // SSE handler for real-time updates
@@ -304,6 +307,7 @@ export default function DeploymentsPage() {
         const ftBody: Record<string, unknown> = { config };
         if (needsClusterFt) ftBody.nodeIds = Array.from(selectedClusterNodes);
         else ftBody.nodeId = selectedNode;
+        if (finetuneArtifactVariant) ftBody.artifactVariant = finetuneArtifactVariant;
 
         const result = await apiFetch<Deployment>(`/api/finetune/${finetuneJobId}/deploy`, {
           method: "POST",
@@ -319,6 +323,7 @@ export default function DeploymentsPage() {
         setFinetuneModel(null);
         setFinetuneJobId(null);
         setFinetuneDisplayName(null);
+        setFinetuneArtifactVariant(null);
         // Same reset the vLLM branch does after submit — without this the
         // launch dialog comes back pre-populated with the prior session's
         // node picks + TP/PP/memory overrides, which surprised users.
