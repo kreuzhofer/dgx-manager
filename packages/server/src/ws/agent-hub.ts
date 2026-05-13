@@ -31,7 +31,16 @@ export interface TrainingRecipe {
   method: string;
   dataset_format?: string;
   container: { image: string; name: string; build_context?: string };
-  scripts: { entrypoint: string; train: string; launch: string; ds_config?: string; merge?: string };
+  scripts: {
+    entrypoint: string;
+    train: string;
+    launch: string;
+    ds_config?: string;
+    merge?: string;
+    /** Post-merge FP8 quantization wrapper (shared scripts/quantize_fp8.py).
+     *  Mirrors the agent-side TrainingRecipe.scripts.quantize_fp8 field. */
+    quantize_fp8?: string;
+  };
   defaults: Record<string, unknown>;
   hardware: { min_nodes: number; gpus_per_node: number; vram_estimate_mb: number };
   deploy?: { container: string; gpu_memory_utilization?: number; max_model_len?: number };

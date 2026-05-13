@@ -70,7 +70,7 @@ function makeStubHub(recipe: { file: string; scripts: { quantize_fp8?: string; m
   };
 }
 
-function makeApp(hub: { getTrainingRecipes: () => unknown[]; sendToAgent: (...a: unknown[]) => void }) {
+function makeApp(hub: { getTrainingRecipes: () => unknown[]; sendToAgent: (nodeId: string, message: unknown) => unknown }) {
   const app = express();
   app.use(express.json());
   app.set("agentHub", hub);
