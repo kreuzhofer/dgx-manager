@@ -622,6 +622,58 @@ finetuneRouter.post("/:id/merge", async (req, res) => {
   res.json({ status: "merging", mergedOutputDir });
 });
 
+finetuneRouter.post("/:id/quantize", async (req, res) => {
+  const job = await prisma.fineTuneJob.findUnique({ where: { id: req.params.id } });
+  if (!job) return res.status(404).json({ error: "Job not found" });
+
+  // Pre-flight: merge must be done.
+  if (job.mergeStatus !== "completed" || !job.mergedPath) {
+    return res.status(400).json({ error: "Job must be merged before quantizing. Call POST /merge first." });
+  }
+
+  // Recipe must support quantization. Mirrors how scripts.merge is required
+  // for the merge endpoint.
+  const agentHub: AgentHub = req.app.get("agentHub");
+  const recipe = job.recipeFile
+    ? agentHub.getTrainingRecipes().find((r) => r.file === job.recipeFile)
+    : undefined;
+  const quantizeScript = recipe?.scripts.quantize_fp8;
+  if (!quantizeScript) {
+    return res.status(501).json({
+      error: `Recipe ${job.recipeFile} does not declare scripts.quantize_fp8 — quantization not supported for this recipe.`,
+    });
+  }
+
+  // Idempotency: already quantized → return existing artifact.
+  if (job.quantizationStatus === "quantized" && job.quantizedPath) {
+    return res.json({ status: "quantized", quantizedPath: job.quantizedPath });
+  }
+
+  // In-flight: refuse to re-kick.
+  if (job.quantizationStatus === "quantizing") {
+    return res.status(409).json({ error: "Quantization already in progress for this job." });
+  }
+
+  const quantizedOutputDir = `${job.outputDir ?? `${SHARED_STORAGE}/outputs/${job.id}`}/merged-fp8`;
+
+  agentHub.sendToAgent(job.nodeId, {
+    type: "cmd:finetune:quantize",
+    payload: {
+      jobId: job.id,
+      mergedPath: job.mergedPath,
+      quantizedOutputDir,
+      quantizeScript,
+    },
+  });
+
+  await prisma.fineTuneJob.update({
+    where: { id: job.id },
+    data: { quantizationStatus: "quantizing", quantizedPath: quantizedOutputDir },
+  });
+
+  res.json({ status: "quantizing", quantizedPath: quantizedOutputDir });
+});
+
 finetuneRouter.post("/:id/deploy", async (req, res) => {
   const job = await prisma.fineTuneJob.findUnique({
     where: { id: req.params.id },
