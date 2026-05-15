@@ -37,6 +37,18 @@ The server APIs for these features are complete, but the dashboard pages are sti
 - **Load Balancer UI** — Rule management, endpoint assignment, strategy configuration
 - **Models UI** — Model registry browser and management
 
+### Missing API endpoints
+
+- [ ] `GET /api/deployments/:id` — single-deployment lookup. Today only the list endpoint exists, so any script/UI watching a specific deployment has to fetch the whole list and filter client-side. Should return the same shape as a list entry (deployment + node + model + clusterNodes), 404 if not found. Trivial to add (mirror finetune.ts pattern), high value for monitoring scripts and the deployment-detail page.
+
+### Deploy config override UI
+
+- [ ] Deploy form (and fine-tune `Deploy` action) should expose recipe-level config overrides — at minimum `max_model_len`, `gpu_memory_utilization`, `tensor_parallel`. Today recipe defaults (or worse, `recipe.yaml`'s `deploy.max_model_len`) win silently and the only way to override is hand-crafting a `POST /api/finetune/:id/deploy` body with `config: {maxModelLen: …}`. Concrete miss case: the qwen3.6-27b training recipe has `deploy.max_model_len: 4096` as a smoke-test leftover, which shadows `inference.yaml`/`inference-fp8.yaml`'s 128000 default, so every fine-tune deploy lands at 4k context without warning. UI should: (a) show the effective value with provenance (recipe.yaml > inference[ -fp8].yaml > server default), (b) let the user override per-deploy, (c) persist the override on the deployment record so restart preserves it.
+
+### Deploy status accuracy
+
+- [ ] Deployment `status: "running"` should mean vLLM is actually serving, not just that the container started. Today the manager flips to `running` when the agent reports container start (often within 60s), but for a 27B model on 2 nodes, vLLM doesn't bind port 8000 until safetensors load + Ray init + cudagraph capture finish (~5–6 min). A scripted "wait for ready" loop hits a connection-refused window even though the dashboard says "running". Options: add a `loading` sub-state until the `/v1/models` probe succeeds; or have the agent stream readiness events back over the WS and update the deployment row when the API is bound. Either way the UI should show "loading" with progress, not "running".
+
 ## Phase 3: Fine-Tuning Pipeline ✅
 
 **Goal:** Run training jobs on cluster nodes with full visibility from the dashboard, then deploy fine-tuned models for inference.
