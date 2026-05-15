@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { toast } from "sonner";
 import { apiFetch } from "@/lib/api";
 import { useSSE, type SseEvent } from "@/lib/sse";
@@ -15,6 +15,11 @@ interface Recipe {
   cluster_only?: boolean;
   solo_only?: boolean;
   defaults: Record<string, unknown>;
+  // Training recipes carry a separate `deploy:` block describing inference
+  // defaults (max_model_len, gpu_memory_utilization, …). Optional because
+  // hand-curated vLLM recipes don't have one. Used by the fine-tune Deploy
+  // form to surface effective defaults from recipe.yaml as input placeholders.
+  deploy?: Record<string, unknown>;
 }
 
 interface Node {
@@ -187,6 +192,53 @@ export default function DeploymentsPage() {
     const fav = params.get("artifactVariant");
     if (fav === "bf16" || fav === "fp8") setFinetuneArtifactVariant(fav);
   }, []);
+
+  // When in fine-tune mode, look up the job's training recipe and pre-fill the
+  // override fields from its `deploy` block. Precedence at deploy time is
+  // request body > recipe.yaml `deploy` > inference[-fp8].yaml `defaults` >
+  // server default. The dashboard only sees the first two layers (training
+  // recipes API exposes the `deploy` block); inference-template defaults live
+  // on agent disk and aren't surfaced — fine to skip since recipe.yaml is the
+  // dominant override path.
+  const [finetuneJobRecipeFile, setFinetuneJobRecipeFile] = useState<string | null>(null);
+  useEffect(() => {
+    if (runtimeMode !== "finetune" || !finetuneJobId) return;
+    let cancelled = false;
+    apiFetch<{ recipeFile?: string | null }>(`/api/finetune/${finetuneJobId}`)
+      .then((job) => {
+        if (cancelled) return;
+        if (job.recipeFile) setFinetuneJobRecipeFile(job.recipeFile);
+      })
+      .catch(() => { /* leave placeholders blank if lookup fails */ });
+    return () => { cancelled = true; };
+  }, [runtimeMode, finetuneJobId]);
+
+  const finetuneRecipeData = useMemo(
+    () => (finetuneJobRecipeFile
+      ? recipes.find((r) => r.file === finetuneJobRecipeFile || r.file === `${finetuneJobRecipeFile}/recipe.yaml`) ?? null
+      : null),
+    [finetuneJobRecipeFile, recipes],
+  );
+
+  // First-load pre-fill: when the recipe match resolves, populate the override
+  // inputs so the user sees what value will be sent. Only fill fields that are
+  // currently empty so user edits aren't clobbered by a late-arriving recipes
+  // list update.
+  const prefilledFromFinetuneRecipe = useRef(false);
+  useEffect(() => {
+    if (!finetuneRecipeData?.deploy || prefilledFromFinetuneRecipe.current) return;
+    const d = finetuneRecipeData.deploy;
+    if (maxModelLen === "" && typeof d.max_model_len === "number") {
+      setMaxModelLen(String(d.max_model_len));
+    }
+    if (gpuMem === "" && typeof d.gpu_memory_utilization === "number") {
+      setGpuMem(String(d.gpu_memory_utilization));
+    }
+    if (tensorParallel === "" && typeof d.tensor_parallel === "number") {
+      setTensorParallel(String(d.tensor_parallel));
+    }
+    prefilledFromFinetuneRecipe.current = true;
+  }, [finetuneRecipeData, maxModelLen, gpuMem, tensorParallel]);
 
   // SSE handler for real-time updates
   const handleSSE = useCallback((event: SseEvent) => {
@@ -817,9 +869,22 @@ export default function DeploymentsPage() {
           </>
         )}
 
-        {/* Deployment options for finetune mode (port, TP, PP, maxModelLen, gpuMem) */}
+        {/* Deployment options for finetune mode (port, TP, PP, maxModelLen, gpuMem).
+            Placeholders show the effective default sourced from the fine-tune
+            job's training recipe `deploy:` block (or generic fallback when the
+            recipe lookup hasn't resolved or doesn't carry a value). The same
+            effects pre-fill the inputs themselves so the user sees what will
+            be sent without having to re-type. Editing wins server-side via
+            request body > recipe.yaml > inference template default. */}
         {runtimeMode === "finetune" && (
           <div className="mt-3 p-3 bg-gray-800/50 rounded border border-gray-700/50">
+            {finetuneRecipeData && (
+              <p className="text-[10px] text-gray-500 mb-2">
+                Defaults from{" "}
+                <span className="text-gray-400 font-mono">{finetuneRecipeData.file}</span>
+                {" "}— edit to override.
+              </p>
+            )}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               <div>
                 <label className="block text-[10px] text-gray-500 mb-0.5">Port</label>
@@ -836,7 +901,7 @@ export default function DeploymentsPage() {
                   type="number"
                   value={tensorParallel}
                   onChange={(e) => setTensorParallel(e.target.value)}
-                  placeholder="1"
+                  placeholder={String((finetuneRecipeData?.deploy?.tensor_parallel as number | undefined) ?? 1)}
                   className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-green-500"
                 />
               </div>
@@ -846,7 +911,7 @@ export default function DeploymentsPage() {
                   type="number"
                   value={pipelineParallel}
                   onChange={(e) => setPipelineParallel(e.target.value)}
-                  placeholder="1"
+                  placeholder={String((finetuneRecipeData?.deploy?.pipeline_parallel as number | undefined) ?? 1)}
                   className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-green-500"
                 />
               </div>
@@ -856,7 +921,7 @@ export default function DeploymentsPage() {
                   type="number"
                   value={maxModelLen}
                   onChange={(e) => setMaxModelLen(e.target.value)}
-                  placeholder=""
+                  placeholder={String((finetuneRecipeData?.deploy?.max_model_len as number | undefined) ?? "")}
                   className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-green-500"
                 />
               </div>
@@ -868,7 +933,7 @@ export default function DeploymentsPage() {
                   min="0"
                   value={gpuMem}
                   onChange={(e) => setGpuMem(e.target.value)}
-                  placeholder="0.85"
+                  placeholder={String((finetuneRecipeData?.deploy?.gpu_memory_utilization as number | undefined) ?? 0.85)}
                   className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-green-500"
                 />
                 <p className="text-[10px] text-gray-500 mt-0.5">fraction 0–1; leave blank for default</p>
