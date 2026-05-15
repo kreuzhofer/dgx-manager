@@ -695,19 +695,17 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
 
   const variant: "bf16" | "fp8" = artifactVariant === "fp8" ? "fp8" : "bf16";
 
-  let modelPath: string | null;
-  if (variant === "fp8") {
-    if (job.quantizationStatus !== "quantized" || !job.quantizedPath) {
-      return res.status(400).json({
-        error: "FP8 deploy requested but no quantized artifact exists. Call POST /quantize first.",
-      });
-    }
-    modelPath = job.quantizedPath;
-  } else {
-    modelPath = job.mergedPath || (job.outputDir ? `${job.outputDir}/merged` : null);
-    if (!modelPath || job.mergeStatus !== "completed") {
-      return res.status(400).json({ error: "Model must be merged before deployment. Call POST /merge first." });
-    }
+  // Both variants serve the same BF16 merged weights. FP8 deploys use vLLM's
+  // on-load `--quantization fp8` (set in inference-fp8.yaml) to convert weights
+  // to FP8 at model-load time. We do NOT use llmcompressor's offline quantize:
+  // its hard transformers<=4.57.6 pin conflicts with newer model architectures
+  // (e.g. qwen3_5) that require transformers>=5.0, and on-load conversion gives
+  // us the same serving footprint without the conflict.
+  const modelPath = job.mergedPath || (job.outputDir ? `${job.outputDir}/merged` : null);
+  if (!modelPath || job.mergeStatus !== "completed") {
+    return res.status(400).json({
+      error: "Model must be merged before deployment. Call POST /merge first.",
+    });
   }
 
   // Look up the training recipe's deploy config for container/defaults

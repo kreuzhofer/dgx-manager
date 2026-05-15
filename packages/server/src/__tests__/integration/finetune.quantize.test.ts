@@ -207,7 +207,12 @@ describe("POST /api/finetune/:id/deploy with artifactVariant", () => {
     expect(payload.modelPath).toBe("/mnt/tank/outputs/job-d/merged");
   });
 
-  it("uses fp8 path when artifactVariant=fp8 and quantizedPath exists", async () => {
+  it("uses BF16 merged path even when artifactVariant=fp8 (on-load FP8)", async () => {
+    // FP8 is now done at vLLM load time via --quantization fp8 in
+    // inference-fp8.yaml. Both bf16 and fp8 deploys ship the same BF16
+    // merged weights; the recipe template choice (inference.yaml vs
+    // inference-fp8.yaml) downstream of artifactVariant is what wires up
+    // --quantization fp8. quantizedPath, if any, is ignored.
     const { hub, sent } = makeStubHub({ file: "recipes/test", scripts: { quantize_fp8: "scripts/quantize_fp8.py" } });
     const app = makeApp(hub);
     const job = await seedQuantizedJob();
@@ -217,11 +222,14 @@ describe("POST /api/finetune/:id/deploy with artifactVariant", () => {
     const cmd = sent.find((s) => (s.message as { type: string }).type === "cmd:finetune:deploy");
     const payload = (cmd!.message as { payload: { artifactVariant: string; modelPath: string } }).payload;
     expect(payload.artifactVariant).toBe("fp8");
-    expect(payload.modelPath).toBe("/mnt/tank/outputs/job-d/merged-fp8");
+    expect(payload.modelPath).toBe("/mnt/tank/outputs/job-d/merged");
   });
 
-  it("returns 400 when artifactVariant=fp8 but quantizedPath is missing", async () => {
-    const { hub } = makeStubHub({ file: "recipes/test", scripts: { quantize_fp8: "scripts/quantize_fp8.py" } });
+  it("allows fp8 deploy without an offline quantized artifact (on-load FP8)", async () => {
+    // Before: returned 400 unless POST /quantize had run. After the move to
+    // vLLM on-load FP8, no offline artifact is needed — the BF16 merge is
+    // sufficient. This locks in the new contract.
+    const { hub, sent } = makeStubHub({ file: "recipes/test", scripts: { quantize_fp8: "scripts/quantize_fp8.py" } });
     const app = makeApp(hub);
     const node = await prisma.node.create({
       data: { id: "nd2", name: "nd2", ipAddress: "10.0.1.2", agentPort: 8089, status: "online", vramTotal: 122000 },
@@ -237,8 +245,11 @@ describe("POST /api/finetune/:id/deploy with artifactVariant", () => {
     });
 
     const res = await request(app).post(`/api/finetune/${job.id}/deploy`).send({ nodeId: job.nodeId, artifactVariant: "fp8" });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/quantiz/i);
+    expect(res.status).toBe(201);
+    const cmd = sent.find((s) => (s.message as { type: string }).type === "cmd:finetune:deploy");
+    const payload = (cmd!.message as { payload: { artifactVariant: string; modelPath: string } }).payload;
+    expect(payload.artifactVariant).toBe("fp8");
+    expect(payload.modelPath).toBe("/mnt/tank/outputs/job-nq/merged");
   });
 });
 

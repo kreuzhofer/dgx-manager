@@ -95,8 +95,14 @@ export async function quantizeMergedToFp8(
 
     tee("[agent] Installing quantization dependencies...\n");
     try {
+      // Don't `-U` transformers — the training container (nvcr.io pytorch
+      // image) preinstalls a recent build that has model_type=qwen3_5
+      // (which the *released* PyPI transformers lags behind). The qwen3_5
+      // merged checkpoint loads fine with the container's transformers but
+      // breaks if we replace it with the PyPI release. Only install missing
+      // packages; never overwrite an existing one.
       execSync(
-        `docker exec ${containerName} pip install -q llmcompressor transformers accelerate safetensors`,
+        `docker exec ${containerName} pip install -q llmcompressor accelerate safetensors`,
         { timeout: 600_000, stdio: "ignore" },
       );
     } catch (err) {
