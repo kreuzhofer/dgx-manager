@@ -2,7 +2,7 @@
 
 export const dynamic = "force-dynamic";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { getBenchmark, type BenchmarkRun } from "@/lib/benchmarks";
@@ -10,7 +10,7 @@ import { BenchmarkChart, type ChartSeries } from "@/components/benchmark-chart";
 
 const PALETTE = ["#a78bfa", "#34d399", "#f59e0b", "#60a5fa", "#f472b6", "#f87171"];
 
-export default function ComparePage() {
+function ComparePageBody() {
   const search = useSearchParams();
   const ids = (search.get("ids") ?? "").split(",").filter(Boolean);
   const [runs, setRuns] = useState<BenchmarkRun[]>([]);
@@ -63,5 +63,13 @@ export default function ComparePage() {
       <BenchmarkChart series={series} metric="ttfrMs" />
       <BenchmarkChart series={series} metric="e2eTtftMs" />
     </div>
+  );
+}
+
+export default function ComparePage() {
+  return (
+    <Suspense fallback={<div className="p-6 text-gray-400">Loading…</div>}>
+      <ComparePageBody />
+    </Suspense>
   );
 }
