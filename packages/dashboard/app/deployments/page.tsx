@@ -341,6 +341,7 @@ export default function DeploymentsPage() {
     setDeploying(true);
     try {
       let body: Record<string, unknown>;
+      const trimmedDisplayName = customDisplayName.trim();
 
       if (runtimeMode === "finetune" && finetuneJobId) {
         const config: Record<string, unknown> = { port: parseInt(port) || 8000 };
@@ -361,8 +362,7 @@ export default function DeploymentsPage() {
         if (needsClusterFt) ftBody.nodeIds = Array.from(selectedClusterNodes);
         else ftBody.nodeId = selectedNode;
         if (finetuneArtifactVariant) ftBody.artifactVariant = finetuneArtifactVariant;
-        const trimmedFtName = customDisplayName.trim();
-        if (trimmedFtName) ftBody.displayName = trimmedFtName;
+        if (trimmedDisplayName) ftBody.displayName = trimmedDisplayName;
 
         const result = await apiFetch<Deployment>(`/api/finetune/${finetuneJobId}/deploy`, {
           method: "POST",
@@ -414,7 +414,6 @@ export default function DeploymentsPage() {
         if (pipelineParallel) configOverrides.pipelineParallel = parseInt(pipelineParallel);
         if (gpuMem) configOverrides.gpuMem = parseFloat(gpuMem);
 
-        const trimmedName = customDisplayName.trim();
         body = needsCluster
           ? {
               // Explicit list lets the user override which N nodes to use
@@ -422,13 +421,13 @@ export default function DeploymentsPage() {
               nodeIds: Array.from(selectedClusterNodes),
               recipeFile: selectedRecipe,
               config: configOverrides,
-              ...(trimmedName ? { displayName: trimmedName } : {}),
+              ...(trimmedDisplayName ? { displayName: trimmedDisplayName } : {}),
             }
           : {
               nodeId: selectedNode || "auto",
               recipeFile: selectedRecipe,
               config: configOverrides,
-              ...(trimmedName ? { displayName: trimmedName } : {}),
+              ...(trimmedDisplayName ? { displayName: trimmedDisplayName } : {}),
             };
       }
 
@@ -639,14 +638,14 @@ export default function DeploymentsPage() {
           <div className="flex bg-gray-800 rounded p-0.5">
             <button
               type="button"
-              onClick={() => { setRuntimeMode("vllm"); setSelectedOllamaModel(""); }}
+              onClick={() => { setRuntimeMode("vllm"); setSelectedOllamaModel(""); setCustomDisplayName(""); }}
               className={`px-3 py-1 rounded text-xs font-medium transition-colors ${runtimeMode === "vllm" ? "bg-green-600 text-white" : "text-gray-400 hover:text-white"}`}
             >
               vLLM
             </button>
             <button
               type="button"
-              onClick={() => { setRuntimeMode("ollama"); setSelectedRecipe(""); }}
+              onClick={() => { setRuntimeMode("ollama"); setSelectedRecipe(""); setCustomDisplayName(""); }}
               className={`px-3 py-1 rounded text-xs font-medium transition-colors ${runtimeMode === "ollama" ? "bg-green-600 text-white" : "text-gray-400 hover:text-white"}`}
             >
               Ollama
@@ -964,7 +963,7 @@ export default function DeploymentsPage() {
               value={customDisplayName}
               onChange={(e) => setCustomDisplayName(e.target.value)}
               placeholder="e.g. chat3d-prod"
-              pattern="[A-Za-z0-9._:\-]*"
+              pattern="[A-Za-z0-9._:-]*"
               maxLength={128}
               className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-green-500"
             />
