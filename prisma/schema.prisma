@@ -87,8 +87,9 @@ model Deployment {
   updatedAt    DateTime               @updatedAt
   node         Node                   @relation(fields: [nodeId], references: [id])
   model        Model                  @relation(fields: [modelId], references: [id])
-  lbEndpoints  LoadBalancerEndpoint[]
-  clusterNodes ClusterNode[]
+  lbEndpoints   LoadBalancerEndpoint[]
+  clusterNodes  ClusterNode[]
+  benchmarkRuns BenchmarkRun[]
 }
 
 model ClusterNode {
@@ -223,4 +224,60 @@ model TrainingMetric {
 
   @@unique([jobId, step])
   @@index([jobId, step])
+}
+
+model BenchmarkRun {
+  id              String   @id @default(cuid())
+  // Nullable + onDelete:SetNull so deleting a deployment doesn't erase its
+  // benchmark history — runs are a permanent record we want to keep for
+  // before/after comparisons.
+  deploymentId    String?
+  presetId        String?  // null when the run used a fully custom config
+  // Snapshot of the target at run-time. We keep these locally so the row
+  // remains interpretable after the deployment is gone.
+  modelName       String
+  endpointUrl     String
+  servedModelName String
+  // JSON-encoded BenchmarkConfig (pp, tg, depth, runs, concurrency, etc.)
+  config          String
+  status          String   @default("pending") // pending | running | completed | failed | canceled
+  error           String?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  // Raw markdown table emitted by llama-benchy (--format markdown). Rendered
+  // verbatim on the detail page as a fallback if structured parsing fails.
+  rawOutput       String?
+  // Aggregate stats surfaced in list/compare views so we don't recompute on
+  // every page render.
+  meanTps         Float?
+  meanTtfrMs      Float?
+  createdAt       DateTime @default(now())
+  deployment      Deployment? @relation(fields: [deploymentId], references: [id], onDelete: SetNull)
+  results         BenchmarkResult[]
+
+  @@index([deploymentId, createdAt])
+  @@index([status])
+}
+
+model BenchmarkResult {
+  id          String   @id @default(cuid())
+  runId       String
+  // What kind of measurement this row represents: "pp" (prompt processing /
+  // prefill) or "tg" (token generation / decode). Lets us bucket charts.
+  opType      String
+  pp          Int
+  tg          Int
+  depth       Int
+  concurrency Int      @default(1)
+  tps         Float
+  peakTps     Float?
+  ttfrMs      Float?
+  estPptMs    Float?
+  e2eTtftMs   Float?
+  // Standard deviations from multi-run averaging — null when --runs=1.
+  tpsStdev    Float?
+  ttfrStdev   Float?
+  run         BenchmarkRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId])
 }
