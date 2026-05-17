@@ -6,6 +6,7 @@ import { SHARED_STORAGE } from "../env.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import type { AgentHub } from "../ws/agent-hub.js";
 import { checkVllmVramAdmission, vramShortfallMessage } from "../admission/vram.js";
+import { normalizeDisplayName, validateDisplayNameUnique, DisplayNameError } from "../deployments/display-name.js";
 
 // vLLM deploy infrastructure lives in a separate repo, mounted via NFS at
 // the same path as on each agent. The auto-generated finetune-<jobId-12>.yaml
@@ -740,14 +741,42 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
   // in schema.prisma). displayName is pre-normalized to null-or-trimmed by
   // POST/PATCH, so we don't trim again here.
   const stableName = `finetune-${job.id.slice(0, 8)}`;
-  const modelName = job.displayName || stableName;
+  const ftModelName = job.displayName || stableName;
+
+  // Optional per-deploy displayName override. When set it does NOT touch
+  // Model.name (the FT's catalog identity stays stable); it only overrides
+  // what vLLM publishes via --served-model-name AND what the dashboard
+  // shows in the deployments list. Lets the same FT be deployed twice
+  // under different served names (e.g. "chat3d-prod" + "chat3d-canary").
+  let perDeployDisplayName: string | null;
+  try {
+    perDeployDisplayName = normalizeDisplayName(
+      (req.body as { displayName?: string | null | undefined } | undefined)?.displayName,
+    );
+  } catch (e) {
+    if (e instanceof DisplayNameError) return res.status(400).json({ error: e.message });
+    throw e;
+  }
+  if (perDeployDisplayName) {
+    const conflict = await validateDisplayNameUnique(prisma, perDeployDisplayName);
+    if (conflict) {
+      return res.status(409).json({
+        error: `Display name "${perDeployDisplayName}" is already in use by deployment ${conflict.conflictId}.`,
+        conflict,
+      });
+    }
+  }
+
+  // What vLLM ultimately publishes. Per-deploy override wins; otherwise
+  // fall back to the fine-tune's own displayName / stable name.
+  const servedModelName = perDeployDisplayName || ftModelName;
 
   let model;
   try {
     model = await prisma.model.upsert({
       where: { finetuneJobId: job.id },
-      create: { name: modelName, runtime: "vllm", finetuneJobId: job.id },
-      update: { name: modelName },
+      create: { name: ftModelName, runtime: "vllm", finetuneJobId: job.id },
+      update: { name: ftModelName },
     });
   } catch (e: unknown) {
     // P2002 = Prisma unique constraint violation. Only Model.name is unique
@@ -756,7 +785,7 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
     // 409 so the user can rename the job and try again.
     if (typeof e === "object" && e !== null && "code" in e && (e as { code: unknown }).code === "P2002") {
       return res.status(409).json({
-        error: `A model named "${modelName}" already exists. Rename this fine-tune (PATCH /api/finetune/${job.id}) and try again.`,
+        error: `A model named "${ftModelName}" already exists. Rename this fine-tune (PATCH /api/finetune/${job.id}) and try again.`,
       });
     }
     throw e;
@@ -768,6 +797,7 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
       modelId: model.id,
       status: "pending",
       clusterMode: isCluster,
+      displayName: perDeployDisplayName,
       config: JSON.stringify({ ...config, localModelPath: modelPath }),
     },
   });
@@ -807,11 +837,9 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
       modelPath,
       baseModel: job.baseModel,
       deployContainer: deployConfig?.container || "vllm-node",
-      // Friendly Model.name (user-set displayName or the stable
-      // finetune-<id> fallback). The agent feeds this to vLLM as
-      // --served-model-name so /v1/models reports the readable name
-      // instead of the on-disk path.
-      modelName: model.name,
+      // Per-deploy override wins; otherwise Model.name (FT's stable name).
+      // Agent threads this into vLLM's --served-model-name.
+      modelName: servedModelName,
       // Relative path of the training recipe (e.g.
       // "recipes/qwen3.6-27b-base-lora-attn-mlp"). The agent resolves this
       // to an absolute dir and looks for a sibling inference.yaml (bf16) or

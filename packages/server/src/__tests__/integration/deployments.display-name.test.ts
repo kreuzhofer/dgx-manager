@@ -19,6 +19,7 @@ process.env.DATABASE_URL = `file:${DB_PATH}`;
 
 let prisma: typeof import("../../prisma.js").prisma;
 let deploymentsRouter: typeof import("../../routes/deployments.js").deploymentsRouter;
+let finetuneRouter: typeof import("../../routes/finetune.js").finetuneRouter;
 
 beforeAll(async () => {
   execSync("npx prisma db push --force-reset", {
@@ -33,6 +34,7 @@ beforeAll(async () => {
   });
   ({ prisma } = await import("../../prisma.js"));
   ({ deploymentsRouter } = await import("../../routes/deployments.js"));
+  ({ finetuneRouter } = await import("../../routes/finetune.js"));
 });
 
 afterAll(async () => {
@@ -290,5 +292,124 @@ describe("POST /api/deployments/:id/restart with displayName", () => {
     const row = await prisma.deployment.findUnique({ where: { id: created.body.id } });
     expect(row?.displayName).toBeNull();
     expect(sent[0].message.payload.servedModelName).toBeUndefined();
+  });
+});
+
+describe("POST /api/finetune/:id/deploy with displayName override", () => {
+  // Local app helper that mounts BOTH routers (uniqueness check spans both
+  // routes — finetune deploys need to see active deployments created via
+  // POST /api/deployments and vice versa).
+  function makeFtApp(hub: unknown) {
+    const app = express();
+    app.use(express.json());
+    app.set("agentHub", hub);
+    app.use("/api/finetune", finetuneRouter);
+    app.use("/api/deployments", deploymentsRouter);
+    return app;
+  }
+
+  function makeFtStubHub() {
+    const sent: { nodeId: string; message: { type: string; payload: Record<string, unknown> } }[] = [];
+    return {
+      hub: {
+        getRecipes: () => [],
+        getOllamaModels: () => [],
+        getTrainingRecipes: () => [
+          {
+            file: "recipes/test-attn-mlp",
+            name: "Test FT Recipe",
+            base_model: "Qwen/Qwen3.6-27B",
+            method: "lora",
+            defaults: {},
+            scripts: { merge: "scripts/merge.py" },
+            deploy: { gpu_memory_utilization: 0.5 },
+          },
+        ],
+        sendToAgent: (nodeId: string, message: { type: string; payload: Record<string, unknown> }) => {
+          sent.push({ nodeId, message });
+        },
+      },
+      sent,
+    };
+  }
+
+  async function seedCompletedJob(node: Awaited<ReturnType<typeof seedNode>>) {
+    return prisma.fineTuneJob.create({
+      data: {
+        nodeId: node.id,
+        baseModel: "Qwen/Qwen3.6-27B",
+        method: "lora",
+        dataset: "/tmp/ds.jsonl",
+        recipeFile: "recipes/test-attn-mlp",
+        status: "completed",
+        mergeStatus: "completed",
+        mergedPath: "/tmp/merged",
+        displayName: "chat3d-build123d-01",
+      },
+    });
+  }
+
+  it("uses the FineTuneJob.displayName when no per-deploy displayName is supplied", async () => {
+    const node = await seedNode();
+    const job = await seedCompletedJob(node);
+    const { hub, sent } = makeFtStubHub();
+    const app = makeFtApp(hub);
+
+    const res = await request(app)
+      .post(`/api/finetune/${job.id}/deploy`)
+      .send({ nodeId: node.id, config: { port: 8000 } });
+
+    expect(res.status).toBe(201);
+    expect(res.body.displayName).toBeNull();
+    expect(sent[0].message.type).toBe("cmd:finetune:deploy");
+    // Falls back to Model.name, which is the FineTuneJob.displayName.
+    expect(sent[0].message.payload.modelName).toBe("chat3d-build123d-01");
+  });
+
+  it("uses the per-deploy displayName when supplied (overrides FT name for this deploy)", async () => {
+    const node = await seedNode();
+    const job = await seedCompletedJob(node);
+    const { hub, sent } = makeFtStubHub();
+    const app = makeFtApp(hub);
+
+    const res = await request(app)
+      .post(`/api/finetune/${job.id}/deploy`)
+      .send({
+        nodeId: node.id,
+        displayName: "chat3d-prod-variant-a",
+        config: { port: 8000 },
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.displayName).toBe("chat3d-prod-variant-a");
+    expect(sent[0].message.payload.modelName).toBe("chat3d-prod-variant-a");
+  });
+
+  it("rejects 409 when the per-deploy displayName conflicts with an active deployment", async () => {
+    const node = await seedNode();
+    const job = await seedCompletedJob(node);
+    const { hub } = makeFtStubHub();
+    const app = makeFtApp(hub);
+
+    // Seed an existing running deployment with the contested name.
+    await prisma.deployment.create({
+      data: {
+        nodeId: node.id,
+        modelId: (await prisma.model.create({ data: { name: "other", runtime: "vllm" } })).id,
+        status: "running",
+        displayName: "taken-name",
+      },
+    });
+
+    const res = await request(app)
+      .post(`/api/finetune/${job.id}/deploy`)
+      .send({
+        nodeId: node.id,
+        displayName: "taken-name",
+        config: { port: 8000 },
+      });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/already in use/);
   });
 });
