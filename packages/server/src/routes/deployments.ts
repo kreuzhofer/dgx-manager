@@ -7,6 +7,7 @@ import type { AgentHub } from "../ws/agent-hub.js";
 import { checkVllmVramAdmission, vramShortfallMessage } from "../admission/vram.js";
 import { readCatalog as readOllamaCatalog } from "../ollama/catalog-store.js";
 import { ollamaVramEstimateMB } from "../ollama/vram-estimate.js";
+import { normalizeDisplayName, validateDisplayNameUnique, DisplayNameError } from "../deployments/display-name.js";
 
 export const deploymentsRouter = Router();
 
@@ -41,7 +42,7 @@ deploymentsRouter.get("/:id/logs", async (req, res) => {
 });
 
 deploymentsRouter.post("/", async (req, res) => {
-  let { nodeId, nodeIds, recipeFile, config, runtime, modelName, modelType } = req.body;
+  let { nodeId, nodeIds, recipeFile, config, runtime, modelName, modelType, displayName: rawDisplayName } = req.body;
   const isOllama = runtime === "ollama";
 
   if (!isOllama && !recipeFile) {
@@ -49,6 +50,34 @@ deploymentsRouter.post("/", async (req, res) => {
   }
   if (isOllama && !modelName) {
     return res.status(400).json({ error: "modelName required for Ollama deployments" });
+  }
+
+  // Normalize + uniqueness-check displayName up front. 400 on bad chars,
+  // 409 on duplicate among active deployments. Ollama deploys ignore the
+  // field (runtime doesn't honor it); we still reject malformed values so
+  // the dashboard surfaces the error immediately.
+  let displayName: string | null;
+  try {
+    displayName = normalizeDisplayName(rawDisplayName);
+  } catch (e) {
+    if (e instanceof DisplayNameError) return res.status(400).json({ error: e.message });
+    throw e;
+  }
+  // Ollama doesn't support per-deploy renames; reject explicitly so the user
+  // doesn't think it took effect.
+  if (displayName && isOllama) {
+    return res.status(400).json({
+      error: "displayName is not supported for Ollama deployments (use the model tag).",
+    });
+  }
+  if (displayName && !isOllama) {
+    const conflict = await validateDisplayNameUnique(prisma, displayName);
+    if (conflict) {
+      return res.status(409).json({
+        error: `Display name "${displayName}" is already in use by deployment ${conflict.conflictId}.`,
+        conflict,
+      });
+    }
   }
 
   const activeStatuses = ["pending", "running", "starting", "building", "downloading", "launching", "loading", "restarting"];
@@ -195,6 +224,7 @@ deploymentsRouter.post("/", async (req, res) => {
       nodeId: headNodeId,
       clusterMode: isCluster,
       vramEstimate: vramEstimate || null,
+      displayName,
       config: JSON.stringify(isOllama
         ? { runtime: "ollama", modelName, modelType: modelType || "chat", ...config }
         : { recipeFile, ...config }),
@@ -240,6 +270,10 @@ deploymentsRouter.post("/", async (req, res) => {
       modelName: isOllama ? modelName : undefined,
       modelType: isOllama ? (modelType || "chat") : undefined,
       recipeFile: isOllama ? undefined : recipeFile,
+      // Per-deploy custom name → vLLM's --served-model-name. Undefined when
+      // the user didn't set displayName, so the agent falls back to the
+      // recipe's authored defaults.served_model_name.
+      servedModelName: displayName ?? undefined,
       config: config || {},
       clusterNodes: clusterNodeIps,
       clusterNodeFastIps,
@@ -324,6 +358,29 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
   }
   const config = { ...savedConfig, ...overrides };
 
+  // Allow the caller to update displayName on restart (re-validating
+  // uniqueness, excluding self). Body shape: { displayName: "new-name" } at
+  // the top level (NOT nested under config — displayName is a column, not
+  // part of the recipe config blob).
+  let newDisplayName = deployment.displayName;
+  if (req.body && Object.prototype.hasOwnProperty.call(req.body, "displayName")) {
+    try {
+      newDisplayName = normalizeDisplayName(req.body.displayName as string | null | undefined);
+    } catch (e) {
+      if (e instanceof DisplayNameError) return res.status(400).json({ error: e.message });
+      throw e;
+    }
+    if (newDisplayName !== deployment.displayName) {
+      const conflict = await validateDisplayNameUnique(prisma, newDisplayName, deployment.id);
+      if (conflict) {
+        return res.status(409).json({
+          error: `Display name "${newDisplayName}" is already in use by deployment ${conflict.conflictId}.`,
+          conflict,
+        });
+      }
+    }
+  }
+
   const clusterNodeIps = deployment.clusterMode
     ? deployment.clusterNodes.map((cn) => cn.node.ipAddress)
     : undefined;
@@ -362,6 +419,7 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
       modelName: isOllamaRestart ? config.modelName : undefined,
       modelType: isOllamaRestart ? (config.modelType || "chat") : undefined,
       recipeFile: isOllamaRestart ? undefined : config.recipeFile,
+      servedModelName: newDisplayName ?? undefined,
       config,
       clusterNodes: clusterNodeIps,
       clusterNodeFastIps,
@@ -375,6 +433,7 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
       // Persist the merged config so future restarts (or the agent's own
       // reconciliation) see the updated overrides.
       ...(Object.keys(overrides).length > 0 ? { config: JSON.stringify(config) } : {}),
+      ...(newDisplayName !== deployment.displayName ? { displayName: newDisplayName } : {}),
     },
   });
 
