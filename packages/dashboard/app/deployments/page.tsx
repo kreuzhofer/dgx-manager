@@ -506,14 +506,24 @@ export default function DeploymentsPage() {
     const d = deployments.find((x) => x.id === id);
     let cfg: Record<string, unknown> = {};
     try { cfg = d?.config ? JSON.parse(d.config) : {}; } catch { /* */ }
+    // Fall back to recipe defaults for fields the user didn't explicitly set
+    // at initial deploy — without this the dialog shows a blank GPU-mem (or
+    // TP/PP/maxLen) box even though the deployment was running with a real
+    // value pulled from recipe.defaults.
+    const recipeDefaults = (recipes.find((r) => r.file === cfg.recipeFile)?.defaults ?? {}) as Record<string, unknown>;
+    const pick = (cfgVal: unknown, defVal: unknown): string => {
+      if (cfgVal != null) return String(cfgVal);
+      if (defVal != null) return String(defVal);
+      return "";
+    };
     setEditingRestart((prev) => ({
       ...prev,
       [id]: {
-        port: cfg.port != null ? String(cfg.port) : "",
-        maxModelLen: cfg.maxModelLen != null ? String(cfg.maxModelLen) : "",
-        tensorParallel: cfg.tensorParallel != null ? String(cfg.tensorParallel) : "",
-        pipelineParallel: cfg.pipelineParallel != null ? String(cfg.pipelineParallel) : "",
-        gpuMem: cfg.gpuMem != null ? String(cfg.gpuMem) : "",
+        port: pick(cfg.port, recipeDefaults.port),
+        maxModelLen: pick(cfg.maxModelLen, recipeDefaults.max_model_len),
+        tensorParallel: pick(cfg.tensorParallel, recipeDefaults.tensor_parallel),
+        pipelineParallel: pick(cfg.pipelineParallel, recipeDefaults.pipeline_parallel),
+        gpuMem: pick(cfg.gpuMem, recipeDefaults.gpu_memory_utilization),
       },
     }));
   };
@@ -1085,6 +1095,10 @@ export default function DeploymentsPage() {
             // Ollama deployments don't take TP/PP/maxModelLen/gpuMem — those
             // are vLLM-only. Restart goes straight to the API; no edit form.
             const isOllama = config.runtime === "ollama";
+            // Recipe defaults are used as placeholder text in the edit-restart
+            // form, so a cleared box still shows what value will actually be
+            // used. Mirrors the placeholder behavior of the initial deploy form.
+            const recipeDefaultsForRestart = (recipes.find((r) => r.file === config.recipeFile)?.defaults ?? {}) as Record<string, unknown>;
 
             return (
               <div
@@ -1235,6 +1249,7 @@ export default function DeploymentsPage() {
                           type="number"
                           value={editingRestart[d.id].port ?? ""}
                           onChange={(e) => setEditingRestart((p) => ({ ...p, [d.id]: { ...p[d.id], port: e.target.value } }))}
+                          placeholder={recipeDefaultsForRestart.port != null ? String(recipeDefaultsForRestart.port) : ""}
                           className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-blue-500"
                         />
                       </div>
@@ -1244,6 +1259,7 @@ export default function DeploymentsPage() {
                           type="number"
                           value={editingRestart[d.id].tensorParallel ?? ""}
                           onChange={(e) => setEditingRestart((p) => ({ ...p, [d.id]: { ...p[d.id], tensorParallel: e.target.value } }))}
+                          placeholder={recipeDefaultsForRestart.tensor_parallel != null ? String(recipeDefaultsForRestart.tensor_parallel) : ""}
                           className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-blue-500"
                         />
                       </div>
@@ -1253,6 +1269,7 @@ export default function DeploymentsPage() {
                           type="number"
                           value={editingRestart[d.id].pipelineParallel ?? ""}
                           onChange={(e) => setEditingRestart((p) => ({ ...p, [d.id]: { ...p[d.id], pipelineParallel: e.target.value } }))}
+                          placeholder={recipeDefaultsForRestart.pipeline_parallel != null ? String(recipeDefaultsForRestart.pipeline_parallel) : ""}
                           className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-blue-500"
                         />
                       </div>
@@ -1262,6 +1279,7 @@ export default function DeploymentsPage() {
                           type="number"
                           value={editingRestart[d.id].maxModelLen ?? ""}
                           onChange={(e) => setEditingRestart((p) => ({ ...p, [d.id]: { ...p[d.id], maxModelLen: e.target.value } }))}
+                          placeholder={recipeDefaultsForRestart.max_model_len != null ? String(recipeDefaultsForRestart.max_model_len) : ""}
                           className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-blue-500"
                         />
                       </div>
@@ -1273,6 +1291,7 @@ export default function DeploymentsPage() {
                           min="0"
                           value={editingRestart[d.id].gpuMem ?? ""}
                           onChange={(e) => setEditingRestart((p) => ({ ...p, [d.id]: { ...p[d.id], gpuMem: e.target.value } }))}
+                          placeholder={recipeDefaultsForRestart.gpu_memory_utilization != null ? String(recipeDefaultsForRestart.gpu_memory_utilization) : ""}
                           className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-blue-500"
                         />
                       </div>
