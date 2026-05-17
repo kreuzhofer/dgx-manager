@@ -370,7 +370,11 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
       if (e instanceof DisplayNameError) return res.status(400).json({ error: e.message });
       throw e;
     }
-    if (newDisplayName !== deployment.displayName) {
+    // Always re-validate uniqueness when restarting with a non-null displayName.
+    // The `excludeDeploymentId` arg handles the "same name as me" case, so even
+    // no-op restarts are safe. Without this, a deployment that went terminal
+    // while another claimed its name could silently slip through on restart.
+    if (newDisplayName) {
       const conflict = await validateDisplayNameUnique(prisma, newDisplayName, deployment.id);
       if (conflict) {
         return res.status(409).json({

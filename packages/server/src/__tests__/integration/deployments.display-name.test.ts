@@ -69,10 +69,14 @@ function makeApp(hub: unknown) {
 }
 
 async function wipeAll() {
-  // FK-safe deletion order.
+  // FK-safe deletion order: leaf tables first. fineTuneJob is removed
+  // between deployment and model because Model.finetuneJobId is a
+  // (nullable) FK to FineTuneJob — without this, Task 5's seeds break
+  // when this `beforeEach` runs.
   await prisma.loadBalancerEndpoint.deleteMany();
   await prisma.clusterNode.deleteMany();
   await prisma.deployment.deleteMany();
+  await prisma.fineTuneJob.deleteMany();
   await prisma.model.deleteMany();
   await prisma.metricSnapshot.deleteMany();
   await prisma.node.deleteMany();
@@ -188,6 +192,24 @@ describe("POST /api/deployments with displayName", () => {
     expect(res.status).toBe(409);
     expect(res.body.error).toMatch(/already in use/);
   });
+
+  it("rejects displayName for Ollama deployments with 400", async () => {
+    const node = await seedNode();
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    const res = await request(app)
+      .post("/api/deployments")
+      .send({
+        nodeId: node.id,
+        runtime: "ollama",
+        modelName: "llama3.1:8b",
+        displayName: "my-ollama-name",
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/not supported for Ollama/);
+  });
 });
 
 describe("POST /api/deployments/:id/restart with displayName", () => {
@@ -243,5 +265,30 @@ describe("POST /api/deployments/:id/restart with displayName", () => {
     const row = await prisma.deployment.findUnique({ where: { id: created.body.id } });
     expect(row?.displayName).toBe("renamed");
     expect(sent[0].message.payload.servedModelName).toBe("renamed");
+  });
+
+  it("clears displayName when restart body sets it to null explicitly", async () => {
+    const node = await seedNode();
+    const { hub, sent } = makeStubHub();
+    const app = makeApp(hub);
+
+    const created = await request(app)
+      .post("/api/deployments")
+      .send({
+        nodeId: node.id,
+        recipeFile: "recipes/test-recipe.yaml",
+        displayName: "to-be-cleared",
+        config: { port: 8000 },
+      });
+    sent.length = 0;
+
+    const restart = await request(app)
+      .post(`/api/deployments/${created.body.id}/restart`)
+      .send({ displayName: null });
+
+    expect(restart.status).toBe(200);
+    const row = await prisma.deployment.findUnique({ where: { id: created.body.id } });
+    expect(row?.displayName).toBeNull();
+    expect(sent[0].message.payload.servedModelName).toBeUndefined();
   });
 });
