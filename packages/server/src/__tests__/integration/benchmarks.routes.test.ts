@@ -116,7 +116,8 @@ describe("POST /api/benchmarks", () => {
     const call = runMock.mock.calls[0][0];
     expect(call.runId).toBe(res.body.id);
     expect(call.args).toContain("--base-url");
-    expect(call.args).toContain("http://10.0.0.1:8000");
+    // llama-benchy needs the /v1 suffix on base-url (OpenAI client convention)
+    expect(call.args).toContain("http://10.0.0.1:8000/v1");
     expect(call.outputDir).toBe(`${TMP_DIR}/benchmarks/${res.body.id}`);
     // The --save-result path passed to llama-benchy must live inside outputDir
     const idx = call.args.indexOf("--save-result");

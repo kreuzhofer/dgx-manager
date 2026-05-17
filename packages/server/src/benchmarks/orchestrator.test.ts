@@ -89,11 +89,14 @@ describe("runBenchmark", () => {
     existsSyncMock.mockReturnValue(true);
     readFileSyncMock.mockReturnValue(
       JSON.stringify({
-        rows: [{
-          op: "tg", pp: 1, tg: 2, depth: 0, concurrency: 1,
-          "t/s": 50.5, "peak t/s": 60, "ttfr (ms)": 100,
-          "est_ppt (ms)": 50, "e2e_ttft (ms)": 150,
-          "t/s_stdev": 1, "ttfr_stdev": 2,
+        benchmarks: [{
+          concurrency: 1, context_size: 0, prompt_size: 1, response_size: 2,
+          pp_throughput: { mean: 100.0, std: 1, values: [100] },
+          tg_throughput: { mean: 50.5, std: 0.5, values: [50.5] },
+          peak_throughput: { mean: 60, std: 0, values: [60] },
+          ttfr: { mean: 100, std: 2, values: [100] },
+          est_ppt: { mean: 50, std: 0, values: [50] },
+          e2e_ttft: { mean: 150, std: 0, values: [150] },
         }],
       }),
     );
@@ -102,8 +105,9 @@ describe("runBenchmark", () => {
     });
     child.emit("close", 0);
     const r = await promise;
-    expect(r.results).toHaveLength(1);
-    expect(r.results[0].tps).toBe(50.5);
+    // One benchmarks entry → 2 rows (pp + tg)
+    expect(r.results).toHaveLength(2);
+    expect(r.results.find((x) => x.opType === "tg")?.tps).toBe(50.5);
   });
 
   it("returns exitCode and no results when the child exits non-zero", async () => {

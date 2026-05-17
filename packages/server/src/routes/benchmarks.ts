@@ -121,7 +121,10 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
 
   let endpointUrl: string;
   try {
-    endpointUrl = deploymentEndpointUrl(deployment);
+    // llama-benchy follows the OpenAI client convention where `--base-url`
+    // already includes the `/v1` segment (it appends `/chat/completions`
+    // directly to it). Without the `/v1`, vLLM 404s the warmup request.
+    endpointUrl = deploymentEndpointUrl(deployment) + "/v1";
   } catch (e) {
     return res.status(409).json({ error: (e as Error).message });
   }
