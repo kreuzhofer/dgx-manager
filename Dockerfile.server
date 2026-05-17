@@ -1,7 +1,7 @@
 FROM node:22-slim
 
 # Install SSH client for node provisioning
-RUN apt-get update && apt-get install -y openssh-client rsync curl ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-client rsync curl ca-certificates && rm -rf /var/lib/apt/lists/*
 
 # uv provides `uvx`, which we use to run `llama-benchy` on demand for the
 # /api/benchmarks workflow. Pinning the uv version keeps benchmark runs
