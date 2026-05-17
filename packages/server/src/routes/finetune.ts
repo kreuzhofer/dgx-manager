@@ -682,11 +682,12 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
   });
   if (!job) return res.status(404).json({ error: "Job not found" });
 
-  const { nodeId, nodeIds, config, artifactVariant } = req.body as {
+  const { nodeId, nodeIds, config, artifactVariant, displayName: rawDisplayName } = req.body as {
     nodeId?: string;
     nodeIds?: string[];
     config?: Record<string, unknown>;
     artifactVariant?: "bf16" | "fp8";
+    displayName?: string | null;
   };
   const isCluster = Array.isArray(nodeIds) && nodeIds.length > 1;
   const headNodeId = isCluster ? nodeIds[0] : (nodeId || job.nodeId);
@@ -748,11 +749,15 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
   // what vLLM publishes via --served-model-name AND what the dashboard
   // shows in the deployments list. Lets the same FT be deployed twice
   // under different served names (e.g. "chat3d-prod" + "chat3d-canary").
+  // Note: when no override is supplied, ftModelName is passed as modelName
+  // but NOT stored in Deployment.displayName, so the uniqueness constraint
+  // here does not apply. A vLLM name collision is theoretically possible if
+  // two FT jobs share a displayName — that's the user's responsibility,
+  // guarded at the Model.name level by Prisma's P2002 unique-constraint check
+  // (see the upsert below), not here.
   let perDeployDisplayName: string | null;
   try {
-    perDeployDisplayName = normalizeDisplayName(
-      (req.body as { displayName?: string | null | undefined } | undefined)?.displayName,
-    );
+    perDeployDisplayName = normalizeDisplayName(rawDisplayName);
   } catch (e) {
     if (e instanceof DisplayNameError) return res.status(400).json({ error: e.message });
     throw e;
