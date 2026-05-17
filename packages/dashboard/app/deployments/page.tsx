@@ -126,6 +126,7 @@ export default function DeploymentsPage() {
   const [tensorParallel, setTensorParallel] = useState("");
   const [pipelineParallel, setPipelineParallel] = useState("");
   const [gpuMem, setGpuMem] = useState("");
+  const [customDisplayName, setCustomDisplayName] = useState<string>("");
   const [deploying, setDeploying] = useState(false);
 
   // Per-deployment edit-before-restart form state. When a deployment ID is
@@ -360,6 +361,8 @@ export default function DeploymentsPage() {
         if (needsClusterFt) ftBody.nodeIds = Array.from(selectedClusterNodes);
         else ftBody.nodeId = selectedNode;
         if (finetuneArtifactVariant) ftBody.artifactVariant = finetuneArtifactVariant;
+        const trimmedFtName = customDisplayName.trim();
+        if (trimmedFtName) ftBody.displayName = trimmedFtName;
 
         const result = await apiFetch<Deployment>(`/api/finetune/${finetuneJobId}/deploy`, {
           method: "POST",
@@ -386,6 +389,7 @@ export default function DeploymentsPage() {
         setMaxModelLen("");
         setGpuMem("");
         setPort("8000");
+        setCustomDisplayName("");
         // Clear URL params
         window.history.replaceState({}, "", "/deployments");
         setDeploying(false);
@@ -410,6 +414,7 @@ export default function DeploymentsPage() {
         if (pipelineParallel) configOverrides.pipelineParallel = parseInt(pipelineParallel);
         if (gpuMem) configOverrides.gpuMem = parseFloat(gpuMem);
 
+        const trimmedName = customDisplayName.trim();
         body = needsCluster
           ? {
               // Explicit list lets the user override which N nodes to use
@@ -417,8 +422,14 @@ export default function DeploymentsPage() {
               nodeIds: Array.from(selectedClusterNodes),
               recipeFile: selectedRecipe,
               config: configOverrides,
+              ...(trimmedName ? { displayName: trimmedName } : {}),
             }
-          : { nodeId: selectedNode || "auto", recipeFile: selectedRecipe, config: configOverrides };
+          : {
+              nodeId: selectedNode || "auto",
+              recipeFile: selectedRecipe,
+              config: configOverrides,
+              ...(trimmedName ? { displayName: trimmedName } : {}),
+            };
       }
 
       const deployment = await apiFetch<Deployment>("/api/deployments", {
@@ -440,6 +451,7 @@ export default function DeploymentsPage() {
       setPort("8000");
       setSelectedNode("");
       setSelectedClusterNodes(new Set());
+      setCustomDisplayName("");
       setViewingLogs(deployment.id);
       // Immediately remove consumed nodes from idle list
       const usedIds = new Set<string>([deployment.nodeId]);
@@ -939,6 +951,26 @@ export default function DeploymentsPage() {
                 <p className="text-[10px] text-gray-500 mt-0.5">fraction 0–1; leave blank for default</p>
               </div>
             </div>
+          </div>
+        )}
+
+        {(runtimeMode === "vllm" || runtimeMode === "finetune") && (
+          <div className="mt-3 px-1">
+            <label className="block text-[10px] text-gray-500 mb-0.5">
+              Display name <span className="text-gray-600">(optional)</span>
+            </label>
+            <input
+              type="text"
+              value={customDisplayName}
+              onChange={(e) => setCustomDisplayName(e.target.value)}
+              placeholder="e.g. chat3d-prod"
+              pattern="[A-Za-z0-9._:\-]*"
+              maxLength={128}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-green-500"
+            />
+            <p className="text-[10px] text-gray-500 mt-0.5">
+              Overrides the model name in this list and in the OpenAI API (<code>/v1/models</code>). Letters, digits, dot, dash, underscore, colon.
+            </p>
           </div>
         )}
 
