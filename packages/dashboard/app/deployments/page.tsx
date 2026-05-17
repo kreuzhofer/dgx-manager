@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { apiFetch } from "@/lib/api";
 import { useSSE, type SseEvent } from "@/lib/sse";
 import { LogViewer } from "@/components/log-viewer";
+import { BenchmarkFormModal } from "@/components/benchmark-form-modal";
 
 interface Recipe {
   file: string;
@@ -154,6 +155,14 @@ export default function DeploymentsPage() {
     total?: number;
     eta?: string;
   }>>({});
+
+  // Benchmark modal state
+  const [benchmarkTarget, setBenchmarkTarget] = useState<
+    { id: string; label: string } | null
+  >(null);
+  const [latestBenchmarkStatus, setLatestBenchmarkStatus] = useState<
+    Record<string, { status: string; runId: string }>
+  >({});
 
   const loadData = useCallback(() => {
     Promise.all([
@@ -332,6 +341,15 @@ export default function DeploymentsPage() {
       apiFetch<{ tag: string; modelName: string; size: string | null; type: "chat" | "embedding"; description: string; capabilities: string[] }[]>("/api/ollama-catalog/available")
         .then((om) => setOllamaModels(om.map((m) => ({ name: m.tag, size: m.size ?? "", type: m.type, description: m.description }))))
         .catch(console.error);
+    }
+    if (event.type === "benchmark:created" || event.type === "benchmark:status") {
+      const payload = event.payload as { id: string; deploymentId?: string | null; status: string };
+      if (payload.deploymentId) {
+        setLatestBenchmarkStatus((prev) => ({
+          ...prev,
+          [payload.deploymentId!]: { status: payload.status, runId: payload.id },
+        }));
+      }
     }
   }, []);
 
@@ -1194,6 +1212,26 @@ export default function DeploymentsPage() {
                             API
                           </a>
                         )}
+                        {d.status === "running" && d.port && (
+                          <button
+                            type="button"
+                            className="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-purple-300 transition-colors"
+                            onClick={() => setBenchmarkTarget({
+                              id: d.id,
+                              label: `${d.displayName ?? d.model?.name ?? d.modelId} @ ${d.node?.name ?? "?"}`,
+                            })}
+                          >
+                            Benchmark
+                          </button>
+                        )}
+                        {latestBenchmarkStatus[d.id] && (
+                          <a
+                            href={`/benchmarks/${latestBenchmarkStatus[d.id].runId}`}
+                            className="text-xs px-2 py-1 rounded bg-purple-900/40 hover:bg-purple-900/60 text-purple-200"
+                          >
+                            {latestBenchmarkStatus[d.id].status}
+                          </a>
+                        )}
                         {isStopping && (
                           <span className="text-xs px-2 py-1 rounded bg-yellow-900/30 text-yellow-400 animate-pulse">
                             Stopping...
@@ -1387,6 +1425,15 @@ export default function DeploymentsPage() {
         <div className="text-center py-12 text-gray-500">
           <p>No deployments yet. Select a recipe and node above to deploy.</p>
         </div>
+      )}
+
+      {benchmarkTarget && (
+        <BenchmarkFormModal
+          deploymentId={benchmarkTarget.id}
+          deploymentLabel={benchmarkTarget.label}
+          onClose={() => setBenchmarkTarget(null)}
+          onStarted={() => {/* SSE will populate latestBenchmarkStatus */}}
+        />
       )}
     </div>
   );
