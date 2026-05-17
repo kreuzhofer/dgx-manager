@@ -67,6 +67,14 @@ model Model {
 
 model Deployment {
   id           String                 @id @default(cuid())
+  // User-supplied friendly name. When set, it overrides `model.name` in the
+  // dashboard list AND is passed to vLLM as `--served-model-name`, so the
+  // deployment surfaces under this name in OpenAI-API responses
+  // (`/v1/models` and the `model` field of completions). Null falls back to
+  // `model.name`. Normalized and uniqueness-validated at the route layer
+  // (src/deployments/display-name.ts) — null entries skip the uniqueness
+  // check so unnamed deployments coexist freely.
+  displayName  String?
   nodeId       String
   modelId      String
   status       String                 @default("pending")
