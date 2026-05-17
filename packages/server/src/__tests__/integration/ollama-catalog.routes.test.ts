@@ -56,7 +56,7 @@ describe("GET /api/ollama-catalog/catalog", () => {
 
   it("returns persisted entries and timestamp", async () => {
     const ts = await writeCatalog([
-      { name: "llama3.1", description: "Meta Llama", type: "chat", sizes: ["8b", "70b"], capabilities: ["tools"] },
+      { name: "llama3.1", description: "Meta Llama", type: "chat", sizes: ["8b", "70b"], capabilities: ["tools"], updatedAt: null },
     ]);
     const res = await request(makeApp()).get("/api/ollama-catalog/catalog");
     expect(res.body.fetchedAt).toBe(ts);
@@ -93,10 +93,10 @@ describe("GET /api/ollama-catalog/enabled and PUT /api/ollama-catalog/enabled", 
 describe("GET /api/ollama-catalog/available", () => {
   it("flattens catalog × enabled into deployable tag rows", async () => {
     await writeCatalog([
-      { name: "llama3.1", description: "A", type: "chat", sizes: ["8b", "70b"], capabilities: ["tools"] },
-      { name: "qwen3",   description: "B", type: "chat", sizes: ["8b", "32b"], capabilities: ["tools"] },
-      { name: "phi4",    description: "C", type: "chat", sizes: ["14b"], capabilities: [] },
-      { name: "nomic-embed-text", description: "Emb", type: "embedding", sizes: [], capabilities: ["embedding"] },
+      { name: "llama3.1", description: "A", type: "chat", sizes: ["8b", "70b"], capabilities: ["tools"], updatedAt: null },
+      { name: "qwen3",   description: "B", type: "chat", sizes: ["8b", "32b"], capabilities: ["tools"], updatedAt: null },
+      { name: "phi4",    description: "C", type: "chat", sizes: ["14b"], capabilities: [], updatedAt: null },
+      { name: "nomic-embed-text", description: "Emb", type: "embedding", sizes: [], capabilities: ["embedding"], updatedAt: null },
     ]);
     await writeEnabled(["llama3.1:8b", "qwen3:8b", "qwen3:32b", "nomic-embed-text"]);
     const res = await request(makeApp()).get("/api/ollama-catalog/available");
@@ -114,7 +114,7 @@ describe("GET /api/ollama-catalog/available", () => {
 
   it("drops enabled tags that no longer exist in the catalog", async () => {
     await writeCatalog([
-      { name: "llama3.1", description: "A", type: "chat", sizes: ["8b"], capabilities: [] },
+      { name: "llama3.1", description: "A", type: "chat", sizes: ["8b"], capabilities: [], updatedAt: null },
     ]);
     await writeEnabled(["llama3.1:8b", "llama3.1:405b", "ghost-model:1b"]);
     const res = await request(makeApp()).get("/api/ollama-catalog/available");
@@ -123,7 +123,7 @@ describe("GET /api/ollama-catalog/available", () => {
 
   it("returns [] when nothing is enabled even if catalog is non-empty", async () => {
     await writeCatalog([
-      { name: "llama3.1", description: "A", type: "chat", sizes: ["8b"], capabilities: [] },
+      { name: "llama3.1", description: "A", type: "chat", sizes: ["8b"], capabilities: [], updatedAt: null },
     ]);
     const res = await request(makeApp()).get("/api/ollama-catalog/available");
     expect(res.body).toEqual([]);

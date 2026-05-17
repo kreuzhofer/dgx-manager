@@ -64,7 +64,7 @@ describe("POST /api/deployments with runtime=ollama uses the catalog for VRAM es
       data: { id: "n1", name: "node1", status: "online", vramTotal: 128_000 },
     });
     await writeCatalog([
-      { name: "llama3.1", description: "Meta", type: "chat", sizes: ["8b", "70b"], capabilities: ["tools"] },
+      { name: "llama3.1", description: "Meta", type: "chat", sizes: ["8b", "70b"], capabilities: ["tools"], updatedAt: null },
     ]);
     const { app } = makeApp();
     const res = await request(app)
