@@ -1,3 +1,5 @@
+import type { PrismaClient } from "../generated/prisma/client.js";
+
 /**
  * Per-deployment custom display name validation + normalization.
  *
@@ -48,8 +50,6 @@ export function normalizeDisplayName(raw: string | null | undefined): string | n
   return trimmed;
 }
 
-import type { PrismaClient } from "../generated/prisma/client.js";
-
 /**
  * Statuses that count as "this deployment is using its display name right now."
  * Mirrors the activeStatuses list in routes/deployments.ts:54; centralized
@@ -95,8 +95,11 @@ export async function validateDisplayNameUnique(
       status: { in: [...ACTIVE_DEPLOYMENT_STATUSES] },
       ...(excludeDeploymentId ? { id: { not: excludeDeploymentId } } : {}),
     },
-    select: { id: true, displayName: true },
+    select: { id: true },
   });
-  if (!conflict || !conflict.displayName) return null;
-  return { conflictId: conflict.id, conflictName: conflict.displayName };
+  if (!conflict) return null;
+  // Prisma matched on displayName === name, so conflictName is the same string
+  // we queried with. Use `name` rather than re-reading conflict.displayName so
+  // TypeScript doesn't need a null-narrowing on the nullable schema column.
+  return { conflictId: conflict.id, conflictName: name };
 }

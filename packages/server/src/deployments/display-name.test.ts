@@ -130,7 +130,7 @@ describe("validateDisplayNameUnique", () => {
     expect(result).toEqual({ conflictId: existing.id, conflictName: "chat3d-prod" });
   });
 
-  it("ignores deployments in terminal statuses (failed, stopped, removed)", async () => {
+  it("ignores deployments in terminal statuses (e.g. failed)", async () => {
     await seedDeployment({ displayName: "freed-name", status: "failed" });
     const result = await validateDisplayNameUnique(prisma, "freed-name");
     expect(result).toBeNull();
