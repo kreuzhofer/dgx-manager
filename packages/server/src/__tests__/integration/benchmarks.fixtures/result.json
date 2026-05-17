@@ -1,0 +1,51 @@
+{
+  "meta": {
+    "base_url": "http://10.0.0.1:8000",
+    "model": "llama-3.1-8b",
+    "runs": 3
+  },
+  "rows": [
+    {
+      "op": "pp",
+      "pp": 512,
+      "tg": 32,
+      "depth": 0,
+      "concurrency": 1,
+      "t/s": 1840.4,
+      "peak t/s": 1955.0,
+      "ttfr (ms)": 142.3,
+      "est_ppt (ms)": 278.0,
+      "e2e_ttft (ms)": 420.1,
+      "t/s_stdev": 18.2,
+      "ttfr_stdev": 5.1
+    },
+    {
+      "op": "tg",
+      "pp": 512,
+      "tg": 128,
+      "depth": 0,
+      "concurrency": 1,
+      "t/s": 84.5,
+      "peak t/s": 92.1,
+      "ttfr (ms)": 142.3,
+      "est_ppt (ms)": 278.0,
+      "e2e_ttft (ms)": 420.1,
+      "t/s_stdev": 0.9,
+      "ttfr_stdev": 5.1
+    },
+    {
+      "op": "tg",
+      "pp": 512,
+      "tg": 128,
+      "depth": 4096,
+      "concurrency": 4,
+      "t/s": 220.3,
+      "peak t/s": 240.0,
+      "ttfr (ms)": 410.0,
+      "est_ppt (ms)": 1100.0,
+      "e2e_ttft (ms)": 1500.0,
+      "t/s_stdev": 4.0,
+      "ttfr_stdev": 15.0
+    }
+  ]
+}
