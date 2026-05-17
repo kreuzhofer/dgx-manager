@@ -44,5 +44,7 @@ describe("buildLaunchArgs servedModelName passthrough", () => {
     const sgnIdx = args.indexOf("--served-model-name");
     expect(ppIdx).toBeGreaterThan(dashIdx);
     expect(sgnIdx).toBeGreaterThan(dashIdx);
+    // -pp must come before --served-model-name (documented passthrough order).
+    expect(ppIdx).toBeLessThan(sgnIdx);
   });
 });
