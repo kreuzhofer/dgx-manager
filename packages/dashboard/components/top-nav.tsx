@@ -9,6 +9,7 @@ const LINKS: { href: string; label: string }[] = [
   { href: "/finetune", label: "Fine-tune" },
   { href: "/datasets", label: "Datasets" },
   { href: "/loadbalancer", label: "Load Balancer" },
+  { href: "/benchmarks", label: "Benchmarks" },
   { href: "/settings", label: "Settings" },
 ];
 
