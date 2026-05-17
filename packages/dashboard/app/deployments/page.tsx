@@ -547,6 +547,32 @@ export default function DeploymentsPage() {
   const selectedRecipeData = recipes.find((r) => r.file === selectedRecipe);
   const isClusterRecipe = selectedRecipeData?.cluster_only;
 
+  // Suggest a sensible default for the deploy's Display name input: stock
+  // vLLM uses the recipe's `name` field; fine-tune deploys use the FT's
+  // friendly name (or Model.name fallback). Sanitized to the same character
+  // class the server enforces ([A-Za-z0-9._:-]) so the prefill validates as-is.
+  const defaultDisplayName = useMemo(() => {
+    const sanitize = (raw: string) =>
+      raw.trim().replace(/\s+/g, "-").replace(/[^A-Za-z0-9._:-]/g, "").slice(0, 128);
+    if (runtimeMode === "vllm") {
+      return selectedRecipeData?.name ? sanitize(selectedRecipeData.name) : "";
+    }
+    if (runtimeMode === "finetune") {
+      const src = finetuneDisplayName ?? finetuneModel ?? "";
+      return src ? sanitize(src) : "";
+    }
+    return "";
+  }, [runtimeMode, selectedRecipeData, finetuneDisplayName, finetuneModel]);
+
+  // Mirror the suggested default into the input whenever the source changes.
+  // User edits stay (defaultDisplayName doesn't recompute while the same
+  // recipe/FT is selected); switching to a different recipe resets to the new
+  // default — picking a different model is a strong signal the old name no
+  // longer applies.
+  useEffect(() => {
+    setCustomDisplayName(defaultDisplayName);
+  }, [defaultDisplayName]);
+
   // Pre-fill config when recipe changes
   const onRecipeChange = (file: string) => {
     setSelectedRecipe(file);
