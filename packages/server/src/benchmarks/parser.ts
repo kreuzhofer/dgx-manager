@@ -67,13 +67,17 @@ export function parseBenchyResults(jsonText: string): BenchmarkResultInput[] {
     const ttfrStdev = optNestedNum(b, "ttfr", "std");
     const estPptMs = optNestedNum(b, "est_ppt", "mean");
     const e2eTtftMs = optNestedNum(b, "e2e_ttft", "mean");
-    const peakTps = optNestedNum(b, "peak_throughput", "mean");
+    // peak_throughput is documented by llama-benchy as "Peak generation
+    // tokens per second (total)" — strictly a decode (tg) metric. It's
+    // wrong to display it on the prefill (pp) row, where it would appear
+    // smaller than the mean and confuse the reader.
+    const peakTgTps = optNestedNum(b, "peak_throughput", "mean");
 
     out.push({
       opType: "pp",
       pp, tg, depth, concurrency,
       tps: nestedNum(b, "pp_throughput", "mean"),
-      peakTps,
+      peakTps: null,
       ttfrMs, estPptMs, e2eTtftMs,
       tpsStdev: optNestedNum(b, "pp_throughput", "std"),
       ttfrStdev,
@@ -82,7 +86,7 @@ export function parseBenchyResults(jsonText: string): BenchmarkResultInput[] {
       opType: "tg",
       pp, tg, depth, concurrency,
       tps: nestedNum(b, "tg_throughput", "mean"),
-      peakTps,
+      peakTps: peakTgTps,
       ttfrMs, estPptMs, e2eTtftMs,
       tpsStdev: optNestedNum(b, "tg_throughput", "std"),
       ttfrStdev,

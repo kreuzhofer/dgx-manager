@@ -28,7 +28,9 @@ describe("parseBenchyResults", () => {
       depth: 0,
       concurrency: 1,
       tps: 1840.4,
-      peakTps: 92.1,
+      // peakTps is a tg-only metric (llama-benchy: "Peak generation tokens
+      // per second total"), so it's null on the prefill row.
+      peakTps: null,
       ttfrMs: 142.3,
       estPptMs: 278.0,
       e2eTtftMs: 420.1,

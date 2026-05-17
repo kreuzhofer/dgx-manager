@@ -26,7 +26,9 @@ export function BenchmarkResultTable({ rows }: { rows: BenchmarkResult[] }) {
         <thead className="text-left text-gray-400 border-b border-gray-800">
           <tr>
             <Th>Op</Th><Th>pp</Th><Th>tg</Th><Th>depth</Th><Th>conc</Th>
-            <Th>t/s</Th><Th>peak t/s</Th><Th>ttfr (ms)</Th>
+            <Th title="Mean throughput across the whole run">t/s (mean)</Th>
+            <Th title="Peak aggregate decode throughput in any 1-second window">peak tg t/s</Th>
+            <Th>ttfr (ms)</Th>
             <Th>est_ppt (ms)</Th><Th>e2e_ttft (ms)</Th>
           </tr>
         </thead>
@@ -51,8 +53,8 @@ export function BenchmarkResultTable({ rows }: { rows: BenchmarkResult[] }) {
   );
 }
 
-const Th = ({ children }: { children: React.ReactNode }) => (
-  <th className="px-2 py-1 font-medium">{children}</th>
+const Th = ({ children, title }: { children: React.ReactNode; title?: string }) => (
+  <th className="px-2 py-1 font-medium" title={title}>{children}</th>
 );
 const Td = ({ children }: { children: React.ReactNode }) => (
   <td className="px-2 py-1">{children}</td>
