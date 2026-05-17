@@ -41,6 +41,11 @@ export function runBenchmark(opts: RunBenchmarkOpts): Promise<RunBenchmarkResult
       // detached:true so we can kill the whole process group (uvx may
       // spawn a python subprocess) via process.kill(-pid).
       detached: true,
+      // PYTHONUNBUFFERED is required: when llama-benchy's stdout is piped
+      // (not a tty), Python switches to block buffering and our onLog
+      // never fires until process exit. Forcing unbuffered IO makes the
+      // live log stream as the benchmark runs.
+      env: { ...process.env, PYTHONUNBUFFERED: "1" },
     });
     ACTIVE.set(opts.runId, child);
 

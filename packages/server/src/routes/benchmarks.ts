@@ -1,5 +1,6 @@
 import express, { type Request, type Response } from "express";
 import { join } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { prisma } from "../prisma.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import {
@@ -31,6 +32,19 @@ benchmarksRouter.get("/", async (req, res) => {
     include: { deployment: { include: { node: true, model: true } } },
   });
   res.json(runs);
+});
+
+// Returns the full captured stdout/stderr of a run as text/plain. Empty body
+// (with 200) if the log file doesn't exist yet — the dashboard treats that
+// as "no log to show", same as the deployments-log endpoint convention.
+benchmarksRouter.get("/:id/logs", (req, res) => {
+  const logPath = join(SHARED_STORAGE, "logs", "benchmarks", `${req.params.id}.log`);
+  if (!existsSync(logPath)) return res.type("text/plain").send("");
+  try {
+    res.type("text/plain").send(readFileSync(logPath, "utf-8"));
+  } catch {
+    res.type("text/plain").send("");
+  }
 });
 
 benchmarksRouter.get("/:id", async (req, res) => {
@@ -160,11 +174,22 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
     payload: { id: run.id, status: "running", deploymentId: run.deploymentId },
   });
 
+  // Persist every log line to disk so the detail page can show the full log
+  // for a completed run (SSE only delivers events while the page is mounted).
+  const logDir = join(SHARED_STORAGE, "logs", "benchmarks");
+  mkdirSync(logDir, { recursive: true, mode: 0o777 });
+  const logPath = join(logDir, `${run.id}.log`);
+
   runBenchmark({
     runId: run.id,
     args,
     outputDir,
     onLog: (line) => {
+      try {
+        appendFileSync(logPath, line + "\n", { mode: 0o666 });
+      } catch {
+        // Disk-full or perms — keep streaming via SSE even if persistence fails.
+      }
       sseBroadcast({
         type: "benchmark:log",
         payload: { runId: run.id, log: line },

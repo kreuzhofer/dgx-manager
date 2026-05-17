@@ -104,3 +104,12 @@ export async function deleteBenchmark(id: string): Promise<void> {
     );
   }
 }
+
+export async function getBenchmarkLog(id: string): Promise<string> {
+  const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+  const res = await fetch(`${API_BASE}/api/benchmarks/${id}/logs`, {
+    cache: "no-store",
+  });
+  if (!res.ok) return "";
+  return res.text();
+}

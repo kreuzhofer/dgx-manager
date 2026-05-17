@@ -3,7 +3,7 @@
 import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  cancelBenchmark, getBenchmark, type BenchmarkRun,
+  cancelBenchmark, getBenchmark, getBenchmarkLog, type BenchmarkRun,
 } from "@/lib/benchmarks";
 import { BenchmarkResultTable } from "@/components/benchmark-result-table";
 import { BenchmarkChart } from "@/components/benchmark-chart";
@@ -23,6 +23,16 @@ export default function BenchmarkDetailPage({
   }, [id]);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  // Seed the log from the persisted file on mount so opening a completed run
+  // shows what happened (SSE only delivers events that occur while mounted).
+  // The "only if still empty" guard avoids overwriting log lines that SSE
+  // may have already delivered while this fetch was in flight.
+  useEffect(() => {
+    getBenchmarkLog(id)
+      .then((text) => setLog((prev) => (prev ? prev : text)))
+      .catch(() => {});
+  }, [id]);
 
   useSSE((event: SseEvent) => {
     if (event.type === "benchmark:status") {
@@ -81,8 +91,8 @@ export default function BenchmarkDetailPage({
         </>
       )}
 
-      <details className="text-sm">
-        <summary className="cursor-pointer text-gray-400">Live log</summary>
+      <details className="text-sm" open>
+        <summary className="cursor-pointer text-gray-400">Log</summary>
         <pre className="mt-2 p-3 bg-black rounded text-xs overflow-x-auto max-h-96">{log || "(no log)"}</pre>
       </details>
 
