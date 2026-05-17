@@ -1,9 +1,23 @@
 "use client";
 
+import { useMemo } from "react";
 import type { BenchmarkResult } from "@/lib/benchmarks";
 
+// Group rows by (depth, pp, tg, concurrency) so a workload's pp and tg
+// throughput sit next to each other; within a group, pp before tg.
+function sortRows(rows: BenchmarkResult[]): BenchmarkResult[] {
+  return [...rows].sort((a, b) =>
+    a.depth - b.depth ||
+    a.pp - b.pp ||
+    a.tg - b.tg ||
+    a.concurrency - b.concurrency ||
+    a.opType.localeCompare(b.opType),
+  );
+}
+
 export function BenchmarkResultTable({ rows }: { rows: BenchmarkResult[] }) {
-  if (rows.length === 0) {
+  const sorted = useMemo(() => sortRows(rows), [rows]);
+  if (sorted.length === 0) {
     return <div className="text-sm text-gray-500">No results.</div>;
   }
   return (
@@ -17,7 +31,7 @@ export function BenchmarkResultTable({ rows }: { rows: BenchmarkResult[] }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => (
+          {sorted.map((r) => (
             <tr key={r.id} className="border-b border-gray-900 hover:bg-gray-900/40">
               <Td>{r.opType}</Td>
               <Td>{r.pp}</Td>
