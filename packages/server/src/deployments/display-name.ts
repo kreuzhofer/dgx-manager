@@ -47,3 +47,56 @@ export function normalizeDisplayName(raw: string | null | undefined): string | n
   }
   return trimmed;
 }
+
+import type { PrismaClient } from "../generated/prisma/client.js";
+
+/**
+ * Statuses that count as "this deployment is using its display name right now."
+ * Mirrors the activeStatuses list in routes/deployments.ts:54; centralized
+ * here so the uniqueness check and the routes can't drift apart.
+ */
+export const ACTIVE_DEPLOYMENT_STATUSES = [
+  "pending",
+  "running",
+  "starting",
+  "building",
+  "downloading",
+  "launching",
+  "loading",
+  "restarting",
+] as const;
+
+export interface DisplayNameConflict {
+  conflictId: string;
+  conflictName: string;
+}
+
+/**
+ * Check whether a candidate display name is free.
+ *
+ * @param prisma                The prisma client to query.
+ * @param name                  The (already normalized) candidate. `null` is a
+ *                              no-op — unnamed deployments coexist freely.
+ * @param excludeDeploymentId   Used on the restart path to exclude the
+ *                              deployment that's about to be relaunched from
+ *                              its own conflict check.
+ * @returns `null` if free, otherwise a `DisplayNameConflict` identifying the
+ *          deployment currently holding the name.
+ */
+export async function validateDisplayNameUnique(
+  prisma: PrismaClient,
+  name: string | null,
+  excludeDeploymentId?: string,
+): Promise<DisplayNameConflict | null> {
+  if (name === null) return null;
+  const conflict = await prisma.deployment.findFirst({
+    where: {
+      displayName: name,
+      status: { in: [...ACTIVE_DEPLOYMENT_STATUSES] },
+      ...(excludeDeploymentId ? { id: { not: excludeDeploymentId } } : {}),
+    },
+    select: { id: true, displayName: true },
+  });
+  if (!conflict || !conflict.displayName) return null;
+  return { conflictId: conflict.id, conflictName: conflict.displayName };
+}
