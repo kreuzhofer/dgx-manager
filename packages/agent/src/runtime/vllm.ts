@@ -421,6 +421,18 @@ export function getDeploymentIds(): string[] {
   return Array.from(running.keys());
 }
 
+/**
+ * Drop a deployment from both the in-memory `running` map and the on-disk
+ * tracking store. Use this in failure paths where the deployment died on its
+ * own (not via stopRecipe) — clearing only the disk store leaves a stale
+ * in-memory entry that checkDeployments keeps re-detecting every health
+ * tick, producing an endless "Container stopped unexpectedly" stream.
+ */
+export function untrackDeployment(deploymentId: string): void {
+  running.delete(deploymentId);
+  removeDeployment(deploymentId);
+}
+
 /** Check if any vLLM docker container is running (regardless of tracking). */
 export function isVllmContainerRunning(): boolean {
   try {

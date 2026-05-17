@@ -307,6 +307,34 @@ deploymentsRouter.delete("/:id", async (req, res) => {
     : undefined;
 
   const deployConfig = deployment.config ? JSON.parse(deployment.config) : {};
+
+  // Fast path: deployment is already in a terminal state. There's nothing
+  // live to stop, so don't go through the agent round-trip — if the agent
+  // can't reach its cluster nodes (common after a failed launch) it reports
+  // "failed" without deleteAfter, and the auto-delete in agent-hub never
+  // fires. Just clean up the row directly and best-effort tell the agent to
+  // drop any stale tracking state.
+  const terminalStatuses = ["stopped", "failed", "evicted"];
+  if (wantDelete && terminalStatuses.includes(deployment.status)) {
+    if (agentHub.isAgentOnline(deployment.nodeId)) {
+      agentHub.sendToAgent(deployment.nodeId, {
+        type: "cmd:undeploy",
+        payload: {
+          deploymentId: deployment.id,
+          deleteAfter: false,
+          clusterNodes: clusterNodeIps,
+          runtime: deployConfig.runtime || "vllm",
+          modelName: deployConfig.modelName,
+        },
+      });
+    }
+    await prisma.clusterNode.deleteMany({ where: { deploymentId: deployment.id } });
+    await prisma.loadBalancerEndpoint.deleteMany({ where: { deploymentId: deployment.id } });
+    await prisma.deployment.delete({ where: { id: deployment.id } });
+    sseBroadcast({ type: "deployment:deleted", payload: { deploymentId: deployment.id } });
+    return res.json({ status: "deleted" });
+  }
+
   agentHub.sendToAgent(deployment.nodeId, {
     type: "cmd:undeploy",
     payload: {
