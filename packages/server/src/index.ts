@@ -16,6 +16,8 @@ import { settingsRouter } from "./routes/settings.js";
 import { ollamaCatalogRouter } from "./routes/ollama-catalog.js";
 import { agentBundleRouter } from "./routes/agent-bundle.js";
 import { datasetsRouter } from "./routes/datasets.js";
+import { benchmarksRouter } from "./routes/benchmarks.js";
+import { prisma } from "./prisma.js";
 import { sseHandler } from "./sse.js";
 
 const app = express();
@@ -56,6 +58,7 @@ app.use("/api/settings", settingsRouter);
 app.use("/api/ollama-catalog", ollamaCatalogRouter);
 app.use("/api/agent", agentBundleRouter);
 app.use("/api/datasets", datasetsRouter);
+app.use("/api/benchmarks", benchmarksRouter);
 
 // Broadcast recipe updates to dashboard
 agentHub.setRecipesHandler((recipes) => {
@@ -75,8 +78,27 @@ app.get("/api/health", (_req, res) => {
 
 const PORT = process.env.PORT || 4000;
 
-server.listen(PORT, () => {
-  console.log(`DGX Manager server listening on port ${PORT}`);
-  console.log(`Agent WebSocket:     ws://localhost:${PORT}/ws/agent`);
-  console.log(`Dashboard WebSocket: ws://localhost:${PORT}/ws/dashboard`);
+async function main() {
+  // Any benchmark row left in "pending"/"running" across a restart is orphaned
+  // (the in-memory ACTIVE map in the orchestrator was lost). Mark them failed
+  // so the dashboard doesn't show stale spinners forever.
+  await prisma.benchmarkRun.updateMany({
+    where: { status: { in: ["pending", "running"] } },
+    data: {
+      status: "failed",
+      error: "server restarted before run completed",
+      completedAt: new Date(),
+    },
+  });
+
+  server.listen(PORT, () => {
+    console.log(`DGX Manager server listening on port ${PORT}`);
+    console.log(`Agent WebSocket:     ws://localhost:${PORT}/ws/agent`);
+    console.log(`Dashboard WebSocket: ws://localhost:${PORT}/ws/dashboard`);
+  });
+}
+
+main().catch((err) => {
+  console.error("Failed to start server:", err);
+  process.exit(1);
 });
