@@ -50,6 +50,7 @@ interface Deployment {
   vramEstimate: number | null;
   vramActual: number | null;
   createdAt: string;
+  displayName?: string | null;
   node?: { name: string; ipAddress: string };
   model?: { name: string };
   clusterNodes?: ClusterNodeInfo[];
@@ -369,7 +370,7 @@ export default function DeploymentsPage() {
           body: JSON.stringify(ftBody),
         });
         setDeployments((prev) => prev.some((d) => d.id === result.id) ? prev : [result, ...prev]);
-        toast.success(`Deployed ${result.model?.name ?? "fine-tuned model"}`, {
+        toast.success(`Deployed ${result.displayName ?? result.model?.name ?? "fine-tuned model"}`, {
           description: needsClusterFt
             ? `${tp * pp} nodes, head=${result.node?.name ?? "?"}`
             : `on ${result.node?.name ?? "?"}`,
@@ -436,7 +437,7 @@ export default function DeploymentsPage() {
         body: JSON.stringify(body),
       });
       setDeployments((prev) => prev.some((d) => d.id === deployment.id) ? prev : [deployment, ...prev]);
-      toast.success(`Deployed ${deployment.model?.name ?? "model"}`, {
+      toast.success(`Deployed ${deployment.displayName ?? deployment.model?.name ?? "model"}`, {
         description: deployment.clusterMode
           ? `${deployment.clusterNodes?.length ?? "?"} nodes, head=${deployment.node?.name ?? "?"}`
           : `on ${deployment.node?.name ?? "?"}`,
@@ -469,7 +470,7 @@ export default function DeploymentsPage() {
 
   const stopDeployment = async (id: string) => {
     const d = deployments.find((x) => x.id === id);
-    const label = d ? `${d.model?.name || d.modelId} on ${d.node?.name || d.nodeId}` : id.slice(0, 12);
+    const label = d ? `${d.displayName ?? d.model?.name ?? d.modelId} on ${d.node?.name || d.nodeId}` : id.slice(0, 12);
     if (!confirm(`Stop this deployment?\n\n${label}\n\nInference will be unavailable until it's redeployed.`)) return;
     await apiFetch(`/api/deployments/${id}`, { method: "DELETE" });
     setDeployments((prev) =>
@@ -1075,7 +1076,7 @@ export default function DeploymentsPage() {
                         }`}>
                           {config.runtime === "ollama" ? "Ollama" : "vLLM"}
                         </span>
-                        {d.model?.name || recipeName || d.modelId}
+                        {d.displayName ?? d.model?.name ?? recipeName ?? d.modelId}
                         {(d.vramEstimate || d.vramActual) && (
                           <span className="text-[10px] font-normal text-gray-500 ml-1">
                             {d.vramActual

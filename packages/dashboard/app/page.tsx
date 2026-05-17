@@ -52,6 +52,7 @@ interface DeploymentInfo {
   nodeId: string;
   status: string;
   config: string | null;
+  displayName?: string | null;
   model?: { name: string; runtime: string };
   clusterNodes?: { nodeId: string }[];
 }
@@ -181,7 +182,7 @@ export default function OverviewPage() {
               .map((d) => {
                 const c = d.config ? JSON.parse(d.config) : {};
                 return {
-                  modelName: d.model?.name || "unknown",
+                  modelName: d.displayName ?? d.model?.name ?? "unknown",
                   runtime: c.runtime || d.model?.runtime || "vllm",
                   status: d.status,
                 };
