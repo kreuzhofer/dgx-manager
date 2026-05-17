@@ -20,6 +20,24 @@ const METRIC_LABEL: Record<Metric, string> = {
   e2eTtftMs: "End-to-end TTFT (ms)",
 };
 
+const METRIC_UNIT: Record<Metric, string> = {
+  tps: "t/s",
+  ttfrMs: "ms",
+  e2eTtftMs: "ms",
+};
+
+// Compact, readable numeric label: 1.2k for thousands, 3.4M for millions,
+// otherwise one decimal place. Used by both the tooltip and the y-axis.
+function formatMetric(value: number, unit: string): string {
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M ${unit}`;
+  if (abs >= 10_000) return `${(value / 1_000).toFixed(1)}k ${unit}`;
+  if (abs >= 1_000) return `${(value / 1_000).toFixed(2)}k ${unit}`;
+  if (abs >= 100) return `${value.toFixed(0)} ${unit}`;
+  if (abs >= 10) return `${value.toFixed(1)} ${unit}`;
+  return `${value.toFixed(2)} ${unit}`;
+}
+
 // Buckets rows by (op, pp, tg, depth, concurrency) so each x-axis tick
 // represents one comparable workload across all series.
 function bucketKey(r: BenchmarkResult): string {
@@ -85,6 +103,8 @@ export function BenchmarkChart({
     return row;
   });
 
+  const unit = METRIC_UNIT[metric];
+
   return (
     <div className="h-72">
       <div className="text-sm text-gray-400 mb-1">{METRIC_LABEL[metric]}</div>
@@ -92,8 +112,15 @@ export function BenchmarkChart({
         <BarChart data={data}>
           <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
           <XAxis dataKey="workload" stroke="#9ca3af" tick={{ fontSize: 10 }} />
-          <YAxis stroke="#9ca3af" />
-          <Tooltip contentStyle={{ background: "#111827", border: "1px solid #374151" }} />
+          <YAxis
+            stroke="#9ca3af"
+            tickFormatter={(v: number) => formatMetric(v, unit)}
+            width={80}
+          />
+          <Tooltip
+            contentStyle={{ background: "#111827", border: "1px solid #374151" }}
+            formatter={(value: number, name: string) => [formatMetric(value, unit), name]}
+          />
           <Legend />
           {series.map((s) => (
             <Bar key={s.label} dataKey={s.label} fill={s.color} />
