@@ -154,7 +154,7 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
   });
   sseBroadcast({
     type: "benchmark:status",
-    payload: { id: run.id, status: "running" },
+    payload: { id: run.id, status: "running", deploymentId: run.deploymentId },
   });
 
   runBenchmark({

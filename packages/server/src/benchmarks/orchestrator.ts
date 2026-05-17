@@ -81,8 +81,19 @@ export function runBenchmark(opts: RunBenchmarkOpts): Promise<RunBenchmarkResult
 export function cancelBenchmark(runId: string): boolean {
   const child = ACTIVE.get(runId);
   if (!child) return false;
-  // SIGTERM gives llama-benchy a chance to flush partial results.
-  child.kill("SIGTERM");
+  // Signal the whole process group — we spawned with detached:true, so uvx
+  // and its python subprocess are in their own group. SIGTERM gives
+  // llama-benchy a chance to flush partial results before exit.
+  if (child.pid) {
+    try {
+      process.kill(-child.pid, "SIGTERM");
+    } catch {
+      // ESRCH if the group already exited between detect-and-signal
+      child.kill("SIGTERM");
+    }
+  } else {
+    child.kill("SIGTERM");
+  }
   return true;
 }
 

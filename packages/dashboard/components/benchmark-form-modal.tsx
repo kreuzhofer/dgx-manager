@@ -50,7 +50,7 @@ export function BenchmarkFormModal({
   };
 
   const parseIntList = (s: string): number[] =>
-    s.split(",").map((x) => parseInt(x.trim(), 10)).filter((n) => Number.isFinite(n) && n > 0);
+    s.split(",").map((x) => parseInt(x.trim(), 10)).filter((n) => Number.isFinite(n) && n >= 0);
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">

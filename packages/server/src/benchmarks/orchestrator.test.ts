@@ -120,16 +120,19 @@ describe("runBenchmark", () => {
     expect(readFileSyncMock).not.toHaveBeenCalled();
   });
 
-  it("cancelBenchmark kills the process group of an in-flight run", async () => {
+  it("cancelBenchmark sends SIGTERM to the process group", async () => {
     const child = makeFakeChild(9999);
     spawnMock.mockReturnValue(child);
+    const processKillSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+
     const promise = runBenchmark({
       runId: "cancelme", args: [], outputDir: "/o", onLog: vi.fn(),
     });
     expect(cancelBenchmark("cancelme")).toBe(true);
-    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(processKillSpy).toHaveBeenCalledWith(-9999, "SIGTERM");
     child.emit("close", 143);
     await promise;
+    processKillSpy.mockRestore();
   });
 
   it("cancelBenchmark returns false when the run is not active", () => {

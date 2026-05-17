@@ -13,6 +13,7 @@ services:
       - SSH_USER=${SSH_USER:-daniel}
       - HF_TOKEN=${HF_TOKEN:-}
       - SHARED_STORAGE_PATH=${SHARED_STORAGE_PATH:-/mnt/tank}
+      - LLAMA_BENCHY_VERSION=${LLAMA_BENCHY_VERSION:-0.3.7}
     volumes:
       - dgx-data:/app/data
       - ${HOME}/.ssh:/root/.ssh:ro
