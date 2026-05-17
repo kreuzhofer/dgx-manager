@@ -497,7 +497,7 @@ function emitDeploymentProgress(deploymentId: string, progress: ReturnType<typeo
 function handleCommand(msg: { type: string; payload: Record<string, unknown> }) {
   switch (msg.type) {
     case "cmd:deploy": {
-      const { deploymentId, recipeFile, config, clusterNodes, clusterNodeFastIps, runtime, modelName, modelType } = msg.payload as {
+      const { deploymentId, recipeFile, config, clusterNodes, clusterNodeFastIps, runtime, modelName, modelType, servedModelName } = msg.payload as {
         deploymentId: string;
         recipeFile?: string;
         config?: Record<string, unknown>;
@@ -508,6 +508,8 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         runtime?: string;
         modelName?: string;
         modelType?: "chat" | "embedding";
+        /** Per-deploy override for vLLM's --served-model-name. */
+        servedModelName?: string;
       };
 
       // Ollama deployment
@@ -589,6 +591,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             clusterNodes,
             clusterNodeFastIps,
             skipSetup: recipeModelIsLocal,
+            servedModelName,
           },
           (line) => {
             // Collapse tqdm carriage-return updates so the log viewer doesn't

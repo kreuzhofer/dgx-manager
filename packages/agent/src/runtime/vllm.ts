@@ -166,13 +166,71 @@ ${rayBackendFlag}    --dtype auto
   return recipeFile;
 }
 
+export interface LaunchRecipeOptions {
+  port?: number;
+  gpuMem?: number;
+  maxModelLen?: number;
+  tensorParallel?: number;
+  pipelineParallel?: number;
+  clusterNodes?: string[];
+  clusterNodeFastIps?: (string | null)[];
+  skipSetup?: boolean;
+  /**
+   * Optional per-deploy served-model-name. When set, appended as
+   * `--served-model-name <value>` to the post-`--` passthrough args so vLLM's
+   * OpenAI API surface (`/v1/models`, completion responses) reports this name
+   * instead of the recipe's authored default.
+   */
+  servedModelName?: string;
+}
+
+/**
+ * Pure helper: build the argv array for run-recipe.sh given a recipe name and
+ * options. Extracted so it can be unit-tested without spawning a process.
+ */
+export function buildLaunchArgs(params: {
+  recipeName: string;
+  options?: LaunchRecipeOptions;
+}): string[] {
+  const { recipeName, options } = params;
+  const args: string[] = [recipeName];
+
+  const isCluster = options?.clusterNodes && options.clusterNodes.length > 1;
+
+  if (isCluster) {
+    args.push("-n", options!.clusterNodes!.join(","));
+    if (!options?.skipSetup) args.push("--setup");
+  } else {
+    args.push("--solo");
+    if (!options?.skipSetup) args.push("--setup");
+  }
+
+  if (options?.port) args.push("--port", String(options.port));
+  if (options?.gpuMem) args.push("--gpu-mem", String(options.gpuMem));
+  if (options?.maxModelLen) args.push("--max-model-len", String(options.maxModelLen));
+  if (options?.tensorParallel) args.push("--tp", String(options.tensorParallel));
+  if (ETH_IF) args.push("--eth-if", ETH_IF);
+  if (IB_IF) args.push("--ib-if", IB_IF);
+
+  // Post-`--` passthrough args (forwarded verbatim to `vllm serve`).
+  // Existing convention in this file: pipelineParallel uses this slot.
+  const passthrough: string[] = [];
+  if (options?.pipelineParallel) passthrough.push("-pp", String(options.pipelineParallel));
+  if (options?.servedModelName) {
+    passthrough.push("--served-model-name", options.servedModelName);
+  }
+  if (passthrough.length > 0) args.push("--", ...passthrough);
+
+  return args;
+}
+
 /**
  * Launch a vLLM inference server using a spark-vllm-docker recipe.
  */
 export function launchRecipe(
   deploymentId: string,
   recipeFile: string,
-  options?: { port?: number; gpuMem?: number; maxModelLen?: number; tensorParallel?: number; pipelineParallel?: number; clusterNodes?: string[]; clusterNodeFastIps?: (string | null)[]; skipSetup?: boolean },
+  options?: LaunchRecipeOptions,
   onLog?: (line: string) => void,
   onExit?: (code: number | null) => void
 ): number {
@@ -190,23 +248,7 @@ export function launchRecipe(
     .replace(/\.yaml$/, "");
 
   const isCluster = options?.clusterNodes && options.clusterNodes.length > 1;
-  const args = [recipeName];
-
-  if (isCluster) {
-    args.push("-n", options!.clusterNodes!.join(","));
-    if (!options?.skipSetup) args.push("--setup");
-  } else {
-    args.push("--solo");
-    if (!options?.skipSetup) args.push("--setup");
-  }
-
-  if (options?.port) args.push("--port", String(options.port));
-  if (options?.gpuMem) args.push("--gpu-mem", String(options.gpuMem));
-  if (options?.maxModelLen) args.push("--max-model-len", String(options.maxModelLen));
-  if (options?.tensorParallel) args.push("--tp", String(options.tensorParallel));
-  if (ETH_IF) args.push("--eth-if", ETH_IF);
-  if (IB_IF) args.push("--ib-if", IB_IF);
-  if (options?.pipelineParallel) args.push("--", "-pp", String(options.pipelineParallel));
+  const args = buildLaunchArgs({ recipeName, options });
 
   // For cluster mode, ensure workers have an image identical to the head's
   // (see syncContainerImage). Prefer each worker's fast-fabric IP when known
