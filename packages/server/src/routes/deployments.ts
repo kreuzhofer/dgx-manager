@@ -16,7 +16,11 @@ deploymentsRouter.get("/", async (_req, res) => {
     orderBy: { createdAt: "desc" },
     include: {
       node: true,
-      model: true,
+      // Surface the linked FineTuneJob.recipeFile so the dashboard's
+      // edit-restart form can look up training-recipe defaults for its
+      // placeholders — fine-tune deployments don't store recipeFile in
+      // their saved config, it lives on the FineTuneJob row.
+      model: { include: { finetuneJob: { select: { recipeFile: true } } } },
       clusterNodes: { include: { node: true } },
     },
   });

@@ -53,7 +53,14 @@ interface Deployment {
   createdAt: string;
   displayName?: string | null;
   node?: { name: string; ipAddress: string };
-  model?: { name: string };
+  // finetuneJobId on the Model row identifies fine-tune deployments; the
+  // nested finetuneJob.recipeFile lets the edit-restart form look up
+  // training-recipe defaults for its placeholders.
+  model?: {
+    name: string;
+    finetuneJobId?: string | null;
+    finetuneJob?: { recipeFile: string | null } | null;
+  };
   clusterNodes?: ClusterNodeInfo[];
 }
 
@@ -98,6 +105,11 @@ const statusStyles: Record<string, string> = {
 
 export default function DeploymentsPage() {
   const [recipes, setRecipes] = useState<Recipe[]>([]);
+  // Training recipes are a separate endpoint from /api/recipes — they carry
+  // a `deploy:` block whose fields (gpu_memory_utilization, max_model_len,
+  // tensor_parallel, …) are the source of truth for fine-tune deployment
+  // defaults. Used by the edit-restart form to populate placeholders.
+  const [trainingRecipes, setTrainingRecipes] = useState<Recipe[]>([]);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -171,14 +183,16 @@ export default function DeploymentsPage() {
       apiFetch<Deployment[]>("/api/deployments"),
       apiFetch<Node[]>("/api/nodes/idle"),
       apiFetch<{ tag: string; modelName: string; size: string | null; type: "chat" | "embedding"; description: string; capabilities: string[] }[]>("/api/ollama-catalog/available"),
+      apiFetch<Recipe[]>("/api/training-recipes"),
     ])
-      .then(([r, n, d, idle, om]) => {
+      .then(([r, n, d, idle, om, tr]) => {
         setRecipes(r);
         setNodes(n);
         setDeployments(d);
         setIdleNodes(idle);
         if (idle.length > 0 && !selectedNode) setSelectedNode(idle[0].id);
         setOllamaModels(om.map((m) => ({ name: m.tag, size: m.size ?? "", type: m.type, description: m.description })));
+        setTrainingRecipes(tr);
       })
       .catch(console.error)
       .finally(() => setLoading(false));
@@ -520,6 +534,22 @@ export default function DeploymentsPage() {
     }
   };
 
+  // Resolves the recipe defaults to seed the edit-restart form for a given
+  // deployment. Fine-tune deployments draw from the linked training
+  // recipe's `deploy` block (same source the initial finetune deploy used);
+  // stock vLLM deployments draw from the matching serve recipe's defaults.
+  // Either returns {} when the recipe isn't (no longer) registered.
+  const recipeDefaultsForDeployment = (
+    d: Deployment | undefined,
+    cfg: Record<string, unknown>,
+  ): Record<string, unknown> => {
+    const ftRecipeFile = d?.model?.finetuneJob?.recipeFile;
+    if (d?.model?.finetuneJobId && ftRecipeFile) {
+      return (trainingRecipes.find((r) => r.file === ftRecipeFile)?.deploy ?? {}) as Record<string, unknown>;
+    }
+    return (recipes.find((r) => r.file === cfg.recipeFile)?.defaults ?? {}) as Record<string, unknown>;
+  };
+
   const beginEditRestart = (id: string) => {
     const d = deployments.find((x) => x.id === id);
     let cfg: Record<string, unknown> = {};
@@ -528,7 +558,7 @@ export default function DeploymentsPage() {
     // at initial deploy — without this the dialog shows a blank GPU-mem (or
     // TP/PP/maxLen) box even though the deployment was running with a real
     // value pulled from recipe.defaults.
-    const recipeDefaults = (recipes.find((r) => r.file === cfg.recipeFile)?.defaults ?? {}) as Record<string, unknown>;
+    const recipeDefaults = recipeDefaultsForDeployment(d, cfg);
     const pick = (cfgVal: unknown, defVal: unknown): string => {
       if (cfgVal != null) return String(cfgVal);
       if (defVal != null) return String(defVal);
@@ -1113,10 +1143,12 @@ export default function DeploymentsPage() {
             // Ollama deployments don't take TP/PP/maxModelLen/gpuMem — those
             // are vLLM-only. Restart goes straight to the API; no edit form.
             const isOllama = config.runtime === "ollama";
+            const isFinetune = Boolean(d.model?.finetuneJobId);
             // Recipe defaults are used as placeholder text in the edit-restart
             // form, so a cleared box still shows what value will actually be
-            // used. Mirrors the placeholder behavior of the initial deploy form.
-            const recipeDefaultsForRestart = (recipes.find((r) => r.file === config.recipeFile)?.defaults ?? {}) as Record<string, unknown>;
+            // used. For fine-tune deployments the defaults come from the
+            // training recipe's deploy: block (not the vLLM serve recipes).
+            const recipeDefaultsForRestart = recipeDefaultsForDeployment(d, config);
 
             return (
               <div
@@ -1277,9 +1309,17 @@ export default function DeploymentsPage() {
                     deployment's saved config; blank fields keep saved values. */}
                 {!isOllama && editingRestart[d.id] && (
                   <div className="mt-3 p-3 bg-gray-800/50 rounded border border-blue-700/40">
-                    <p className="text-[10px] text-gray-400 mb-2">
-                      Edit settings then restart. Blank fields keep the saved value.
-                    </p>
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-[10px] text-gray-400">
+                        Edit settings then restart. Blank fields keep the saved value
+                        {isFinetune ? "; placeholders show the training recipe's defaults." : "; placeholders show the recipe defaults."}
+                      </p>
+                      {isFinetune && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/60 text-amber-300 font-medium">
+                          Fine-tune
+                        </span>
+                      )}
+                    </div>
                     <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                       <div>
                         <label className="block text-[10px] text-gray-500 mb-0.5">Port</label>
