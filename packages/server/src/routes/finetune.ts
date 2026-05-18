@@ -803,7 +803,11 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
       status: "pending",
       clusterMode: isCluster,
       displayName: perDeployDisplayName,
-      config: JSON.stringify({ ...config, localModelPath: modelPath }),
+      // Persist artifactVariant alongside the deploy config so the restart
+      // route can dispatch cmd:finetune:deploy with the original variant
+      // (bf16 vs fp8). Without this, restarts default to bf16 even for
+      // deployments originally launched as fp8.
+      config: JSON.stringify({ ...config, localModelPath: modelPath, artifactVariant: variant }),
     },
   });
 

@@ -365,7 +365,15 @@ deploymentsRouter.delete("/:id", async (req, res) => {
 deploymentsRouter.post("/:id/restart", async (req, res) => {
   const deployment = await prisma.deployment.findUnique({
     where: { id: req.params.id },
-    include: { model: true, clusterNodes: { include: { node: true } } },
+    include: {
+      // Including finetuneJob lets the restart path detect fine-tune
+      // deployments and dispatch cmd:finetune:deploy instead of cmd:deploy
+      // — fine-tunes have no recipeFile in their saved config (the recipe
+      // lives on the FineTuneJob row), so the legacy cmd:deploy path was
+      // failing them with "No recipeFile specified".
+      model: { include: { finetuneJob: true } },
+      clusterNodes: { include: { node: true } },
+    },
   });
   if (!deployment) return res.status(404).json({ error: "Deployment not found" });
 
@@ -443,20 +451,54 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
       });
     }
   }
-  agentHub.sendToAgent(deployment.nodeId, {
-    type: "cmd:deploy",
-    payload: {
-      deploymentId: deployment.id,
-      runtime: isOllamaRestart ? "ollama" : "vllm",
-      modelName: isOllamaRestart ? config.modelName : undefined,
-      modelType: isOllamaRestart ? (config.modelType || "chat") : undefined,
-      recipeFile: isOllamaRestart ? undefined : config.recipeFile,
-      servedModelName: newDisplayName ?? undefined,
-      config,
-      clusterNodes: clusterNodeIps,
-      clusterNodeFastIps,
-    },
-  });
+  // Fine-tune deployments route through cmd:finetune:deploy — they have no
+  // recipeFile in saved config (the recipe lives on the FineTuneJob), and
+  // the agent's finetune handler reads jobId/modelPath/baseModel/recipeFile
+  // from the payload directly. Detect by the model row's finetuneJobId FK.
+  const ftJob = deployment.model.finetuneJob;
+  if (ftJob && !isOllamaRestart) {
+    const trainingRecipe = ftJob.recipeFile
+      ? agentHub.getTrainingRecipes().find((r) => r.file === ftJob.recipeFile)
+      : undefined;
+    const deployContainer =
+      (trainingRecipe?.deploy?.container as string | undefined) ?? "vllm-node";
+    // localModelPath was persisted by the original finetune deploy route as
+    // the bf16 merged path; for fp8 vLLM does on-load quantization off the
+    // same path, so we re-use it unchanged. Variant tells the agent which
+    // inference template (inference.yaml / inference-fp8.yaml) to apply.
+    const artifactVariant = (config.artifactVariant as "bf16" | "fp8" | undefined) ?? "bf16";
+    agentHub.sendToAgent(deployment.nodeId, {
+      type: "cmd:finetune:deploy",
+      payload: {
+        jobId: ftJob.id,
+        deploymentId: deployment.id,
+        modelPath: config.localModelPath,
+        baseModel: ftJob.baseModel,
+        deployContainer,
+        modelName: newDisplayName ?? deployment.model.name,
+        recipeFile: ftJob.recipeFile,
+        artifactVariant,
+        clusterNodes: clusterNodeIps,
+        clusterNodeFastIps,
+        config,
+      },
+    });
+  } else {
+    agentHub.sendToAgent(deployment.nodeId, {
+      type: "cmd:deploy",
+      payload: {
+        deploymentId: deployment.id,
+        runtime: isOllamaRestart ? "ollama" : "vllm",
+        modelName: isOllamaRestart ? config.modelName : undefined,
+        modelType: isOllamaRestart ? (config.modelType || "chat") : undefined,
+        recipeFile: isOllamaRestart ? undefined : config.recipeFile,
+        servedModelName: newDisplayName ?? undefined,
+        config,
+        clusterNodes: clusterNodeIps,
+        clusterNodeFastIps,
+      },
+    });
+  }
 
   await prisma.deployment.update({
     where: { id: req.params.id },
