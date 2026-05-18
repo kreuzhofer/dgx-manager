@@ -14,6 +14,54 @@
 
 ---
 
+## Post-Implementation Reconciliation
+
+> **Status:** Implementation completed and verified end-to-end against a live vLLM deployment. 26 commits between `4a4e380` (plan) and `0b729ca`. 196/196 tests passing. Several sections of this plan diverged from reality during execution — the corrections below are authoritative; treat the original task bodies as historical context, not as a current spec.
+
+### Pinned llama-benchy version
+The plan pinned `llama-benchy==0.5.0` speculatively. That version doesn't exist on PyPI; the actual pin (in `Dockerfile.server` and the orchestrator's runtime env) is **`0.3.7`**. Bump together in both places + adjust the fixture if you upgrade. (`0fd3efb`, `de2b778` restored `--no-install-recommends` that got dropped during the apt fold.)
+
+### `buildBenchyArgs` emits space-separated argv, not comma-joined
+The plan body used `config.pp.join(",")` (producing `["--pp", "128,512"]`). `llama-benchy 0.3.7`'s CLI uses argparse `nargs='+'` which expects separate tokens (`["--pp", "128", "512"]`). The shipped implementation spreads each value as its own argv element. The Task 5 code block has been corrected inline. (Commit `224a778`; verified empirically when Task 2's `--help` output showed `--pp PP [PP ...]`.)
+
+### Real llama-benchy 0.3.7 JSON schema differs from the documented one
+The fixture in this plan was hand-crafted against the documented schema. Real output uses a completely different shape:
+- top-level key is `benchmarks` (not `rows`)
+- workload coords are `prompt_size`/`response_size`/`context_size` (not `pp`/`tg`/`depth`)
+- metrics are nested `{mean, std, values}` objects (not flat numbers like `"t/s": 1840.4`)
+- each benchmark entry reports BOTH `pp_throughput` and `tg_throughput`
+
+The parser was rewritten to read the real schema and emit two `BenchmarkResultInput` rows per benchmark entry (one `opType="pp"` using `pp_throughput.mean`, one `opType="tg"` using `tg_throughput.mean`). Shared-across-rows metrics: `ttfr`, `est_ppt`, `e2e_ttft`. `peak_throughput` is **decode-only** per llama-benchy's own docs ("Peak generation tokens per second (total)") and is now `null` on pp rows. (Commits `1798632`, `0b729ca`; Task 6 fixture + parser code corrected inline.)
+
+### `--base-url` requires `/v1` suffix
+`llama-benchy`'s client appends `/chat/completions` directly to whatever you pass as `--base-url` (OpenAI client convention). Without `/v1`, vLLM 404s the warmup request. The route now stores and passes `<host>:<port>/v1`. (Commit `1798632`.)
+
+### Live log was empty in two ways
+1. Python's stdout switches to block buffering when piped (not a tty), so the orchestrator's `onLog` never fired until process exit. Fixed by setting `PYTHONUNBUFFERED=1` in the spawn env (Task 7 code corrected inline).
+2. SSE only streams events while the page is mounted, so opening a completed run showed an empty log. Now the route appends every log line to `$SHARED_STORAGE/logs/benchmarks/<runId>.log`, exposes `GET /api/benchmarks/:id/logs`, and the detail page seeds its log state from that endpoint on mount with a "seed only if still empty" guard against the SSE race. The "Live log" disclosure was renamed to **"Log"** and is open by default. (Commit `72fa08c`.)
+
+### Cancel kills the process group, not just `uvx`
+`spawn(..., detached: true)` puts the child in its own process group. `child.kill("SIGTERM")` only signals `uvx`; the Python subprocess (where `llama-benchy` actually runs) keeps consuming GPU. The orchestrator now does `process.kill(-child.pid, "SIGTERM")` with a fallback to `child.kill` if `pid` is undefined. (Commit `8b7cd42`.)
+
+### `LLAMA_BENCHY_VERSION` is now a runtime env var, not just a build-arg
+The Dockerfile `ARG` only warmed the build-time cache. Without `LLAMA_BENCHY_VERSION` exposed at runtime, the orchestrator's `uvx --from` fallback to unpinned `"llama-benchy"` would resolve a different version than what's cached. Now set in `docker-compose.yml`'s `server.environment` as `LLAMA_BENCHY_VERSION=${LLAMA_BENCHY_VERSION:-0.3.7}`. (Commit `8b7cd42`.)
+
+### Misc post-review fixes (commit `8b7cd42`)
+- `BenchmarkFormModal.parseIntList` now accepts `0` (was `n > 0`, dropping `depth=0` silently)
+- The `running`-status SSE broadcast includes `deploymentId` so the Deployments page pill updates immediately, not only after the run completes
+
+### Dashboard polish
+- Chart x-axis sorted numerically by `(opType, depth, pp, tg, concurrency)` instead of lexicographically — `c=1,4,16,32,64` now reads left-to-right in real order (commit `e7bf04d`)
+- Chart tooltip + y-axis formatted with units and `k`/`M` suffixes (commit `c7cd3b9`) — raw 13-decimal floats are gone
+- Table columns relabeled: `t/s` → `t/s (mean)`, `peak t/s` → `peak tg t/s`, both with hover-tooltips (commit `0b729ca`)
+- Result table now sorts by `(depth, pp, tg, concurrency, opType)` so each workload's pp/tg rows sit adjacent (commit `e7bf04d`)
+- Compare page wrapped in `<Suspense>` so the `useSearchParams` prerender succeeds (commit `94136c6`)
+
+### Cleanup needed
+Existing benchmark rows in the dev DB that were inserted before commit `0b729ca` still carry `peakTps` on their pp rows. Re-run benchmarks (or `DELETE FROM BenchmarkResult WHERE opType='pp' AND peakTps IS NOT NULL`) to clean them up.
+
+---
+
 ## File Structure
 
 **New files:**
@@ -187,11 +235,11 @@ Right after the `uv` install in the same Dockerfile, add:
 ```dockerfile
 # Warm uvx's cache for llama-benchy so the first benchmark in a fresh
 # container doesn't pay a 10–30s cold-start penalty.
-ARG LLAMA_BENCHY_VERSION=0.5.0
+ARG LLAMA_BENCHY_VERSION=0.3.7
 RUN uvx --from "llama-benchy==${LLAMA_BENCHY_VERSION}" llama-benchy --help > /dev/null
 ```
 
-> **Note on version pinning:** If `llama-benchy==0.5.0` is unavailable when this plan is executed, replace with the latest published version on PyPI and adjust the parser fixtures in Task 6 accordingly. The orchestrator in Task 7 uses the same `LLAMA_BENCHY_VERSION` value through an env var.
+> **Note on version pinning:** Set to `0.3.7` (the latest available on PyPI at implementation time). Bump together in `Dockerfile.server` AND `docker-compose.yml`'s `LLAMA_BENCHY_VERSION` env, then re-capture the fixture by running once against any deployment. Schema may change between versions.
 
 - [ ] **Step 3: Rebuild the server image and sanity-check uvx**
 
@@ -537,18 +585,25 @@ describe("buildBenchyArgs", () => {
     expect(args).toContain("json");
   });
 
-  it("joins pp/tg/depth/concurrency with commas (llama-benchy CSV-style list flag)", () => {
+  it("emits pp/tg/depth/concurrency as separate space-separated argv tokens", () => {
+    // llama-benchy uses argparse nargs='+' — each value is its own token.
+    // Comma-joined "128,512" would fail with an integer-conversion error.
     const args = buildBenchyArgs(baseConfig, {
       baseUrl: "http://10.0.0.1:8000",
       modelName: "m",
       outputPath: "/output/r.json",
     });
-    const idx = (flag: string) => args.indexOf(flag);
-    expect(args[idx("--pp") + 1]).toBe("128,512");
-    expect(args[idx("--tg") + 1]).toBe("32,128");
-    expect(args[idx("--depth") + 1]).toBe("0,4096");
-    expect(args[idx("--concurrency") + 1]).toBe("1,4");
-    expect(args[idx("--runs") + 1]).toBe("3");
+    const valuesAfter = (flag: string): string[] => {
+      const idx = args.indexOf(flag);
+      const tail = args.slice(idx + 1);
+      const stop = tail.findIndex((t) => t.startsWith("--"));
+      return stop === -1 ? tail : tail.slice(0, stop);
+    };
+    expect(valuesAfter("--pp")).toEqual(["128", "512"]);
+    expect(valuesAfter("--tg")).toEqual(["32", "128"]);
+    expect(valuesAfter("--depth")).toEqual(["0", "4096"]);
+    expect(valuesAfter("--concurrency")).toEqual(["1", "4"]);
+    expect(valuesAfter("--runs")).toEqual(["3"]);
   });
 
   it("includes --enable-prefix-caching only when enabled", () => {
@@ -622,6 +677,9 @@ export type BenchyTarget = {
   outputPath: string;
 };
 
+// llama-benchy uses argparse nargs='+' for its list flags (--pp, --tg,
+// --depth, --concurrency). Each value must be its own argv token; a
+// comma-joined "128,512" would fail with an integer-conversion error.
 export function buildBenchyArgs(
   config: BenchmarkConfig,
   target: BenchyTarget,
@@ -631,10 +689,10 @@ export function buildBenchyArgs(
     "--model", target.modelName,
     "--format", "json",
     "--save-result", target.outputPath,
-    "--pp", config.pp.join(","),
-    "--tg", config.tg.join(","),
-    "--depth", config.depth.join(","),
-    "--concurrency", config.concurrency.join(","),
+    "--pp", ...config.pp.map(String),
+    "--tg", ...config.tg.map(String),
+    "--depth", ...config.depth.map(String),
+    "--concurrency", ...config.concurrency.map(String),
     "--runs", String(config.runs),
     "--latency-mode", config.latencyMode,
   ];
@@ -675,53 +733,49 @@ Create `packages/server/src/__tests__/integration/benchmarks.fixtures/result.jso
 
 ```json
 {
-  "meta": {
-    "base_url": "http://10.0.0.1:8000",
-    "model": "llama-3.1-8b",
-    "runs": 3
-  },
-  "rows": [
+  "version": "0.3.7",
+  "timestamp": "2026-05-17 20:18:08Z",
+  "latency_mode": "api",
+  "latency_ms": 1.466,
+  "model": "llama-3.1-8b",
+  "prefix_caching_enabled": false,
+  "max_concurrency": 4,
+  "benchmarks": [
     {
-      "op": "pp",
-      "pp": 512,
-      "tg": 32,
-      "depth": 0,
       "concurrency": 1,
-      "t/s": 1840.4,
-      "peak t/s": 1955.0,
-      "ttfr (ms)": 142.3,
-      "est_ppt (ms)": 278.0,
-      "e2e_ttft (ms)": 420.1,
-      "t/s_stdev": 18.2,
-      "ttfr_stdev": 5.1
+      "context_size": 0,
+      "prompt_size": 512,
+      "response_size": 32,
+      "is_context_prefill_phase": false,
+      "pp_throughput": { "mean": 1840.4, "std": 18.2, "values": [1822.2, 1858.6] },
+      "pp_req_throughput": { "mean": 1840.4, "std": 18.2, "values": [1822.2, 1858.6] },
+      "tg_throughput": { "mean": 84.5, "std": 0.9, "values": [83.6, 85.4] },
+      "tg_req_throughput": { "mean": 84.5, "std": 0.9, "values": [83.6, 85.4] },
+      "peak_throughput": { "mean": 92.1, "std": 0.0, "values": [92.1] },
+      "peak_req_throughput": { "mean": 92.1, "std": 0.0, "values": [92.1] },
+      "ttfr": { "mean": 142.3, "std": 5.1, "values": [137.2, 147.4] },
+      "est_ppt": { "mean": 278.0, "std": 4.0, "values": [274.0, 282.0] },
+      "e2e_ttft": { "mean": 420.1, "std": 8.0, "values": [412.1, 428.1] },
+      "throughput_over_time": null,
+      "requests_throughput_over_time": null
     },
     {
-      "op": "tg",
-      "pp": 512,
-      "tg": 128,
-      "depth": 0,
-      "concurrency": 1,
-      "t/s": 84.5,
-      "peak t/s": 92.1,
-      "ttfr (ms)": 142.3,
-      "est_ppt (ms)": 278.0,
-      "e2e_ttft (ms)": 420.1,
-      "t/s_stdev": 0.9,
-      "ttfr_stdev": 5.1
-    },
-    {
-      "op": "tg",
-      "pp": 512,
-      "tg": 128,
-      "depth": 4096,
       "concurrency": 4,
-      "t/s": 220.3,
-      "peak t/s": 240.0,
-      "ttfr (ms)": 410.0,
-      "est_ppt (ms)": 1100.0,
-      "e2e_ttft (ms)": 1500.0,
-      "t/s_stdev": 4.0,
-      "ttfr_stdev": 15.0
+      "context_size": 4096,
+      "prompt_size": 512,
+      "response_size": 128,
+      "is_context_prefill_phase": false,
+      "pp_throughput": { "mean": 880.0, "std": 12.0, "values": [868.0, 892.0] },
+      "pp_req_throughput": { "mean": 220.0, "std": 3.0, "values": [217.0, 223.0] },
+      "tg_throughput": { "mean": 220.3, "std": 4.0, "values": [216.3, 224.3] },
+      "tg_req_throughput": { "mean": 55.0, "std": 1.0, "values": [54.0, 56.0] },
+      "peak_throughput": { "mean": 240.0, "std": 0.0, "values": [240.0] },
+      "peak_req_throughput": { "mean": 60.0, "std": 0.0, "values": [60.0] },
+      "ttfr": { "mean": 410.0, "std": 15.0, "values": [395.0, 425.0] },
+      "est_ppt": { "mean": 1100.0, "std": 20.0, "values": [1080.0, 1120.0] },
+      "e2e_ttft": { "mean": 1500.0, "std": 25.0, "values": [1475.0, 1525.0] },
+      "throughput_over_time": null,
+      "requests_throughput_over_time": null
     }
   ]
 }
@@ -743,12 +797,13 @@ const fixture = readFileSync(
 );
 
 describe("parseBenchyResults", () => {
-  it("parses the three rows from the fixture", () => {
+  it("emits two rows (pp + tg) per benchmark entry in the fixture", () => {
+    // Fixture has 2 benchmark entries; parser emits 1 pp row + 1 tg row per entry
     const rows = parseBenchyResults(fixture);
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(4);
   });
 
-  it("maps llama-benchy field names to BenchmarkResult fields", () => {
+  it("maps llama-benchy 0.3.7 nested-mean fields to BenchmarkResult fields", () => {
     const rows = parseBenchyResults(fixture);
     expect(rows[0]).toEqual({
       opType: "pp",
@@ -757,25 +812,43 @@ describe("parseBenchyResults", () => {
       depth: 0,
       concurrency: 1,
       tps: 1840.4,
-      peakTps: 1955.0,
+      // peakTps is a tg-only metric, null on the prefill row
+      peakTps: null,
       ttfrMs: 142.3,
       estPptMs: 278.0,
       e2eTtftMs: 420.1,
       tpsStdev: 18.2,
       ttfrStdev: 5.1,
     });
+    expect(rows[1]).toEqual({
+      opType: "tg",
+      pp: 512, tg: 32, depth: 0, concurrency: 1,
+      tps: 84.5, peakTps: 92.1,
+      ttfrMs: 142.3, estPptMs: 278.0, e2eTtftMs: 420.1,
+      tpsStdev: 0.9, ttfrStdev: 5.1,
+    });
   });
 
   it("returns an empty array for empty input", () => {
-    expect(parseBenchyResults('{"rows":[]}')).toEqual([]);
+    expect(parseBenchyResults('{"benchmarks":[]}')).toEqual([]);
   });
 
   it("throws a descriptive error on malformed JSON", () => {
     expect(() => parseBenchyResults("not json")).toThrow(/parse/i);
   });
 
-  it("throws when required fields are missing on a row", () => {
-    const bad = JSON.stringify({ rows: [{ op: "pp", pp: 1 }] });
+  it("throws when required fields are missing on a benchmark entry", () => {
+    const bad = JSON.stringify({ benchmarks: [{ concurrency: 1 }] });
+    expect(() => parseBenchyResults(bad)).toThrow(/missing/i);
+  });
+
+  it("throws when a required nested metric object is missing its mean", () => {
+    const bad = JSON.stringify({
+      benchmarks: [{
+        concurrency: 1, context_size: 0, prompt_size: 1, response_size: 1,
+        pp_throughput: { std: 0, values: [] },
+      }],
+    });
     expect(() => parseBenchyResults(bad)).toThrow(/missing/i);
   });
 });
@@ -784,10 +857,10 @@ describe("summarizeResults", () => {
   it("computes mean tps and mean ttfr across all rows", () => {
     const rows = parseBenchyResults(fixture);
     const summary = summarizeResults(rows);
-    // (1840.4 + 84.5 + 220.3) / 3 = 715.07
-    expect(summary.meanTps).toBeCloseTo(715.07, 1);
-    // (142.3 + 142.3 + 410.0) / 3 = 231.53
-    expect(summary.meanTtfrMs).toBeCloseTo(231.53, 1);
+    // 4 rows: tps means (1840.4 + 84.5 + 880.0 + 220.3) / 4 = 756.3
+    expect(summary.meanTps).toBeCloseTo(756.3, 1);
+    // ttfr shared per-workload: (142.3 + 142.3 + 410.0 + 410.0) / 4 = 276.15
+    expect(summary.meanTtfrMs).toBeCloseTo(276.15, 1);
   });
 
   it("returns nulls when given no rows", () => {
@@ -831,33 +904,75 @@ function num(row: RawRow, key: string): number {
   return v;
 }
 
-function optNum(row: RawRow, key: string): number | null {
+// llama-benchy 0.3.7 reports metrics as nested {mean, std, values} objects.
+function nestedNum(row: RawRow, key: string, sub: "mean" | "std"): number {
   const v = row[key];
-  return typeof v === "number" && Number.isFinite(v) ? v : null;
+  if (!v || typeof v !== "object") {
+    throw new Error(`benchmark row missing required metric object: ${key}`);
+  }
+  const inner = (v as Record<string, unknown>)[sub];
+  if (typeof inner !== "number" || !Number.isFinite(inner)) {
+    throw new Error(`benchmark row missing required numeric field: ${key}.${sub}`);
+  }
+  return inner;
 }
 
+function optNestedNum(row: RawRow, key: string, sub: "mean" | "std"): number | null {
+  const v = row[key];
+  if (!v || typeof v !== "object") return null;
+  const inner = (v as Record<string, unknown>)[sub];
+  return typeof inner === "number" && Number.isFinite(inner) ? inner : null;
+}
+
+// Parse llama-benchy 0.3.7's JSON output. Each entry in `benchmarks` reports
+// BOTH prompt-processing and token-generation throughput for a single
+// (concurrency, context_size, prompt_size, response_size) workload, so we
+// split it into two rows: opType="pp" using pp_throughput, opType="tg" using
+// tg_throughput. The latency-style metrics (ttfr, est_ppt, e2e_ttft) are
+// shared by both rows. peak_throughput is documented by llama-benchy as
+// "Peak generation tokens per second (total)" — strictly a decode metric,
+// so it's null on pp rows (would otherwise read smaller than the mean and
+// confuse the reader).
 export function parseBenchyResults(jsonText: string): BenchmarkResultInput[] {
-  let parsed: { rows?: RawRow[] };
+  let parsed: { benchmarks?: RawRow[] };
   try {
     parsed = JSON.parse(jsonText);
   } catch (e) {
     throw new Error(`failed to parse llama-benchy JSON: ${(e as Error).message}`);
   }
-  const rows = parsed.rows ?? [];
-  return rows.map((r) => ({
-    opType: String(r["op"] ?? "tg"),
-    pp: num(r, "pp"),
-    tg: num(r, "tg"),
-    depth: num(r, "depth"),
-    concurrency: num(r, "concurrency"),
-    tps: num(r, "t/s"),
-    peakTps: optNum(r, "peak t/s"),
-    ttfrMs: optNum(r, "ttfr (ms)"),
-    estPptMs: optNum(r, "est_ppt (ms)"),
-    e2eTtftMs: optNum(r, "e2e_ttft (ms)"),
-    tpsStdev: optNum(r, "t/s_stdev"),
-    ttfrStdev: optNum(r, "ttfr_stdev"),
-  }));
+  const benchmarks = parsed.benchmarks ?? [];
+  const out: BenchmarkResultInput[] = [];
+  for (const b of benchmarks) {
+    const pp = num(b, "prompt_size");
+    const tg = num(b, "response_size");
+    const depth = num(b, "context_size");
+    const concurrency = num(b, "concurrency");
+    const ttfrMs = optNestedNum(b, "ttfr", "mean");
+    const ttfrStdev = optNestedNum(b, "ttfr", "std");
+    const estPptMs = optNestedNum(b, "est_ppt", "mean");
+    const e2eTtftMs = optNestedNum(b, "e2e_ttft", "mean");
+    const peakTgTps = optNestedNum(b, "peak_throughput", "mean");
+
+    out.push({
+      opType: "pp",
+      pp, tg, depth, concurrency,
+      tps: nestedNum(b, "pp_throughput", "mean"),
+      peakTps: null,
+      ttfrMs, estPptMs, e2eTtftMs,
+      tpsStdev: optNestedNum(b, "pp_throughput", "std"),
+      ttfrStdev,
+    });
+    out.push({
+      opType: "tg",
+      pp, tg, depth, concurrency,
+      tps: nestedNum(b, "tg_throughput", "mean"),
+      peakTps: peakTgTps,
+      ttfrMs, estPptMs, e2eTtftMs,
+      tpsStdev: optNestedNum(b, "tg_throughput", "std"),
+      ttfrStdev,
+    });
+  }
+  return out;
 }
 
 export function summarizeResults(rows: BenchmarkResultInput[]): {
