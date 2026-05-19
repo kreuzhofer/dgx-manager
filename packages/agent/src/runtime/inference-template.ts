@@ -50,6 +50,32 @@ export function applyFinetuneSubstitutions(
 }
 
 /**
+ * Convert an inference filename into its variant id slug.
+ *
+ *   "inference.yaml"       → "default"
+ *   "inference-fp8.yaml"   → "fp8"
+ *   "inference-low-ctx.yaml" → "low-ctx"
+ *
+ * Returns null for filenames that don't match the convention (so callers can
+ * skip non-inference files during a directory scan).
+ */
+export function inferenceVariantIdFromFilename(filename: string): string | null {
+  if (filename === "inference.yaml") return "default";
+  const m = filename.match(/^inference-([a-z0-9][a-z0-9-]*)\.yaml$/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Convert a variant id back into the filename to look up in a recipe dir.
+ * Legacy back-compat: "bf16" is treated as an alias for "default" so saved
+ * deployments from before this feature keep resolving to inference.yaml.
+ */
+export function inferenceFilenameForId(id: string): string {
+  if (id === "default" || id === "bf16") return "inference.yaml";
+  return `inference-${id}.yaml`;
+}
+
+/**
  * Return the absolute path to the inference template for a given
  * artifact variant, or null if no template exists for it.
  *
