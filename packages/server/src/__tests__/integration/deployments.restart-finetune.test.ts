@@ -153,7 +153,10 @@ describe("POST /api/deployments/:id/restart for fine-tune deployments", () => {
     expect(sent[0].message.payload.modelName).toBe("chat3d-prod");
   });
 
-  it("defaults artifactVariant to bf16 when the saved config doesn't have it (back-compat for pre-fix deployments)", async () => {
+  it("defaults artifactVariant to 'default' when the saved config doesn't have it", async () => {
+    // Pre-variant deployments have no artifactVariant stored. The route now
+    // sends "default" (the canonical slug for inference.yaml); the agent maps
+    // both "default" and legacy "bf16" to inference.yaml, so this is safe.
     const { deployment } = await seedFineTuneDeployment(); // no artifactVariant set
     const { hub, sent } = makeStubHub();
     const app = makeApp(hub);
@@ -161,7 +164,7 @@ describe("POST /api/deployments/:id/restart for fine-tune deployments", () => {
     const res = await request(app).post(`/api/deployments/${deployment.id}/restart`).send({});
 
     expect(res.status).toBe(200);
-    expect(sent[0].message.payload.artifactVariant).toBe("bf16");
+    expect(sent[0].message.payload.artifactVariant).toBe("default");
   });
 
   it("preserves artifactVariant=fp8 from saved config", async () => {

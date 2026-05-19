@@ -35,6 +35,16 @@ function broadcastRecipeRescan(agentHub: AgentHub): number {
   return nodeIds.length;
 }
 
+/** Variant ids are filename slugs — lowercase alphanumerics + hyphens, must
+ *  start with an alphanumeric, max ~32 chars. Tight enough to keep `..` and
+ *  path separators out of the filename interpolation in
+ *  `inferenceFilenameForId`. */
+const VARIANT_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+export function isValidVariantSlug(v: unknown): v is string {
+  return typeof v === "string" && VARIANT_SLUG_RE.test(v);
+}
+
 export const finetuneRouter = Router();
 
 finetuneRouter.get("/", async (_req, res) => {
@@ -686,7 +696,7 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
     nodeId?: string;
     nodeIds?: string[];
     config?: Record<string, unknown>;
-    artifactVariant?: "bf16" | "fp8";
+    artifactVariant?: string;        // was: "bf16" | "fp8"
     displayName?: string | null;
   };
   const isCluster = Array.isArray(nodeIds) && nodeIds.length > 1;
@@ -695,7 +705,13 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
     return res.status(400).json({ error: "nodeId or nodeIds required" });
   }
 
-  const variant: "bf16" | "fp8" = artifactVariant === "fp8" ? "fp8" : "bf16";
+  if (artifactVariant !== undefined && !isValidVariantSlug(artifactVariant)) {
+    return res.status(400).json({
+      error: `Invalid artifactVariant: must match ${VARIANT_SLUG_RE} (got ${JSON.stringify(artifactVariant)})`,
+    });
+  }
+
+  const variant: string = artifactVariant ?? "default";
 
   // Both variants serve the same BF16 merged weights. FP8 deploys use vLLM's
   // on-load `--quantization fp8` (set in inference-fp8.yaml) to convert weights

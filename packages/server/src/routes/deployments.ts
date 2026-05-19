@@ -8,6 +8,7 @@ import { checkVllmVramAdmission, vramShortfallMessage } from "../admission/vram.
 import { readCatalog as readOllamaCatalog } from "../ollama/catalog-store.js";
 import { ollamaVramEstimateMB } from "../ollama/vram-estimate.js";
 import { normalizeDisplayName, validateDisplayNameUnique, DisplayNameError } from "../deployments/display-name.js";
+import { isValidVariantSlug } from "./finetune.js";
 
 export const deploymentsRouter = Router();
 
@@ -398,6 +399,12 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
   }
   const config = { ...savedConfig, ...overrides };
 
+  if (typeof overrides.artifactVariant !== "undefined" && !isValidVariantSlug(overrides.artifactVariant)) {
+    return res.status(400).json({
+      error: `Invalid artifactVariant: must match /^[a-z0-9][a-z0-9-]{0,31}$/ (got ${JSON.stringify(overrides.artifactVariant)})`,
+    });
+  }
+
   // Allow the caller to update displayName on restart (re-validating
   // uniqueness, excluding self). Body shape: { displayName: "new-name" } at
   // the top level (NOT nested under config — displayName is a column, not
@@ -470,7 +477,9 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
     // the bf16 merged path; for fp8 vLLM does on-load quantization off the
     // same path, so we re-use it unchanged. Variant tells the agent which
     // inference template (inference.yaml / inference-fp8.yaml) to apply.
-    const artifactVariant = (config.artifactVariant as "bf16" | "fp8" | undefined) ?? "bf16";
+    const artifactVariant: string = typeof config.artifactVariant === "string" && isValidVariantSlug(config.artifactVariant)
+      ? config.artifactVariant
+      : "default";
     agentHub.sendToAgent(deployment.nodeId, {
       type: "cmd:finetune:deploy",
       payload: {

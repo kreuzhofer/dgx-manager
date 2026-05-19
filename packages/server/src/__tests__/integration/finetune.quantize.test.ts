@@ -193,7 +193,10 @@ describe("POST /api/finetune/:id/deploy with artifactVariant", () => {
     });
   }
 
-  it("defaults to bf16 (merged path) when artifactVariant is omitted", async () => {
+  it("defaults to 'default' (merged path) when artifactVariant is omitted", async () => {
+    // "default" is the canonical slug for inference.yaml; the agent maps
+    // legacy "bf16" → inference.yaml as well, so both are equivalent at the
+    // agent layer. The server now sends the canonical slug.
     const { hub, sent } = makeStubHub({ file: "recipes/test", scripts: { quantize_fp8: "scripts/quantize_fp8.py" } });
     const app = makeApp(hub);
     const job = await seedQuantizedJob();
@@ -203,7 +206,7 @@ describe("POST /api/finetune/:id/deploy with artifactVariant", () => {
     const cmd = sent.find((s) => (s.message as { type: string }).type === "cmd:finetune:deploy");
     expect(cmd).toBeTruthy();
     const payload = (cmd!.message as { payload: { artifactVariant?: string; modelPath: string } }).payload;
-    expect(payload.artifactVariant ?? "bf16").toBe("bf16");
+    expect(payload.artifactVariant).toBe("default");
     expect(payload.modelPath).toBe("/mnt/tank/outputs/job-d/merged");
   });
 
