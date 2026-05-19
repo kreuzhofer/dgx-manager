@@ -44,6 +44,15 @@ export interface TrainingRecipe {
   defaults: Record<string, unknown>;
   hardware: { min_nodes: number; gpus_per_node: number; vram_estimate_mb: number };
   deploy?: { container: string; gpu_memory_utilization?: number; max_model_len?: number };
+  /** Mirror of agent's TrainingRecipe.inferenceVariants — one entry per
+   *  inference*.yaml file in the recipe dir. Empty/undefined when the
+   *  recipe doesn't ship inference templates. */
+  inferenceVariants?: {
+    id: string;
+    filename: string;
+    name: string;
+    description?: string;
+  }[];
 }
 
 interface AgentConnection {
