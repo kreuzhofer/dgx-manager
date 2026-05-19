@@ -155,3 +155,29 @@ describe("findInferenceTemplate(variant)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe("findInferenceTemplate — variant id back-compat", () => {
+  it("'default' resolves to inference.yaml (new canonical id)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "find-"));
+    try {
+      writeFileSync(join(dir, "inference.yaml"), "name: x");
+      expect(findInferenceTemplate(dir, "default")).toBe(join(dir, "inference.yaml"));
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("'bf16' still resolves to inference.yaml (legacy alias)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "find-"));
+    try {
+      writeFileSync(join(dir, "inference.yaml"), "name: x");
+      expect(findInferenceTemplate(dir, "bf16")).toBe(join(dir, "inference.yaml"));
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("arbitrary slug resolves to inference-<slug>.yaml", () => {
+    const dir = mkdtempSync(join(tmpdir(), "find-"));
+    try {
+      writeFileSync(join(dir, "inference-int4.yaml"), "name: x");
+      expect(findInferenceTemplate(dir, "int4")).toBe(join(dir, "inference-int4.yaml"));
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
