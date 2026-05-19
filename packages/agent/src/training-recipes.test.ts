@@ -12,7 +12,10 @@
  *   - One `describe` per function under test.
  */
 import { describe, it, expect } from "vitest";
-import { parseRecipeYaml } from "./training-recipes.js";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { parseRecipeYaml, discoverTrainingRecipes } from "./training-recipes.js";
 
 describe("parseRecipeYaml", () => {
   it("parses top-level scalars", () => {
@@ -124,5 +127,36 @@ scripts:
 `);
     const scripts = result.scripts as Record<string, unknown>;
     expect(scripts.quantize_fp8).toBeUndefined();
+  });
+});
+
+describe("discoverTrainingRecipes — inference variants", () => {
+  it("populates inferenceVariants for each recipe dir with inference*.yaml files", () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "training-recipes-"));
+    process.env.TRAINING_REPO_PATH = repoRoot;
+    const recipeDir = join(repoRoot, "recipes", "demo");
+    try {
+      mkdirSync(recipeDir, { recursive: true });
+      writeFileSync(join(recipeDir, "recipe.yaml"),
+        `name: Demo\nbase_model: x/y\nframework: deepspeed\nmethod: lora\n` +
+        `container:\n  image: img\n  name: demo\n` +
+        `scripts:\n  entrypoint: e.sh\n  train: t.py\n  launch: l.sh\n` +
+        `defaults: {}\nhardware:\n  min_nodes: 1\n  gpus_per_node: 1\n  vram_estimate_mb: 0\n`);
+      writeFileSync(join(recipeDir, "inference.yaml"),
+        `name: demo-bf16\ndescription: Default serve.\n`);
+      writeFileSync(join(recipeDir, "inference-fp8.yaml"),
+        `name: demo-fp8\ndescription: On-load FP8.\n`);
+
+      const recipes = discoverTrainingRecipes();
+      const demo = recipes.find((r) => r.file === "recipes/demo");
+      expect(demo).toBeDefined();
+      expect(demo!.inferenceVariants).toEqual([
+        { id: "default", filename: "inference.yaml",     name: "demo-bf16", description: "Default serve." },
+        { id: "fp8",     filename: "inference-fp8.yaml", name: "demo-fp8",  description: "On-load FP8." },
+      ]);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+      delete process.env.TRAINING_REPO_PATH;
+    }
   });
 });

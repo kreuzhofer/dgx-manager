@@ -1,14 +1,18 @@
 import { execSync } from "child_process";
 import { existsSync, readdirSync, readFileSync } from "fs";
 import { join } from "path";
+import { listInferenceVariants, type InferenceVariant } from "./runtime/inference-template.js";
 
 const TRAINING_REPO_URL =
   "https://github.com/kreuzhofer/dgx-manager-fine-tune-recipes.git";
 import { SHARED_STORAGE } from "./env.js";
 
-const TRAINING_REPO_PATH =
-  process.env.TRAINING_REPO_PATH ||
-  `${SHARED_STORAGE}/src/github/dgx-manager-fine-tune-recipes`;
+const TRAINING_REPO_PATH_DEFAULT = `${SHARED_STORAGE}/src/github/dgx-manager-fine-tune-recipes`;
+
+/** Read at call time so tests can override via process.env.TRAINING_REPO_PATH. */
+function getTrainingRepoPathInternal(): string {
+  return process.env.TRAINING_REPO_PATH || TRAINING_REPO_PATH_DEFAULT;
+}
 
 export interface TrainingRecipe {
   file: string; // relative dir path (e.g., "recipes/gemma4-e2b-lora")
@@ -33,16 +37,21 @@ export interface TrainingRecipe {
   defaults: Record<string, unknown>;
   hardware: { min_nodes: number; gpus_per_node: number; vram_estimate_mb: number };
   deploy?: { container: string; gpu_memory_utilization?: number; max_model_len?: number };
+  /** One entry per `inference*.yaml` file in the recipe dir. Empty
+   *  array when the recipe has no inference templates (older recipes,
+   *  pre-inference-template feature). */
+  inferenceVariants?: InferenceVariant[];
 }
 
 /** Ensure the training recipes repo is cloned locally. */
 function ensureRepo(): boolean {
-  if (existsSync(join(TRAINING_REPO_PATH, "recipes"))) {
+  const repoPath = getTrainingRepoPathInternal();
+  if (existsSync(join(repoPath, "recipes"))) {
     return true;
   }
   try {
-    console.log(`Cloning ${TRAINING_REPO_URL} to ${TRAINING_REPO_PATH}...`);
-    execSync(`git clone ${TRAINING_REPO_URL} ${TRAINING_REPO_PATH}`, {
+    console.log(`Cloning ${TRAINING_REPO_URL} to ${repoPath}...`);
+    execSync(`git clone ${TRAINING_REPO_URL} ${repoPath}`, {
       timeout: 120_000,
       stdio: "inherit",
     });
@@ -128,14 +137,14 @@ function parseValue(s: string): unknown {
 
 /** Get the absolute path to the training repo. */
 export function getTrainingRepoPath(): string {
-  return TRAINING_REPO_PATH;
+  return getTrainingRepoPathInternal();
 }
 
 /** Scan the recipes directory and return parsed training recipe metadata. */
 export function discoverTrainingRecipes(): TrainingRecipe[] {
   if (!ensureRepo()) return [];
 
-  const recipesDir = join(TRAINING_REPO_PATH, "recipes");
+  const recipesDir = join(getTrainingRepoPathInternal(), "recipes");
   if (!existsSync(recipesDir)) return [];
 
   const recipes: TrainingRecipe[] = [];
@@ -189,6 +198,7 @@ export function discoverTrainingRecipes(): TrainingRecipe[] {
           gpu_memory_utilization: (parsed.deploy as Record<string, unknown>).gpu_memory_utilization as number | undefined,
           max_model_len: (parsed.deploy as Record<string, unknown>).max_model_len as number | undefined,
         } : undefined,
+        inferenceVariants: listInferenceVariants(join(recipesDir, entry.name)),
       });
     } catch (err) {
       console.error(`Failed to parse training recipe ${entry.name}:`, err);
