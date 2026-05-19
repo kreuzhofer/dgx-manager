@@ -3,11 +3,11 @@ import { test, fc } from "@fast-check/vitest";
 import {
   inferenceVariantIdFromFilename,
   inferenceFilenameForId,
+  listInferenceVariants,
 } from "./inference-template.js";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listInferenceVariants } from "./inference-template.js";
 
 describe("inferenceVariantIdFromFilename", () => {
   it("maps the bare inference.yaml to the special id 'default'", () => {
