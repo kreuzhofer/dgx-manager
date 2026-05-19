@@ -273,6 +273,19 @@ export default function DeploymentsPage() {
     prefilledFromFinetuneRecipe.current = true;
   }, [finetuneRecipeData, maxModelLen, gpuMem, tensorParallel]);
 
+  // When the training recipe exposes inference variants, auto-select the
+  // only one when there's exactly one. Multi-variant case: leave it to
+  // the user — show "default" as the initial selection if it exists, else
+  // the first sorted entry from listInferenceVariants.
+  useEffect(() => {
+    if (runtimeMode !== "finetune") return;
+    if (finetuneArtifactVariant) return; // user already chose
+    const vs = finetuneRecipeData?.inferenceVariants ?? [];
+    if (vs.length === 0) return;
+    const auto = vs.length === 1 ? vs[0].id : (vs.find((v) => v.id === "default")?.id ?? vs[0].id);
+    setFinetuneArtifactVariant(auto);
+  }, [runtimeMode, finetuneRecipeData, finetuneArtifactVariant]);
+
   // SSE handler for real-time updates
   const handleSSE = useCallback((event: SseEvent) => {
     if (event.type === "deployment:status") {
@@ -988,6 +1001,34 @@ export default function DeploymentsPage() {
                 <span className="text-gray-400 font-mono">{finetuneRecipeData.file}</span>
                 {" "}— edit to override.
               </p>
+            )}
+            {finetuneRecipeData?.inferenceVariants && finetuneRecipeData.inferenceVariants.length > 0 && (
+              <div className="mt-3">
+                <label className="block text-xs text-gray-400 mb-1">
+                  Inference variant
+                  {finetuneRecipeData.inferenceVariants.length === 1 && (
+                    <span className="ml-2 text-gray-500">(only one available — auto-selected)</span>
+                  )}
+                </label>
+                <select
+                  value={finetuneArtifactVariant ?? ""}
+                  onChange={(e) => setFinetuneArtifactVariant(e.target.value || null)}
+                  disabled={finetuneRecipeData.inferenceVariants.length === 1}
+                  className="w-full bg-gray-950 border border-gray-800 rounded px-2 py-1.5 text-sm focus:outline-none focus:border-gray-600 disabled:opacity-60"
+                >
+                  {finetuneRecipeData.inferenceVariants.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.id} — {v.name}
+                    </option>
+                  ))}
+                </select>
+                {(() => {
+                  const sel = finetuneRecipeData!.inferenceVariants!.find((v) => v.id === finetuneArtifactVariant);
+                  return sel?.description ? (
+                    <p className="mt-1 text-xs text-gray-500">{sel.description}</p>
+                  ) : null;
+                })()}
+              </div>
             )}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               <div>
