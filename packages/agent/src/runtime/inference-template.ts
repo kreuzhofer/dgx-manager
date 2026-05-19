@@ -1,4 +1,4 @@
-import { existsSync } from "fs";
+import { existsSync, readdirSync, readFileSync } from "fs";
 import { join } from "path";
 
 /**
@@ -73,6 +73,66 @@ export function inferenceVariantIdFromFilename(filename: string): string | null 
 export function inferenceFilenameForId(id: string): string {
   if (id === "default" || id === "bf16") return "inference.yaml";
   return `inference-${id}.yaml`;
+}
+
+export interface InferenceVariant {
+  /** Slug derived from filename. `inference.yaml` → "default";
+   *  `inference-fp8.yaml` → "fp8". Used as the wire id everywhere. */
+  id: string;
+  /** Filename relative to the recipe dir. */
+  filename: string;
+  /** From the YAML's top-level `name:` field. Falls back to the id when
+   *  the file doesn't declare one (malformed templates still appear). */
+  name: string;
+  /** From the YAML's top-level `description:` field. Optional. */
+  description?: string;
+}
+
+/**
+ * Enumerate every inference template in a training-recipe dir. Each
+ * `inference*.yaml` file becomes one entry. Reads `name:` and
+ * `description:` from each YAML's top of file using a lightweight
+ * regex — we don't import a YAML parser for two fields. The list is
+ * sorted with "default" first, then alphabetical by id, so the UI
+ * order is deterministic without the dashboard having to re-sort.
+ */
+export function listInferenceVariants(recipeDir: string): InferenceVariant[] {
+  let entries: string[];
+  try {
+    entries = readdirSync(recipeDir);
+  } catch {
+    return [];
+  }
+  const out: InferenceVariant[] = [];
+  for (const filename of entries) {
+    const id = inferenceVariantIdFromFilename(filename);
+    if (!id) continue;
+    const full = join(recipeDir, filename);
+    let text = "";
+    try { text = readFileSync(full, "utf-8"); } catch { /* fall through */ }
+    const nameMatch = text.match(/^name:\s*(.+?)\s*$/m);
+    const descMatch = text.match(/^description:\s*(.+?)\s*$/m);
+    out.push({
+      id,
+      filename,
+      name: nameMatch ? stripYamlQuotes(nameMatch[1]) : id,
+      description: descMatch ? stripYamlQuotes(descMatch[1]) : undefined,
+    });
+  }
+  out.sort((a, b) => {
+    if (a.id === "default") return -1;
+    if (b.id === "default") return 1;
+    return a.id.localeCompare(b.id);
+  });
+  return out;
+}
+
+function stripYamlQuotes(v: string): string {
+  if ((v.startsWith('"') && v.endsWith('"')) ||
+      (v.startsWith("'") && v.endsWith("'"))) {
+    return v.slice(1, -1);
+  }
+  return v;
 }
 
 /**

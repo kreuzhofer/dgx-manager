@@ -4,6 +4,10 @@ import {
   inferenceVariantIdFromFilename,
   inferenceFilenameForId,
 } from "./inference-template.js";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { listInferenceVariants } from "./inference-template.js";
 
 describe("inferenceVariantIdFromFilename", () => {
   it("maps the bare inference.yaml to the special id 'default'", () => {
@@ -49,5 +53,83 @@ describe("inferenceFilenameForId", () => {
     const id = inferenceVariantIdFromFilename(filename);
     expect(id).toBe(slug);
     expect(inferenceFilenameForId(id!)).toBe(filename);
+  });
+});
+
+describe("listInferenceVariants", () => {
+  it("returns [] for a recipe dir with no inference templates", () => {
+    const dir = mkdtempSync(join(tmpdir(), "variants-"));
+    try {
+      writeFileSync(join(dir, "recipe.yaml"), "name: x\n");
+      expect(listInferenceVariants(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a single variant when only inference.yaml exists", () => {
+    const dir = mkdtempSync(join(tmpdir(), "variants-"));
+    try {
+      writeFileSync(join(dir, "inference.yaml"),
+        `name: my-recipe-bf16\ndescription: Default BF16 serve.\nmodel: x\n`);
+      const out = listInferenceVariants(dir);
+      expect(out).toEqual([{
+        id: "default",
+        filename: "inference.yaml",
+        name: "my-recipe-bf16",
+        description: "Default BF16 serve.",
+      }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("enumerates multiple variants sorted with 'default' first then alphabetical", () => {
+    const dir = mkdtempSync(join(tmpdir(), "variants-"));
+    try {
+      writeFileSync(join(dir, "inference.yaml"),         `name: r-bf16\ndescription: bf16.\n`);
+      writeFileSync(join(dir, "inference-fp8.yaml"),     `name: r-fp8\ndescription: fp8 on-load.\n`);
+      writeFileSync(join(dir, "inference-int4.yaml"),    `name: r-int4\ndescription: int4 awq.\n`);
+      writeFileSync(join(dir, "recipe.yaml"),            `name: r-train\n`);
+      writeFileSync(join(dir, "not-an-inference.txt"),   `noise`);
+
+      const out = listInferenceVariants(dir);
+      expect(out.map((v) => v.id)).toEqual(["default", "fp8", "int4"]);
+      expect(out[1].filename).toBe("inference-fp8.yaml");
+      expect(out[1].name).toBe("r-fp8");
+      expect(out[2].description).toBe("int4 awq.");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("omits description when the YAML doesn't declare one", () => {
+    const dir = mkdtempSync(join(tmpdir(), "variants-"));
+    try {
+      writeFileSync(join(dir, "inference.yaml"), `name: bare\n`);
+      const out = listInferenceVariants(dir);
+      expect(out[0].name).toBe("bare");
+      expect(out[0].description).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to the variant id when name: is missing from the YAML", () => {
+    // A malformed template still appears in the list; name defaults to the id
+    // so the UI can render something instead of crashing.
+    const dir = mkdtempSync(join(tmpdir(), "variants-"));
+    try {
+      writeFileSync(join(dir, "inference-fp8.yaml"), `model: x\n`);
+      const out = listInferenceVariants(dir);
+      expect(out).toEqual([{
+        id: "fp8",
+        filename: "inference-fp8.yaml",
+        name: "fp8",
+        description: undefined,
+      }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
