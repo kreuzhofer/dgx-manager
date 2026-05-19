@@ -21,6 +21,14 @@ interface Recipe {
   // hand-curated vLLM recipes don't have one. Used by the fine-tune Deploy
   // form to surface effective defaults from recipe.yaml as input placeholders.
   deploy?: Record<string, unknown>;
+  /** One entry per `inference*.yaml` in the recipe dir. Surfaced only on
+   *  training recipes; absent / undefined for plain vLLM serve recipes. */
+  inferenceVariants?: {
+    id: string;
+    filename: string;
+    name: string;
+    description?: string;
+  }[];
 }
 
 interface Node {
