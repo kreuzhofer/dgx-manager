@@ -1212,10 +1212,10 @@ export default function DeploymentsPage() {
                 key={`${d.id}-${nodeRole}-${nodeName}`}
                 className="bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors"
               >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div>
-                      <h3 className="font-semibold flex items-center gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-y-2 gap-x-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="min-w-0">
+                      <h3 className="font-semibold flex flex-wrap items-center gap-2">
                         <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
                           config.runtime === "ollama"
                             ? "bg-cyan-900/60 text-cyan-300"
@@ -1254,7 +1254,7 @@ export default function DeploymentsPage() {
                       </p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2 justify-end">
                     <span
                       className={`text-xs px-2.5 py-1 rounded font-medium ${
                         statusStyles[d.status] || "bg-gray-700 text-gray-300"
