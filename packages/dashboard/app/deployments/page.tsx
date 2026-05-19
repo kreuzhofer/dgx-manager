@@ -161,6 +161,7 @@ export default function DeploymentsPage() {
     tensorParallel?: string;
     pipelineParallel?: string;
     gpuMem?: string;
+    artifactVariant?: string;
   }>>({});
 
   // Log viewer
@@ -593,6 +594,7 @@ export default function DeploymentsPage() {
         tensorParallel: pick(cfg.tensorParallel, recipeDefaults.tensor_parallel),
         pipelineParallel: pick(cfg.pipelineParallel, recipeDefaults.pipeline_parallel),
         gpuMem: pick(cfg.gpuMem, recipeDefaults.gpu_memory_utilization),
+        artifactVariant: typeof cfg.artifactVariant === "string" ? cfg.artifactVariant : "default",
       },
     }));
   };
@@ -612,6 +614,7 @@ export default function DeploymentsPage() {
     if (fields.tensorParallel) overrides.tensorParallel = parseInt(fields.tensorParallel);
     if (fields.pipelineParallel) overrides.pipelineParallel = parseInt(fields.pipelineParallel);
     if (fields.gpuMem) overrides.gpuMem = parseFloat(fields.gpuMem);
+    if (fields.artifactVariant) overrides.artifactVariant = fields.artifactVariant;
     return restartDeployment(id, overrides);
   };
 
@@ -1193,6 +1196,11 @@ export default function DeploymentsPage() {
             // are vLLM-only. Restart goes straight to the API; no edit form.
             const isOllama = config.runtime === "ollama";
             const isFinetune = Boolean(d.model?.finetuneJobId);
+            const ftRecipeFile = d.model?.finetuneJob?.recipeFile;
+            const ftRecipe = ftRecipeFile
+              ? trainingRecipes.find((r) => r.file === ftRecipeFile)
+              : undefined;
+            const ftVariants = ftRecipe?.inferenceVariants ?? [];
             // Recipe defaults are used as placeholder text in the edit-restart
             // form, so a cleared box still shows what value will actually be
             // used. For fine-tune deployments the defaults come from the
@@ -1422,6 +1430,37 @@ export default function DeploymentsPage() {
                           className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-blue-500"
                         />
                       </div>
+                      {isFinetune && ftVariants.length > 0 && (
+                        <div className="col-span-2 md:col-span-5">
+                          <label className="block text-[10px] text-gray-500 mb-0.5">
+                            Inference variant
+                            {ftVariants.length === 1 && (
+                              <span className="ml-2 text-gray-500">(only one available)</span>
+                            )}
+                          </label>
+                          <select
+                            value={editingRestart[d.id].artifactVariant ?? "default"}
+                            onChange={(e) => setEditingRestart((p) => ({
+                              ...p,
+                              [d.id]: { ...p[d.id], artifactVariant: e.target.value },
+                            }))}
+                            disabled={ftVariants.length === 1}
+                            className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-blue-500 disabled:opacity-60"
+                          >
+                            {ftVariants.map((v) => (
+                              <option key={v.id} value={v.id}>
+                                {v.id} — {v.name}
+                              </option>
+                            ))}
+                          </select>
+                          {(() => {
+                            const sel = ftVariants.find((v) => v.id === (editingRestart[d.id].artifactVariant ?? "default"));
+                            return sel?.description ? (
+                              <p className="mt-1 text-[10px] text-gray-500">{sel.description}</p>
+                            ) : null;
+                          })()}
+                        </div>
+                      )}
                     </div>
                     <div className="mt-2 flex justify-end gap-2">
                       <button
