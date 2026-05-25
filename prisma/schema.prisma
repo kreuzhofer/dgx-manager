@@ -124,6 +124,8 @@ model MetricSnapshot {
   pressureCpuAvg10    Float?
   timestamp      DateTime @default(now())
   node           Node     @relation(fields: [nodeId], references: [id])
+
+  @@index([nodeId, timestamp(sort: Desc)])
 }
 
 model LoadBalancerRule {
