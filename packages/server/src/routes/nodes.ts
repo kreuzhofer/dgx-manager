@@ -23,14 +23,35 @@ function getExpectedAgentVersion(): string {
 export const nodesRouter = Router();
 
 // GET /api/nodes
+// Returns each node with `metrics: [latestSample]` (or `metrics: []` if no
+// sample has been seen since boot). We read from the in-memory metricsBuffer
+// instead of MetricSnapshot — Prisma's `include: { metrics: take: 1 }`
+// emits a single SQL with a global ORDER BY across all nodeIds, which
+// forces a temp B-tree sort of every matching row (~10s with 2.4M rows).
+// Live updates flow through SSE (`node:metrics`) after the initial paint,
+// so the buffer is the source of truth for "now" anyway.
 nodesRouter.get("/", async (_req, res) => {
-  const nodes = await prisma.node.findMany({
-    orderBy: { name: "asc" },
-    include: {
-      metrics: { orderBy: { timestamp: "desc" }, take: 1 },
-    },
+  const nodes = await prisma.node.findMany({ orderBy: { name: "asc" } });
+  const enriched = nodes.map((n) => {
+    const history = metricsBuffer.getHistory(n.id);
+    const latest = history[history.length - 1];
+    return {
+      ...n,
+      metrics: latest
+        ? [
+            {
+              gpuUtil: latest.gpuUtil,
+              vramUsed: latest.vramUsed,
+              temperature: latest.temperature,
+              tps: latest.tps,
+              activeRequests: latest.activeRequests,
+              timestamp: new Date(latest.timestamp).toISOString(),
+            },
+          ]
+        : [],
+    };
   });
-  res.json(nodes);
+  res.json(enriched);
 });
 
 // GET /api/nodes/idle — online nodes available for deployments
