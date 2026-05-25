@@ -19,6 +19,7 @@ import { datasetsRouter } from "./routes/datasets.js";
 import { benchmarksRouter } from "./routes/benchmarks.js";
 import { prisma } from "./prisma.js";
 import { sseHandler } from "./sse.js";
+import { startMetricRetention } from "./metric-retention.js";
 
 const app = express();
 const server = createServer(app);
@@ -89,6 +90,12 @@ async function main() {
       error: "server restarted before run completed",
       completedAt: new Date(),
     },
+  });
+
+  const retentionDays = Number(process.env.METRIC_RETENTION_DAYS ?? 7);
+  startMetricRetention({
+    retentionDays,
+    intervalMs: 60 * 60 * 1000,
   });
 
   server.listen(PORT, () => {
