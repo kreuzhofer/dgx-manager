@@ -33,9 +33,9 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# prisma
-/prisma/*.db
-/prisma/*.db-journal
+# prisma / sqlite runtime DBs (e.g. ./dev.db, packages/server/dev.db)
+*.db
+*.db-journal
 **/generated/prisma
 
 # agent bundles (built by scripts/build-agent-bundles.sh)
