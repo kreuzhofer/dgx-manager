@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { toast } from "sonner";
 import { apiFetch } from "@/lib/api";
 import { useSSE, type SseEvent } from "@/lib/sse";
@@ -300,7 +300,44 @@ export default function FinetunePage() {
     }
   }, []);
 
-  const { connected } = useSSE(handleSSE, loadData);
+  // Live log streaming (finetune:log over SSE) has no replay — chunks emitted
+  // while the tab is backgrounded or the SSE socket is dropped are lost, leaving
+  // a hole in the on-screen training log. The server persists train.log, so on
+  // resume we re-pull it and REPLACE the buffer (the file is the source of truth).
+  const logsRef = useRef<Record<string, string>>({});
+  useEffect(() => {
+    logsRef.current = logs;
+  }, [logs]);
+
+  const refetchOpenLogs = useCallback(() => {
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+    for (const id of Object.keys(logsRef.current)) {
+      fetch(`${apiBase}/api/finetune/${id}/logs`, { cache: "no-store" })
+        .then((r) => (r.ok ? r.text() : ""))
+        .then((text) => {
+          if (text) setLogs((prev) => ({ ...prev, [id]: text }));
+        })
+        .catch(() => {});
+    }
+  }, []);
+
+  // Catch up when the tab returns to the foreground (covers background
+  // throttling even when the SSE socket never dropped).
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState === "visible") refetchOpenLogs();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [refetchOpenLogs]);
+
+  // On SSE reconnect, refresh both the lists (loadData) and the open log buffers.
+  const onReconnect = useCallback(() => {
+    loadData();
+    refetchOpenLogs();
+  }, [loadData, refetchOpenLogs]);
+
+  const { connected } = useSSE(handleSSE, onReconnect);
 
   const selectedRecipeData = recipes.find((r) => r.file === selectedRecipe);
 
