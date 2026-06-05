@@ -389,7 +389,46 @@ export default function DeploymentsPage() {
     }
   }, []);
 
-  const { connected } = useSSE(handleSSE, loadData);
+  // Live log streaming (deployment:log over SSE) has no replay — any chunks
+  // emitted while the tab is backgrounded or the SSE socket is dropped are
+  // lost, leaving a permanent hole in the on-screen log. The server persists
+  // the full log to disk, so on resume we re-pull it and REPLACE the buffer
+  // (the file is the source of truth) to close the gap.
+  const logsRef = useRef<Record<string, string>>({});
+  useEffect(() => {
+    logsRef.current = logs;
+  }, [logs]);
+
+  const refetchOpenLogs = useCallback(() => {
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+    for (const id of Object.keys(logsRef.current)) {
+      fetch(`${apiBase}/api/deployments/${id}/logs`, { cache: "no-store" })
+        .then((r) => (r.ok ? r.text() : ""))
+        .then((text) => {
+          if (text) setLogs((prev) => ({ ...prev, [id]: text }));
+        })
+        .catch(() => {});
+    }
+  }, []);
+
+  // Catch up when the tab returns to the foreground (covers background
+  // throttling even when the SSE socket never dropped).
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState === "visible") refetchOpenLogs();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [refetchOpenLogs]);
+
+  // On SSE reconnect, refresh both the lists (loadData) and the open log
+  // buffers so a dropped socket doesn't leave stale logs.
+  const onReconnect = useCallback(() => {
+    loadData();
+    refetchOpenLogs();
+  }, [loadData, refetchOpenLogs]);
+
+  const { connected } = useSSE(handleSSE, onReconnect);
 
   const deploy = async (e: React.FormEvent) => {
     e.preventDefault();
