@@ -234,12 +234,16 @@ fixed through the deploy loop (each redeploy got strictly further):
 4. **`--speculative-config` (MTP)** → MTP draft layers carry an *unquantized* MoE, and
    `--moe-backend cutlass` is quantized-only ("not supported for unquantized MoE"). A
    single global `--moe-backend` can't serve both NVFP4-main (needs cutlass on sm121) and
-   unquantized-MTP (needs triton/flashinfer/aiter). Fix: **MTP disabled** — re-enabling is
-   a follow-up (needs a both-serving backend or per-layer selection).
+   unquantized-MTP (needs triton/flashinfer/aiter). **RESOLVED (MTP now enabled):** drop
+   `--moe-backend` (unquantized MTP MoE auto-selects its own backend — observed FlashInfer
+   CUTLASS) and set env `VLLM_USE_FLASHINFER_MOE_FP4=0` (read only by the FP4 oracle, so it
+   strips FlashInfer and the NVFP4 main experts deterministically land on `VLLM_CUTLASS`).
+   Verified: main=`VLLM_CUTLASS`, MTP=FlashInfer CUTLASS, coherent completion.
 5. **`--load-format fastsafetensors`** removed in vLLM 0.22 → use `safetensors`.
 
 Each failed deployment record was DELETED before retrying (no trail). Known follow-ups:
-re-enable MTP; raise `max_model_len`/`gpu_memory_utilization` once stable; revisit
-`instanttensor` (needs higher container `nofile` ulimit); the agent marks `status: running`
-*before* vLLM actually serves (verify via the HTTP endpoint / "startup complete", not the
-status field); reconcile the `/mnt/tank` agent repo with origin.
+raise `max_model_len`/`gpu_memory_utilization` once stable; tune MTP token budget
+(`max_num_batched_tokens` for the draft slots); revisit `instanttensor` (needs higher
+container `nofile` ulimit); the agent marks `status: running` *before* vLLM actually serves
+(verify via the HTTP endpoint / "startup complete", not the status field); reconcile the
+`/mnt/tank` agent repo with origin.
