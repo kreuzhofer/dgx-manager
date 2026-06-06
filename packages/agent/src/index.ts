@@ -115,6 +115,14 @@ function connect() {
     if (fastIpAddress) {
       console.log(`Detected fast-fabric IP: ${fastIpAddress}`);
     }
+    // Explicit management-IP override. Needed when the agent is co-located with
+    // the server on a docker bridge (e.g. the manager host is also a node): the
+    // server would otherwise record the bridge gateway as this node's IP from
+    // the WS source. Set NODE_ADVERTISE_IP=<real NIC IP> on such a node.
+    const advertiseIp = process.env.NODE_ADVERTISE_IP || undefined;
+    if (advertiseIp) {
+      console.log(`Advertising management IP: ${advertiseIp}`);
+    }
     if (nodeId) {
       ws!.send(JSON.stringify({
         type: "agent:register",
@@ -126,6 +134,7 @@ function connect() {
           agentVersion: AGENT_VERSION,
           arch: AGENT_ARCH,
           fastIpAddress,
+          advertiseIp,
         },
       }));
     } else if (JOIN_TOKEN) {
@@ -140,6 +149,7 @@ function connect() {
           agentVersion: AGENT_VERSION,
           arch: AGENT_ARCH,
           fastIpAddress,
+          advertiseIp,
         },
       }));
       // Wait for register:accepted before continuing setup

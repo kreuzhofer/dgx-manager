@@ -4,6 +4,7 @@ import { prisma } from "../prisma.js";
 import { SHARED_STORAGE } from "../env.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import { metricsBuffer } from "../metrics-buffer.js";
+import { resolveNodeIp, isValidIpv4 } from "./node-ip.js";
 
 export interface OllamaModelInfo {
   name: string;
@@ -133,6 +134,10 @@ export class AgentHub {
 
   private handleConnection(ws: WebSocket) {
     let nodeId: string | null = null;
+    // Agent-supplied management IP (NODE_ADVERTISE_IP), remembered for this
+    // connection so the per-metric-tick self-heal below doesn't clobber it back
+    // to the WS source (e.g. the docker bridge gateway for a co-located node).
+    let advertiseIp: string | null = null;
 
     ws.on("message", async (data) => {
       try {
@@ -156,7 +161,9 @@ export class AgentHub {
             // NIC swap), and stale values break the SSH-based audit/provision
             // flows since they target whatever IP we have on file.
             const remoteIp = (ws as unknown as { _socket?: { remoteAddress?: string } })._socket?.remoteAddress?.replace("::ffff:", "");
-            const ipUpdate = remoteIp ? { ipAddress: remoteIp } : {};
+            advertiseIp = isValidIpv4(msg.payload.advertiseIp) ? msg.payload.advertiseIp : null;
+            const resolvedIp = resolveNodeIp(advertiseIp, remoteIp);
+            const ipUpdate = resolvedIp ? { ipAddress: resolvedIp } : {};
             await prisma.node.update({
               where: { id: nodeId! },
               data: {
@@ -176,7 +183,7 @@ export class AgentHub {
           }
 
           case "agent:register-token": {
-            const { token, hostname, gpuModel, vramTotal, agentVersion: tokenAgentVersion, arch: reportedArch, fastIpAddress } = msg.payload;
+            const { token, hostname, gpuModel, vramTotal, agentVersion: tokenAgentVersion, arch: reportedArch, fastIpAddress, advertiseIp: advertiseIpRaw } = msg.payload;
             const archValue =
               reportedArch === "amd64" || reportedArch === "arm64" ? reportedArch : null;
 
@@ -216,14 +223,16 @@ export class AgentHub {
               suffix++;
             }
 
-            // Extract IP from WebSocket connection
+            // Extract IP from WebSocket connection; prefer an agent-supplied
+            // advertise IP (NODE_ADVERTISE_IP) when valid.
             const remoteIp = (ws as unknown as { _socket?: { remoteAddress?: string } })._socket?.remoteAddress?.replace("::ffff:", "") || null;
+            advertiseIp = isValidIpv4(advertiseIpRaw) ? advertiseIpRaw : null;
 
             // Create node record
             const node = await prisma.node.create({
               data: {
                 name: nodeName,
-                ipAddress: remoteIp,
+                ipAddress: resolveNodeIp(advertiseIp, remoteIp),
                 fastIpAddress: typeof fastIpAddress === "string" ? fastIpAddress : null,
                 status: "online",
                 provisionStatus: "agent-deployed",
@@ -377,11 +386,12 @@ export class AgentHub {
             // the DB stale until the agent restarts. Refresh from the WS
             // source on every metric tick — same pattern as line 110.
             const remoteIp = (ws as unknown as { _socket?: { remoteAddress?: string } })._socket?.remoteAddress?.replace("::ffff:", "");
+            const resolvedTickIp = resolveNodeIp(advertiseIp, remoteIp);
             await prisma.node.update({
               where: { id: nodeId },
               data: {
                 lastSeen: new Date(),
-                ...(remoteIp ? { ipAddress: remoteIp } : {}),
+                ...(resolvedTickIp ? { ipAddress: resolvedTickIp } : {}),
               },
             });
             const now = Date.now();
