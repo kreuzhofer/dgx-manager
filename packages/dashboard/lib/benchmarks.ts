@@ -11,11 +11,33 @@ export type BenchmarkConfig = {
   skipCoherence: boolean;
 };
 
+export type ToolEvalConfig = {
+  short: boolean;
+  hardmode: boolean;
+  contextPressure: number | null;
+  seed: number;
+};
+
+export type BenchmarkKind = "throughput" | "tool-eval";
+
+export type ToolEvalCategory = {
+  id: string;
+  code: string;
+  label: string;
+  percent: number;
+  earned: number;
+  maxPoints: number;
+  passCount: number;
+  partialCount: number;
+  failCount: number;
+};
+
 export type BenchmarkPreset = {
   id: string;
   label: string;
   description: string;
-  config: BenchmarkConfig;
+  kind: BenchmarkKind;
+  config: BenchmarkConfig | ToolEvalConfig;
 };
 
 export type BenchmarkResult = {
@@ -48,6 +70,16 @@ export type BenchmarkRun = {
   completedAt: string | null;
   meanTps: number | null;
   meanTtfrMs: number | null;
+  kind: BenchmarkKind;
+  toolEvalScore: number | null;
+  toolEvalRating: string | null;
+  toolEvalDeployability: number | null;
+  toolEvalResponsiveness: number | null;
+  toolEvalTotalScenarios: number | null;
+  toolEvalTotalPoints: number | null;
+  toolEvalMaxPoints: number | null;
+  toolEvalSafetyWarnings: string | null;
+  toolEvalCategories?: ToolEvalCategory[];
   rawOutput: string | null;
   createdAt: string;
   results?: BenchmarkResult[];
