@@ -59,31 +59,44 @@ export function BenchmarkFormModal({
         <p className="text-sm text-gray-400 mb-4">Target: {deploymentLabel}</p>
 
         {!showCustom && (
-          <div className="space-y-2">
-            {presets.map((p) => (
-              <label key={p.id} className="block p-3 rounded bg-gray-800 hover:bg-gray-700 cursor-pointer">
-                <div className="flex items-start gap-2">
-                  <input
-                    type="radio"
-                    name="preset"
-                    value={p.id}
-                    checked={presetId === p.id}
-                    onChange={() => setPresetId(p.id)}
-                    className="mt-1"
-                  />
-                  <div>
-                    <div className="font-medium">{p.label}</div>
-                    <div className="text-xs text-gray-400">{p.description}</div>
-                    <div className="text-xs text-gray-500 mt-1">
-                      pp=[{p.config.pp.join(",")}] tg=[{p.config.tg.join(",")}]
-                      {" "}depth=[{p.config.depth.join(",")}]
-                      {" "}concurrency=[{p.config.concurrency.join(",")}]
-                      {" "}runs={p.config.runs}
-                    </div>
+          <div className="space-y-4">
+            {(["throughput", "tool-eval"] as const).map((kind) => {
+              const group = presets.filter((p) => p.kind === kind);
+              if (group.length === 0) return null;
+              return (
+                <div key={kind} className="space-y-2">
+                  <div className="text-xs uppercase tracking-wide text-gray-500">
+                    {kind === "throughput" ? "Throughput" : "Tool-calling eval"}
                   </div>
+                  {group.map((p) => (
+                    <label key={p.id} className="block p-3 rounded bg-gray-800 hover:bg-gray-700 cursor-pointer">
+                      <div className="flex items-start gap-2">
+                        <input
+                          type="radio"
+                          name="preset"
+                          value={p.id}
+                          checked={presetId === p.id}
+                          onChange={() => setPresetId(p.id)}
+                          className="mt-1"
+                        />
+                        <div>
+                          <div className="font-medium">{p.label}</div>
+                          <div className="text-xs text-gray-400">{p.description}</div>
+                          {p.kind === "throughput" && "pp" in p.config && (
+                            <div className="text-xs text-gray-500 mt-1">
+                              pp=[{p.config.pp.join(",")}] tg=[{p.config.tg.join(",")}]
+                              {" "}depth=[{p.config.depth.join(",")}]
+                              {" "}concurrency=[{p.config.concurrency.join(",")}]
+                              {" "}runs={p.config.runs}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </label>
+                  ))}
                 </div>
-              </label>
-            ))}
+              );
+            })}
           </div>
         )}
 
