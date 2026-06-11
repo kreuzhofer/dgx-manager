@@ -45,7 +45,7 @@ the plan:
 ## tool-eval-bench facts (from the README + NVIDIA forum post)
 
 - **Install/invoke (ephemeral):**
-  `uvx --from "git+https://github.com/SeraphimSerapis/tool-eval-bench.git@<pinned-sha>" tool-eval-bench …`
+  `uvx --from "git+https://github.com/SeraphimSerapis/tool-eval-bench.git@c3868bff099592c9a1045de2c9a3dc24abebb7fb" tool-eval-bench …`
   We pin a commit SHA — the documented `git+` install is unpinned, which is
   unacceptable for reproducible benchmark records.
 - **Required input:** `--base-url <openai-endpoint>`. Works with vLLM /
@@ -57,11 +57,29 @@ the plan:
 - **Machine-readable output:** `--json` (stdout) and `--json-file PATH` (writes
   JSON, implies `--json`). We use `--json-file <outputDir>/result.json` to match
   the existing orchestrator's `result.json` convention.
-- **Documented JSON schema fields:** `schema_version`,
-  `tool_eval_bench_version`, `final_score` (0–100), `rating` (star string),
-  `safety_warnings` (list), `deployability` (int/None), `total_scenarios`. The
-  forum post additionally describes `quality` (0–100), `responsiveness` (0–100),
-  and a per-category breakdown with percentages.
+- **Actual JSON schema** (captured from a real `--short` run on 2026-06-11,
+  tool-eval-bench `2.0.6`, `schema_version: "1"` — sample archived as the test
+  fixture `tool-eval-result.json`). Top-level keys:
+  `schema_version`, `tool_eval_bench_version`, `final_score` (int 0–100),
+  `rating` (star string, e.g. `"★★★ Adequate"`), `safety_warnings` (list),
+  `deployability` (int), `responsiveness` (small int — a star-style rating, **not**
+  0–100; observed value `2`), `total_scenarios`, `run_id`, `status`, `config`
+  (dict), `scores` (dict), `metadata` (dict), `report_path`.
+  - **There is no `quality` field** (the forum post was imprecise). Do not invent
+    one.
+  - **`scores`** holds the detail: `final_score`, `total_points`, `max_points`,
+    `rating`, `worst_category`, `worst_category_percent`, `deployability`,
+    `responsiveness`, `median_turn_ms`, `total_tokens`, `token_efficiency`, plus
+    two arrays:
+    - **`category_scores`** — the per-category breakdown. Each element:
+      `{category, label, earned, max, percent, pass_count, partial_count,
+      fail_count}` (e.g. `{"category":"A","label":"Tool Selection","earned":6,
+      "max":6,"percent":100,...}`). `--short` yields **5 categories**; the full
+      suite yields up to 14. Variable count — the `ToolEvalCategory` table handles
+      it.
+    - **`scenario_results`** — one entry per scenario, each carrying a large
+      `raw_log` reasoning trace (the bulk of the file size). Not persisted as
+      structured rows in v1.
 - **stderr progress events** (subprocess mode):
   `{"event":"scenario_start",…}`, `{"event":"scenario_result",…,"points":…}`,
   `{"event":"benchmark_complete","json_file":"…"}`. These stream as log lines
@@ -70,16 +88,15 @@ the plan:
   P hard tier), `--context-pressure R` (0.0–1.0), `--seed N` (deterministic),
   `--model`, `--base-url`, `--json-file`, `--output-dir`.
 
-### Known unknown
+### Schema confirmed
 
-The exact JSON shape of the **per-category breakdown** is not fully documented.
-The headline fields above *are* documented, so the parser's required-field
-contract (`final_score`, `rating`, `total_scenarios`) is firm. During
-implementation we capture one real `--json` sample (run against a deployed
-cluster model, e.g. a small model on the Spark) to pin the category-array
-structure and the parser fixture. **If the category shape differs from the
-assumption below, adjust the parser + fixture only — no schema or route change
-is required**, because categories land in a dedicated table fed by the parser.
+The category shape was an open question during brainstorming; it is now
+**resolved** by the captured sample (above). Pinned upstream commit:
+`c3868bff099592c9a1045de2c9a3dc24abebb7fb` (tool-eval-bench `2.0.6`). The parser
+and fixture are built against this real schema, so there is no remaining
+soft spot. Note: a `--short` run takes ~25 min against an 8B Ollama model
+(60–320 s per scenario); against a fast vLLM serve it is much quicker. The first
+`uvx` invocation also git-clones + builds the tool.
 
 ## Architecture
 
@@ -120,13 +137,14 @@ Only argv construction and result parsing branch.
 ```prisma
 kind          String  @default("throughput") // "throughput" | "tool-eval"
 // --- tool-eval headline metrics (null on throughput runs) ---
-toolEvalScore          Float?   // final_score 0–100
-toolEvalRating         String?  // star rating string
-toolEvalDeployability  Int?
-toolEvalQuality        Int?
-toolEvalResponsiveness Int?
-toolEvalTotalScenarios Int?
-toolEvalSafetyWarnings String?  // JSON-encoded string[]
+toolEvalScore          Float?   // scores.final_score 0–100
+toolEvalRating         String?  // rating star string, e.g. "★★★ Adequate"
+toolEvalDeployability  Int?     // deployability
+toolEvalResponsiveness Int?     // responsiveness (small star-style int, NOT 0–100)
+toolEvalTotalScenarios Int?     // total_scenarios
+toolEvalTotalPoints    Int?     // scores.total_points
+toolEvalMaxPoints      Int?     // scores.max_points
+toolEvalSafetyWarnings String?  // JSON-encoded string[] (safety_warnings)
 toolEvalCategories     ToolEvalCategory[]
 ```
 
@@ -143,19 +161,30 @@ New table (mirrors the `BenchmarkResult` run→rows relation):
 
 ```prisma
 model ToolEvalCategory {
-  id        String  @id @default(cuid())
-  runId     String
-  name      String          // e.g. "Tool selection"
-  score     Float           // 0–100 percentage
-  points    Int?            // achieved points, if reported
-  maxPoints Int?            // possible points, if reported
-  run       BenchmarkRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  id           String @id @default(cuid())
+  runId        String
+  code         String  // category_scores[].category, e.g. "A"
+  label        String  // category_scores[].label, e.g. "Tool Selection"
+  percent      Float   // category_scores[].percent (0–100)
+  earned       Int     // category_scores[].earned
+  maxPoints    Int     // category_scores[].max
+  passCount    Int     // category_scores[].pass_count
+  partialCount Int     // category_scores[].partial_count
+  failCount    Int     // category_scores[].fail_count
+  run          BenchmarkRun @relation(fields: [runId], references: [id], onDelete: Cascade)
   @@index([runId])
 }
 ```
 
 Applied via `npm run db:push` — additive (new nullable columns + new table),
 non-destructive. No `--force-reset`.
+
+**`rawOutput` size:** the full `--json` payload includes a large `raw_log`
+reasoning trace per scenario (~91 KB for 15 scenarios; the 63-scenario suite
+will be several hundred KB). v1 stores the payload verbatim in `rawOutput`
+(SQLite TEXT handles it) and the dashboard renders the *structured* fields, not
+the raw blob. If row size becomes a concern, an optional follow-up is to strip
+`scores.scenario_results[].raw_log` before persisting — not done in v1.
 
 ### Presets
 
@@ -212,29 +241,36 @@ one value token.
 ### Parser (`tool-eval-parser.ts`)
 
 ```ts
-export type ToolEvalCategoryInput = { name: string; score: number; points: number | null; maxPoints: number | null };
+export type ToolEvalCategoryInput = {
+  code: string; label: string; percent: number;
+  earned: number; maxPoints: number;
+  passCount: number; partialCount: number; failCount: number;
+};
 export type ToolEvalSummary = {
-  finalScore: number;
-  rating: string;
+  finalScore: number;       // top-level final_score (== scores.final_score)
+  rating: string;           // rating
   deployability: number | null;
-  quality: number | null;
   responsiveness: number | null;
   totalScenarios: number;
+  totalPoints: number | null;  // scores.total_points
+  maxPoints: number | null;    // scores.max_points
   safetyWarnings: string[];
-  categories: ToolEvalCategoryInput[];
+  categories: ToolEvalCategoryInput[]; // from scores.category_scores
 };
 export function parseToolEvalResults(jsonText: string): ToolEvalSummary;
 ```
 
 - **Fail-fast** (per Principle 3): throws with a clear message if `final_score`,
-  `rating`, or `total_scenarios` is missing or the wrong type — no silent
-  defaulting. Mirrors the `num()`/`nestedNum()` guards in `parser.ts`.
-- `deployability`, `quality`, `responsiveness` are optional (the schema documents
-  `deployability` as `int/None`); absent → `null`.
+  `rating`, `total_scenarios`, or `scores.category_scores` is missing or the
+  wrong type — no silent defaulting. Mirrors the `num()`/`nestedNum()` guards in
+  `parser.ts`.
+- `deployability` and `responsiveness` are optional → `null` if absent.
+- `total_points` / `max_points` read from `scores`; `null` if absent.
 - `safety_warnings` defaults to `[]` if absent.
-- `categories` is mapped from the breakdown array; its exact key names are
-  confirmed against the captured sample during implementation. If the sample
-  reveals a different structure, only this function + its fixture change.
+- `categories` maps `scores.category_scores[]` directly to
+  `ToolEvalCategoryInput` (1:1 field rename). Variable length (5 for `--short`,
+  up to 14 for full). The fixture `tool-eval-result.json` (real captured sample,
+  raw_logs trimmed) pins the test.
 
 ### Orchestrator dispatch
 
@@ -245,7 +281,7 @@ stream / process-group cancel / file read stay shared:
 
 - **command prefix:** throughput → `["--from", LLAMA_BENCHY_SPEC, "llama-benchy", …args]`;
   tool-eval → `["--from", TOOL_EVAL_SPEC, "tool-eval-bench", …args]` where
-  `TOOL_EVAL_SPEC = "git+https://github.com/SeraphimSerapis/tool-eval-bench.git@<pinned-sha>"`
+  `TOOL_EVAL_SPEC = "git+https://github.com/SeraphimSerapis/tool-eval-bench.git@c3868bff099592c9a1045de2c9a3dc24abebb7fb"`
   (overridable via `TOOL_EVAL_BENCH_REF` env, like `LLAMA_BENCHY_VERSION`).
 - **parse on exit:** throughput → `parseBenchyResults` + `summarizeResults`;
   tool-eval → `parseToolEvalResults`. The return type widens to carry either a
@@ -266,10 +302,10 @@ stream / process-group cancel / file read stay shared:
   `servedModelName` snapshot are reused unchanged.
 - Dispatch to the tool-eval args builder + strategy.
 - On `exitCode === 0`: write `toolEvalScore`, `toolEvalRating`,
-  `toolEvalDeployability`, `toolEvalQuality`, `toolEvalResponsiveness`,
-  `toolEvalTotalScenarios`, `toolEvalSafetyWarnings` (JSON), `rawOutput`, and
-  `toolEvalCategories: { create: [...] }`. (Throughput runs continue to write
-  `meanTps`/`meanTtfrMs`/`results` as today.)
+  `toolEvalDeployability`, `toolEvalResponsiveness`, `toolEvalTotalScenarios`,
+  `toolEvalTotalPoints`, `toolEvalMaxPoints`, `toolEvalSafetyWarnings` (JSON),
+  `rawOutput`, and `toolEvalCategories: { create: [...] }`. (Throughput runs
+  continue to write `meanTps`/`meanTtfrMs`/`results` as today.)
 - All existing guards (deploymentId required, deployment running, no concurrent
   in-flight run), SSE events (`benchmark:created`, `benchmark:status`,
   `benchmark:log`, `benchmark:deleted`), and the logs endpoint are unchanged and
