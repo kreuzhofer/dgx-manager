@@ -1,7 +1,9 @@
 FROM node:22-slim
 
-# Install SSH client for node provisioning
-RUN apt-get update && apt-get install -y --no-install-recommends openssh-client rsync curl ca-certificates && rm -rf /var/lib/apt/lists/*
+# openssh-client/rsync: node provisioning. git: required by `uvx --from
+# git+https://…` to fetch tool-eval-bench (uv shells out to the git binary
+# for git sources). curl/ca-certificates: uv installer + PyPI/HTTPS fetches.
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-client rsync curl ca-certificates git && rm -rf /var/lib/apt/lists/*
 
 # uv provides `uvx`, which we use to run `llama-benchy` on demand for the
 # /api/benchmarks workflow. Pinning the uv version keeps benchmark runs
@@ -14,6 +16,12 @@ RUN curl -LsSf https://astral.sh/uv/0.5.0/install.sh | sh \
 # container doesn't pay a 10–30s cold-start penalty.
 ARG LLAMA_BENCHY_VERSION=0.3.7
 RUN uvx --from "llama-benchy==${LLAMA_BENCHY_VERSION}" llama-benchy --help > /dev/null
+
+# Warm uvx's cache for tool-eval-bench (tool-calling eval). Pinned to the same
+# commit the orchestrator defaults to (TOOL_EVAL_BENCH_REF) so the first run is
+# fast AND a broken/unreachable upstream fails the build instead of a benchmark.
+ARG TOOL_EVAL_BENCH_REF=git+https://github.com/SeraphimSerapis/tool-eval-bench.git@c3868bff099592c9a1045de2c9a3dc24abebb7fb
+RUN uvx --from "${TOOL_EVAL_BENCH_REF}" tool-eval-bench --help > /dev/null
 
 WORKDIR /app
 
