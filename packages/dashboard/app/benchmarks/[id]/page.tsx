@@ -7,6 +7,7 @@ import {
 } from "@/lib/benchmarks";
 import { BenchmarkResultTable } from "@/components/benchmark-result-table";
 import { BenchmarkChart } from "@/components/benchmark-chart";
+import { ToolEvalResultCard } from "@/components/tool-eval-result-card";
 import { useSSE, type SseEvent } from "@/lib/sse";
 
 export default function BenchmarkDetailPage({
@@ -83,12 +84,16 @@ export default function BenchmarkDetailPage({
         {run.error && <div className="text-red-400 mt-2">Error: {run.error}</div>}
       </div>
 
-      {run.results && run.results.length > 0 && (
-        <>
-          <BenchmarkChart series={series} metric="tps" />
-          <BenchmarkChart series={series} metric="ttfrMs" />
-          <BenchmarkResultTable rows={run.results} />
-        </>
+      {run.kind === "tool-eval" ? (
+        run.status === "completed" && <ToolEvalResultCard run={run} />
+      ) : (
+        run.results && run.results.length > 0 && (
+          <>
+            <BenchmarkChart series={series} metric="tps" />
+            <BenchmarkChart series={series} metric="ttfrMs" />
+            <BenchmarkResultTable rows={run.results} />
+          </>
+        )
       )}
 
       <details className="text-sm" open>
