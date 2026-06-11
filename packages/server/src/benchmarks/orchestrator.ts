@@ -102,7 +102,7 @@ export async function runBenchmark(opts: RunBenchmarkOpts): Promise<RunBenchmark
   });
 
   let results: BenchmarkResultInput[] = [];
-  if (exitCode === 0 && rawOutput) {
+  if (exitCode === 0 && rawOutput !== null) {
     try {
       results = parseBenchyResults(rawOutput);
     } catch (e) {
@@ -135,7 +135,7 @@ export async function runToolEval(opts: RunToolEvalOpts): Promise<RunToolEvalRes
   });
 
   let summary: ToolEvalSummary | null = null;
-  if (exitCode === 0 && rawOutput) {
+  if (exitCode === 0 && rawOutput !== null) {
     try {
       summary = parseToolEvalResults(rawOutput);
     } catch (e) {
