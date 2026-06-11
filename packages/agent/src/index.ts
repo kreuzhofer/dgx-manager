@@ -8,6 +8,7 @@ import { collectMetrics } from "./metrics.js";
 import { discoverRecipes } from "./recipes.js";
 import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, isStopping, getTrackedDeployments, reattachLogs, generateLocalModelRecipe, isLaunchInProgress, untrackDeployment } from "./runtime/vllm.js";
 import { classifyDeadContainer } from "./runtime/deploy-status.js";
+import { shouldForceStopSharedContainer, selectContainerOwnerId } from "./runtime/undeploy-policy.js";
 import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth } from "./runtime/ollama.js";
 import { discoverTrainingRecipes } from "./training-recipes.js";
 import { startFinetuneJob, stopFinetuneJob, mergeLoraAdapter, reattachFinetuneJobs } from "./runtime/finetune.js";
@@ -684,12 +685,6 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         deploymentId: string; deleteAfter?: boolean; clusterNodes?: string[]; runtime?: string; modelName?: string;
       };
       sendMsg("agent:deployment:status", { deploymentId, status: "stopping" });
-      // Clear marker in the deployment log so a user-initiated stop is never
-      // mistaken for a crash when the container goes down (see classifyDeadContainer).
-      sendMsg("agent:deployment:log", {
-        deploymentId,
-        log: "\n=== Stop requested by user — shutting down container ===\n",
-      });
 
       // Stop asynchronously so we can report progress
       (async () => {
@@ -704,7 +699,45 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             return;
           }
 
+          // All vLLM deployments on a node share ONE `vllm_node` container, and
+          // forceStopVllm is scoped to that container *name*. Only force-stop it
+          // if THIS deployment owns the running container — otherwise undeploying
+          // an unrelated (often already-dead) deployment would tear down whatever
+          // is actively serving. Owner comes from the persistent store, computed
+          // BEFORE stopRecipe (which drops this id from the store), so it holds
+          // across agent restarts where the in-memory map is empty.
+          const ownerId = selectContainerOwnerId(getTrackedDeployments());
+          const ownsContainer = shouldForceStopSharedContainer(
+            deploymentId,
+            ownerId ? [ownerId] : [],
+            isVllmContainerRunning(),
+          );
+
+          // Safe no-op (returns false, touches nothing) when this deployment
+          // isn't the tracked running instance; kills its own wrapper otherwise.
           stopRecipe(deploymentId, clusterNodes);
+
+          if (!ownsContainer) {
+            // A different deployment owns the live container (or nothing is
+            // running). Drop only this record; leave the serving container alone.
+            untrackDeployment(deploymentId);
+            sendMsg("agent:deployment:log", {
+              deploymentId,
+              log: "\n=== Removed deployment record — the node's vLLM container belongs to another deployment and was left running ===\n",
+            });
+            sendMsg("agent:deployment:status", {
+              deploymentId,
+              status: "stopped",
+              deleteAfter: deleteAfter || false,
+            });
+            return;
+          }
+
+          // This deployment owns the container — stop it for real.
+          sendMsg("agent:deployment:log", {
+            deploymentId,
+            log: "\n=== Stop requested by user — shutting down vLLM container ===\n",
+          });
           forceStopVllm(clusterNodes);
 
           // Wait for container to actually stop
