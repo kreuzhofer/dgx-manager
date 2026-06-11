@@ -7,6 +7,7 @@ import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
 import { discoverRecipes } from "./recipes.js";
 import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, isStopping, getTrackedDeployments, reattachLogs, generateLocalModelRecipe, isLaunchInProgress, untrackDeployment } from "./runtime/vllm.js";
+import { classifyDeadContainer } from "./runtime/deploy-status.js";
 import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth } from "./runtime/ollama.js";
 import { discoverTrainingRecipes } from "./training-recipes.js";
 import { startFinetuneJob, stopFinetuneJob, mergeLoraAdapter, reattachFinetuneJobs } from "./runtime/finetune.js";
@@ -285,10 +286,15 @@ function connect() {
         for (const status of statuses) {
           // Report if container died or has errors
           if (!status.containerRunning && !status.alive) {
+            // Distinguish an intentional stop (user cmd:undeploy → stopRecipe
+            // marked the instance `stopping`) from a real crash, so the UI
+            // shows "stopped" instead of a misleading "failed".
+            const intentional = isStopping(status.deploymentId);
+            const verdict = classifyDeadContainer(intentional, status.error);
             sendMsg("agent:deployment:status", {
               deploymentId: status.deploymentId,
-              status: "failed",
-              error: status.error || "Container stopped unexpectedly",
+              status: verdict.status,
+              ...(verdict.error ? { error: verdict.error } : {}),
             });
             // Untrack so the next health tick doesn't keep reporting this
             // deployment as failed/running based on a shared vllm_node
@@ -678,6 +684,12 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         deploymentId: string; deleteAfter?: boolean; clusterNodes?: string[]; runtime?: string; modelName?: string;
       };
       sendMsg("agent:deployment:status", { deploymentId, status: "stopping" });
+      // Clear marker in the deployment log so a user-initiated stop is never
+      // mistaken for a crash when the container goes down (see classifyDeadContainer).
+      sendMsg("agent:deployment:log", {
+        deploymentId,
+        log: "\n=== Stop requested by user — shutting down container ===\n",
+      });
 
       // Stop asynchronously so we can report progress
       (async () => {
