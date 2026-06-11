@@ -15,9 +15,11 @@ process.env.SHARED_STORAGE_PATH = TMP_DIR;
 
 // Mock the orchestrator so the route test never spawns uvx.
 const runMock = vi.fn();
+const runToolEvalMock = vi.fn();
 const cancelMock = vi.fn();
 vi.mock("../../benchmarks/orchestrator.js", () => ({
   runBenchmark: (...a: unknown[]) => runMock(...a),
+  runToolEval: (...a: unknown[]) => runToolEvalMock(...a),
   cancelBenchmark: (...a: unknown[]) => cancelMock(...a),
 }));
 
@@ -46,9 +48,11 @@ afterAll(async () => {
 
 beforeEach(async () => {
   runMock.mockReset();
+  runToolEvalMock.mockReset();
   cancelMock.mockReset();
   // FK-ordered wipe
   await prisma.benchmarkResult.deleteMany();
+  await prisma.toolEvalCategory.deleteMany();
   await prisma.benchmarkRun.deleteMany();
   await prisma.deployment.deleteMany();
   await prisma.model.deleteMany();
@@ -86,6 +90,117 @@ describe("GET /api/benchmarks/presets", () => {
     const res = await request(makeApp()).get("/api/benchmarks/presets");
     expect(res.status).toBe(200);
     expect(res.body.map((p: { id: string }) => p.id)).toContain("quick-smoke");
+  });
+
+  it("includes the four tool-eval presets tagged kind 'tool-eval'", async () => {
+    const res = await request(makeApp()).get("/api/benchmarks/presets");
+    expect(res.status).toBe(200);
+    const ids = res.body.map((p: { id: string }) => p.id);
+    for (const id of [
+      "tool-eval-quick",
+      "tool-eval-full",
+      "tool-eval-hardmode",
+      "tool-eval-pressure",
+    ]) {
+      expect(ids).toContain(id);
+    }
+    const quick = res.body.find((p: { id: string }) => p.id === "tool-eval-quick");
+    expect(quick.kind).toBe("tool-eval");
+  });
+});
+
+describe("POST /api/benchmarks (tool-eval dispatch)", () => {
+  it("creates a run with kind 'tool-eval' for a tool-eval preset", async () => {
+    const d = await seedRunningDeployment();
+    runToolEvalMock.mockReturnValue(new Promise(() => {}));
+    const res = await request(makeApp())
+      .post("/api/benchmarks")
+      .send({ deploymentId: d.id, presetId: "tool-eval-quick" });
+    expect(res.status).toBe(201);
+    expect(res.body.kind).toBe("tool-eval");
+    expect(res.body.presetId).toBe("tool-eval-quick");
+    expect(runToolEvalMock).toHaveBeenCalledTimes(1);
+    expect(runMock).not.toHaveBeenCalled();
+  });
+
+  it("creates a throughput run for a custom config (tool-eval is preset-only)", async () => {
+    const d = await seedRunningDeployment();
+    runMock.mockReturnValue(new Promise(() => {}));
+    const res = await request(makeApp())
+      .post("/api/benchmarks")
+      .send({
+        deploymentId: d.id,
+        config: {
+          pp: [1], tg: [1], depth: [0], runs: 1, concurrency: [1],
+          latencyMode: "none", enablePrefixCaching: false, skipCoherence: false,
+        },
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.kind).toBe("throughput");
+    expect(runMock).toHaveBeenCalledTimes(1);
+    expect(runToolEvalMock).not.toHaveBeenCalled();
+  });
+
+  it("persists eval headline fields and category rows on completion", async () => {
+    const d = await seedRunningDeployment();
+    runToolEvalMock.mockImplementation(async (opts: { onLog: (l: string) => void }) => {
+      opts.onLog("benchmark_complete");
+      return {
+        exitCode: 0,
+        rawOutput: "{}",
+        summary: {
+          finalScore: 67,
+          rating: "★★★ Adequate",
+          deployability: 48,
+          responsiveness: 2,
+          totalScenarios: 15,
+          totalPoints: 20,
+          maxPoints: 30,
+          safetyWarnings: [],
+          categories: [{
+            code: "A", label: "Tool Selection", percent: 100,
+            earned: 6, maxPoints: 6, passCount: 3, partialCount: 0, failCount: 0,
+          }],
+        },
+      };
+    });
+
+    const app = makeApp();
+    const res = await request(app)
+      .post("/api/benchmarks")
+      .send({ deploymentId: d.id, presetId: "tool-eval-quick" });
+    const runId = res.body.id;
+
+    // Let the floating completion promise settle.
+    await new Promise((r) => setTimeout(r, 20));
+
+    const detail = await request(app).get(`/api/benchmarks/${runId}`);
+    expect(detail.body.status).toBe("completed");
+    expect(detail.body.toolEvalScore).toBe(67);
+    expect(detail.body.toolEvalRating).toBe("★★★ Adequate");
+    expect(detail.body.toolEvalTotalScenarios).toBe(15);
+    expect(detail.body.toolEvalCategories.length).toBe(1);
+    expect(detail.body.toolEvalCategories[0].code).toBe("A");
+  });
+
+  it("marks the run failed when tool-eval-bench exits non-zero", async () => {
+    const d = await seedRunningDeployment();
+    runToolEvalMock.mockResolvedValue({ exitCode: 1, rawOutput: null, summary: null });
+
+    const app = makeApp();
+    const res = await request(app)
+      .post("/api/benchmarks")
+      .send({ deploymentId: d.id, presetId: "tool-eval-quick" });
+    const runId = res.body.id;
+
+    // Let the floating completion promise settle.
+    await new Promise((r) => setTimeout(r, 20));
+
+    const detail = await request(app).get(`/api/benchmarks/${runId}`);
+    expect(detail.body.status).toBe("failed");
+    expect(detail.body.error).toMatch(/tool-eval-bench exited with code 1/);
+    expect(detail.body.toolEvalScore).toBeNull();
+    expect(detail.body.toolEvalCategories.length).toBe(0);
   });
 });
 

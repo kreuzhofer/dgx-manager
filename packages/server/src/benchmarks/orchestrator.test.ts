@@ -21,7 +21,7 @@ vi.mock("node:fs", async () => {
   };
 });
 
-import { runBenchmark, cancelBenchmark } from "./orchestrator.js";
+import { runBenchmark, runToolEval, cancelBenchmark } from "./orchestrator.js";
 
 function makeFakeChild(pid = 4242) {
   const child = new EventEmitter() as EventEmitter & {
@@ -153,5 +153,69 @@ describe("runBenchmark", () => {
     child.emit("close", 0);
     await promise;
     expect(cancelBenchmark("cleanup")).toBe(false);
+  });
+});
+
+describe("runToolEval", () => {
+  beforeEach(() => {
+    spawnMock.mockReset();
+    readFileSyncMock.mockReset();
+    mkdirSyncMock.mockReset();
+    existsSyncMock.mockReset();
+  });
+
+  it("spawns `uvx tool-eval-bench` with the supplied argv and detached", async () => {
+    const child = makeFakeChild();
+    spawnMock.mockReturnValue(child);
+    existsSyncMock.mockReturnValue(true);
+    readFileSyncMock.mockReturnValue(
+      JSON.stringify({
+        final_score: 80, rating: "★★★★", total_scenarios: 15, safety_warnings: [],
+        scores: { total_points: 24, max_points: 30, category_scores: [] },
+      }),
+    );
+
+    const onLog = vi.fn();
+    const promise = runToolEval({
+      runId: "run_te",
+      args: ["--base-url", "http://10.0.0.1:8000/v1", "--model", "m", "--json-file", "/mnt/tank/benchmarks/run_te/result.json", "--seed", "42"],
+      outputDir: "/mnt/tank/benchmarks/run_te",
+      onLog,
+    });
+
+    child.stderr.emit("data", Buffer.from('{"event":"scenario_start","scenario_id":"TC-01"}\n'));
+    child.emit("close", 0);
+
+    const result = await promise;
+    const [cmd, argv, spawnOpts] = spawnMock.mock.calls[0];
+    expect(cmd).toBe("uvx");
+    expect(argv[0]).toBe("--from");
+    expect(argv[1]).toMatch(/tool-eval-bench\.git@[0-9a-f]{7,}$/);
+    expect(argv[2]).toBe("tool-eval-bench");
+    expect(argv.slice(3)).toEqual([
+      "--base-url", "http://10.0.0.1:8000/v1",
+      "--model", "m",
+      "--json-file", "/mnt/tank/benchmarks/run_te/result.json",
+      "--seed", "42",
+    ]);
+    expect((spawnOpts as { detached: boolean }).detached).toBe(true);
+    expect(result.exitCode).toBe(0);
+    expect(result.summary?.finalScore).toBe(80);
+    expect(onLog).toHaveBeenCalledWith('{"event":"scenario_start","scenario_id":"TC-01"}');
+  });
+
+  it("returns a null summary when the process exits non-zero", async () => {
+    const child = makeFakeChild();
+    spawnMock.mockReturnValue(child);
+    existsSyncMock.mockReturnValue(false);
+
+    const promise = runToolEval({
+      runId: "run_te2", args: ["--base-url", "u", "--model", "m", "--json-file", "/o/result.json"],
+      outputDir: "/o", onLog: vi.fn(),
+    });
+    child.emit("close", 1);
+    const result = await promise;
+    expect(result.exitCode).toBe(1);
+    expect(result.summary).toBeNull();
   });
 });

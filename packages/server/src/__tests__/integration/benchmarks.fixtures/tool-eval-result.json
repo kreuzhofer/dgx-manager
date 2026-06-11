@@ -1,0 +1,180 @@
+{
+  "schema_version": "1",
+  "tool_eval_bench_version": "2.0.6",
+  "final_score": 67,
+  "rating": "\u2605\u2605\u2605 Adequate",
+  "safety_warnings": [],
+  "deployability": 48,
+  "responsiveness": 2,
+  "total_scenarios": 15,
+  "run_id": "2026-06-11T10-38-31.480358Z_f8fa40a4",
+  "status": "completed",
+  "config": {
+    "model": "qwen3-vl:8b",
+    "backend": "vllm",
+    "base_url": "http://***:11434/v1",
+    "temperature": 0.0,
+    "timeout_seconds": 60.0,
+    "max_turns": 8,
+    "seed": 42,
+    "reference_date": null,
+    "scenario_count": 15,
+    "scenario_ids": [
+      "TC-01",
+      "TC-02",
+      "TC-03",
+      "TC-04",
+      "TC-05",
+      "TC-06",
+      "TC-07",
+      "TC-08",
+      "TC-09",
+      "TC-10",
+      "TC-11",
+      "TC-12",
+      "TC-13",
+      "TC-14",
+      "TC-15"
+    ],
+    "concurrency": 1,
+    "error_rate": 0.0,
+    "alpha": 0.7,
+    "extra_params": null,
+    "weight_by_difficulty": false,
+    "config_fingerprint": "9a3ec3e047bf"
+  },
+  "scores": {
+    "final_score": 67,
+    "total_points": 20,
+    "max_points": 30,
+    "rating": "\u2605\u2605\u2605 Adequate",
+    "category_scores": [
+      {
+        "category": "A",
+        "label": "Tool Selection",
+        "earned": 6,
+        "max": 6,
+        "percent": 100,
+        "pass_count": 3,
+        "partial_count": 0,
+        "fail_count": 0
+      },
+      {
+        "category": "B",
+        "label": "Parameter Precision",
+        "earned": 4,
+        "max": 6,
+        "percent": 67,
+        "pass_count": 2,
+        "partial_count": 0,
+        "fail_count": 1
+      },
+      {
+        "category": "C",
+        "label": "Multi-Step Chains",
+        "earned": 2,
+        "max": 6,
+        "percent": 33,
+        "pass_count": 1,
+        "partial_count": 0,
+        "fail_count": 2
+      },
+      {
+        "category": "D",
+        "label": "Restraint & Refusal",
+        "earned": 5,
+        "max": 6,
+        "percent": 83,
+        "pass_count": 2,
+        "partial_count": 1,
+        "fail_count": 0
+      },
+      {
+        "category": "E",
+        "label": "Error Recovery",
+        "earned": 3,
+        "max": 6,
+        "percent": 50,
+        "pass_count": 1,
+        "partial_count": 1,
+        "fail_count": 1
+      }
+    ],
+    "scenario_results": [
+      {
+        "scenario_id": "TC-01",
+        "status": "pass",
+        "points": 2,
+        "summary": "Used get_weather with Berlin only.",
+        "note": null,
+        "tool_calls_made": [
+          "get_weather(location=Berlin, units=celsius)"
+        ],
+        "expected_behavior": "Use get_weather instead of falling back to web_search.",
+        "duration_seconds": 318.31,
+        "turn_count": 2,
+        "raw_log": "model=qwen3-vl:8b\nscenario=TC-01 Direct Specialist Match\nprompt=What's the weather like in Berlin right now?\n\nassistant=starting\nassistant_turn_1=[tool_calls_only]\nassistant_reasoning_1=Okay, the user...[truncated for fixture]",
+        "ttft_ms": 283292.2,
+        "turn_latencies_ms": [
+          283412.9,
+          34897.6
+        ],
+        "prompt_tokens": 1425,
+        "completion_tokens": 328,
+        "total_tokens": 1753,
+        "tool_call_arg_bytes": 39
+      },
+      {
+        "scenario_id": "TC-02",
+        "status": "pass",
+        "points": 2,
+        "summary": "Used only get_stock_price for AAPL.",
+        "note": null,
+        "tool_calls_made": [
+          "get_stock_price(ticker=AAPL)"
+        ],
+        "expected_behavior": "Use get_stock_price without extra tools.",
+        "duration_seconds": 67.55,
+        "turn_count": 2,
+        "raw_log": "model=qwen3-vl:8b\nscenario=TC-02 Distractor Resistance\nprompt=What is the current price of AAPL stock?\n\nassistant=starting\nassistant_turn_1=[tool_calls_only]\nassistant_reasoning_1=Okay, the user is as...[truncated for fixture]",
+        "ttft_ms": 16697.9,
+        "turn_latencies_ms": [
+          16804.3,
+          50746.7
+        ],
+        "prompt_tokens": 1438,
+        "completion_tokens": 497,
+        "total_tokens": 1935,
+        "tool_call_arg_bytes": 17
+      }
+    ],
+    "worst_category": "C Multi-Step Chains (33%)",
+    "worst_category_percent": 33,
+    "deployability": 48,
+    "responsiveness": 2,
+    "median_turn_ms": 40949.1,
+    "alpha": 0.7,
+    "total_tokens": 31590,
+    "token_efficiency": 0.63
+  },
+  "metadata": {
+    "tool_version": "2.0.6",
+    "hostname": "gx10-01",
+    "platform_info": "Linux-6.17.0-1014-nvidia-aarch64-with-glibc2.39",
+    "python_version": "3.12.3",
+    "model": "qwen3-vl:8b",
+    "backend": "vllm",
+    "base_url": "http://***:11434/v1",
+    "temperature": 0.0,
+    "max_turns": 8,
+    "timeout_seconds": 60.0,
+    "seed": 42,
+    "scenario_selector": "short (15)",
+    "trials": 1,
+    "parallel": 1,
+    "error_rate": 0.0,
+    "thinking_enabled": true,
+    "server_model_id": "qwen3-embedding:8b"
+  },
+  "report_path": "/tmp/runs/2026/06/2026-06-11T10-38-31.480358Z_f8fa40a4.md"
+}

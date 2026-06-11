@@ -243,19 +243,34 @@ model BenchmarkRun {
   // JSON-encoded BenchmarkConfig (pp, tg, depth, runs, concurrency, etc.)
   config          String
   status          String   @default("pending") // pending | running | completed | failed | canceled
+  // Which benchmark family this run belongs to. "throughput" = llama-benchy
+  // (pp/tg/depth/concurrency -> TPS/TTFR rows). "tool-eval" = tool-eval-bench
+  // (tool-calling accuracy -> a score + per-category breakdown).
+  kind            String   @default("throughput") // throughput | tool-eval
   error           String?
   startedAt       DateTime?
   completedAt     DateTime?
-  // Raw markdown table emitted by llama-benchy (--format markdown). Rendered
-  // verbatim on the detail page as a fallback if structured parsing fails.
+  // Raw result payload from the benchmark CLI: llama-benchy JSON for throughput
+  // runs, the tool-eval-bench --json payload for tool-eval runs. Kept as the
+  // source of truth / fallback if structured parsing fails.
   rawOutput       String?
   // Aggregate stats surfaced in list/compare views so we don't recompute on
   // every page render.
   meanTps         Float?
   meanTtfrMs      Float?
+  // --- tool-eval-bench headline metrics (null on throughput runs) ---
+  toolEvalScore          Float?  // scores.final_score, 0-100
+  toolEvalRating         String? // rating star string, e.g. "★★★ Adequate"
+  toolEvalDeployability  Int?    // deployability
+  toolEvalResponsiveness Int?    // responsiveness (small star-style int, NOT 0-100)
+  toolEvalTotalScenarios Int?    // total_scenarios
+  toolEvalTotalPoints    Int?    // scores.total_points
+  toolEvalMaxPoints      Int?    // scores.max_points
+  toolEvalSafetyWarnings String? // JSON-encoded string[] (safety_warnings)
   createdAt       DateTime @default(now())
   deployment      Deployment? @relation(fields: [deploymentId], references: [id], onDelete: SetNull)
   results         BenchmarkResult[]
+  toolEvalCategories ToolEvalCategory[]
 
   @@index([deploymentId, createdAt])
   @@index([status])
@@ -280,6 +295,23 @@ model BenchmarkResult {
   tpsStdev    Float?
   ttfrStdev   Float?
   run         BenchmarkRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId])
+}
+
+model ToolEvalCategory {
+  id           String @id @default(cuid())
+  runId        String
+  // From scores.category_scores[] in the tool-eval-bench JSON.
+  code         String // category, e.g. "A"
+  label        String // e.g. "Tool Selection"
+  percent      Float  // 0-100
+  earned       Int
+  maxPoints    Int    // category_scores[].max
+  passCount    Int
+  partialCount Int
+  failCount    Int
+  run          BenchmarkRun @relation(fields: [runId], references: [id], onDelete: Cascade)
 
   @@index([runId])
 }
