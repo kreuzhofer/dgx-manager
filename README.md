@@ -1,111 +1,171 @@
 # DGX Manager
 
-A full-stack system for managing and monitoring a DGX Spark cluster. Handles node provisioning, real-time GPU metrics, model deployment via vLLM, inference load balancing, and fine-tuning job orchestration.
+A self-hosted control plane for a DGX Spark GPU cluster: provision nodes over
+SSH or a join token, deploy and load-balance inference, fine-tune models, and
+benchmark them — with a real-time web dashboard and zero cloud dependencies.
+
+> **Running it yourself?** See the **[Self-Hosting Guide](docs/SELF-HOSTING.md)**.
+
+## What it does
+
+- **Real-time GPU telemetry** — utilization, VRAM, temperature, network/RDMA across every node at 5-second resolution
+- **One-click model deployment** — vLLM (container, YAML-recipe-driven) and Ollama (native)
+- **Multi-node inference clusters** — tensor/pipeline parallelism over Ray; serves models up to **Nemotron-3-Ultra 550B-A55B NVFP4 across 4 nodes**
+- **Load balancer** — rules + endpoints API, plus a round-robin / first-available inference proxy *(proxy and dashboard UI not yet wired up)*
+- **End-to-end fine-tuning** — LoRA via DeepSpeed ZeRO-2/3, TRL+PEFT, or Unsloth; multi-node training; resume-from-checkpoint; merge → deploy in one loop
+- **Live training observability** — phase-aware progress and a live loss curve (train + eval overlay) streamed to the dashboard
+- **Benchmarking & evaluation** — llama-benchy presets (`quick-smoke`, `chat-short`, `chat-long`, `code-32k`, `throughput`) with a compare view
+- **Zero-touch onboarding** — single-use join tokens + a self-contained install script; HTTP agent auto-update
+- **Heterogeneous hardware** — arm64 (DGX Spark / GB10) and amd64 nodes, per-arch agent bundles
 
 ## Architecture
 
-Three-package TypeScript monorepo using npm workspaces:
+A three-package TypeScript monorepo. The dashboard talks to the server over
+WebSocket; the server talks to an agent on each node; agents run the runtimes
+and report metrics.
 
-- **Server** (`packages/server`) — Express 5 REST API + WebSocket hubs (port 4000)
-- **Dashboard** (`packages/dashboard`) — Next.js 15 web UI (port 3000)
-- **Agent** (`packages/agent`) — Runs on each DGX node, collects GPU metrics and executes deployments
-
-```
-Dashboard <──WS──> Server <──WS──> Agent (on DGX node)
-                     │                  │
-                 SQLite DB         nvidia-smi
-                 (Prisma)          spark-vllm-docker
-```
-
-## Prerequisites
-
-- Node.js 22+
-- Git
-- NVIDIA GPU with `nvidia-smi` (on agent nodes)
-
-## Quick Start
-
-```bash
-# Install dependencies
-npm install
-
-# Set up environment
-cp .env.example .env
-# Edit .env as needed (defaults work for local development)
-
-# Initialize the database
-npm run db:generate
-npm run db:push
-
-# Start server + dashboard
-npm run dev
+```mermaid
+flowchart LR
+    D["Dashboard<br/>Next.js :3000"] <-->|"WS /ws/dashboard"| S["Server<br/>Express :4000"]
+    S <-->|"WS /ws/agent"| A1["Agent (node)<br/>vLLM · Ollama · nvidia-smi"]
+    S <-->|"WS /ws/agent"| A2["Agent (node)"]
+    S --> DB[("SQLite · Prisma")]
+    NFS[("NFS shared storage")] --- A1
+    NFS --- A2
+    NFS -.->|"recipe repo (cloned to NFS)"| R["spark-vllm-docker"]
 ```
 
-- **Dashboard**: http://localhost:3000
-- **Server API**: http://localhost:4000/api
-- **Health check**: http://localhost:4000/api/health
+A deployment flows from the dashboard to a node and streams back live:
 
-## Running the Agent
-
-The agent runs on each DGX node and connects back to the manager server:
-
-```bash
-NODE_ID=<node-id-from-db> MANAGER_URL=ws://<server-ip>:4000/ws/agent npm run dev -w packages/agent
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant D as Dashboard
+    participant S as Server
+    participant A as Agent
+    participant C as vLLM container
+    U->>D: Deploy recipe (solo or cluster)
+    D->>S: POST /api/deployments
+    S->>S: VRAM admission + port check
+    S->>A: cmd:deploy (WS)
+    A->>C: launch recipe (Ray if multi-node)
+    C-->>A: startup logs
+    A-->>S: status + logs (WS)
+    S-->>D: live updates (WS / SSE)
+    Note over C: serving on :8000 (/v1)
 ```
 
-The agent will:
-1. Register with the server (GPU model, VRAM)
-2. Discover available vLLM recipes from the [spark-vllm-docker](https://github.com/kreuzhofer/spark-vllm-docker) repo and report them to the server
-3. Stream GPU metrics every 5 seconds
+## Screenshots
 
-## vLLM Recipes
+> Images live in [`docs/screenshots/`](docs/screenshots/) — see [`missing-screenshots.md`](missing-screenshots.md).
 
-The agent integrates with [spark-vllm-docker](https://github.com/kreuzhofer/spark-vllm-docker) for inference. On startup, the agent checks for the repo at `VLLM_REPO_PATH` (default: `/mnt/tank/src/github/spark-vllm-docker`) and clones it if missing.
+| Cluster overview | Multi-node deployment |
+|---|---|
+| ![Overview](docs/screenshots/overview.png) | ![Deployments](docs/screenshots/deployments.png) |
 
-Recipes are YAML configs in the repo's `recipes/` directory defining one-click vLLM deployments — model, container image, quantization, defaults, etc.
+| Live training loss curve | Benchmarks |
+|---|---|
+| ![Fine-tune loss curve](docs/screenshots/finetune-loss-curve.png) | ![Benchmarks](docs/screenshots/benchmarks.png) |
 
-Available recipes are reported to the server via WebSocket and exposed at `GET /api/recipes`.
+## Feature tour
 
-## Development Commands
+### Nodes & metrics
 
-```bash
-npm run dev              # Server + dashboard in parallel
-npm run dev:server       # Server only (tsx watch, port 4000)
-npm run dev:dashboard    # Dashboard only (next dev, port 3000)
-npm run build            # Build all packages
+Each DGX node registers via SSH provisioning or a single-use join token. Once
+connected, the agent streams GPU utilization, VRAM usage, temperature, and
+RDMA network counters every 5 seconds. The overview page aggregates the live
+feed across every node in the cluster. See the [Self-Hosting Guide](docs/SELF-HOSTING.md)
+for provisioning details.
 
-npm run db:push          # Apply schema changes
-npm run db:generate      # Regenerate Prisma client
-npm run db:studio        # Prisma Studio GUI
-```
+### Deployments
 
-## API Endpoints
+Models are deployed from YAML recipes (discovered from
+[spark-vllm-docker](https://github.com/kreuzhofer/spark-vllm-docker)) or via
+Ollama. Single-node and multi-node Ray clusters are both supported, with VRAM
+admission control that blocks deploys that would over-subscribe available memory.
+Deployment logs stream live to the dashboard over SSE. Note: `status: "running"`
+means the container started — actual vLLM readiness depends on model load time
+and is signalled separately once the `/v1` endpoint becomes responsive.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/health` | Health check |
-| GET/POST | `/api/nodes` | Node management |
-| GET/POST | `/api/models` | Model registry |
-| GET/POST/DELETE | `/api/deployments` | Deployment management |
-| POST | `/api/deployments/:id/restart` | Restart deployment |
-| GET | `/api/recipes` | Available vLLM recipes (from agents) |
-| GET/POST | `/api/finetune` | Fine-tune jobs |
-| GET/POST | `/api/lb` | Load balancer rules |
+### Fine-tuning
 
-## WebSocket Channels
+Submit LoRA fine-tune jobs directly from the dashboard: pick a training recipe,
+a dataset, and hyperparameters. Training runs via DeepSpeed ZeRO-2/3, TRL+PEFT,
+or Unsloth across one or multiple nodes, with live loss-curve streaming. Finished
+adapters can be merged and promoted to a deployment in one click. See
+[Gemma 4 fine-tuning on DGX Spark](docs/gemma4-fine-tuning-on-dgx-spark.md) for
+a detailed walk-through of a real training run.
 
-- `ws://localhost:4000/ws/agent` — Agent connections (metrics, recipes, deployment status)
-- `ws://localhost:4000/ws/dashboard` — Dashboard real-time updates
+### Benchmarks & evaluation
 
-## Environment Variables
+Run llama-benchy presets (`quick-smoke`, `chat-short`, `chat-long`, `code-32k`,
+`throughput`) against any live deployment. Results are stored and a compare view
+lets you track regressions across model versions. See the
+[Qwen 3.6 inference benchmark write-up](docs/qwen3.6-inference-benchmark.md) for
+an example of real numbers from the cluster.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `4000` | Server HTTP port |
-| `MANAGER_HOST` | `0.0.0.0` | Server bind address |
-| `DATABASE_URL` | `file:./dev.db` | Prisma database URL |
-| `NEXT_PUBLIC_API_URL` | `http://localhost:4000` | Dashboard → server API |
-| `NEXT_PUBLIC_WS_URL` | `ws://localhost:4000/ws/dashboard` | Dashboard → server WS |
-| `NODE_ID` | — | Agent: node ID (required) |
-| `MANAGER_URL` | `ws://localhost:4000/ws/agent` | Agent: server WS URL |
-| `VLLM_REPO_PATH` | `/mnt/tank/src/github/spark-vllm-docker` | Agent: path to spark-vllm-docker repo |
+### Load balancer
+
+Rules and endpoints are managed via the `/api/lb` REST API. A round-robin /
+first-available inference proxy is implemented in `proxy/inference-proxy.ts`
+but is not currently mounted in the server. **The dashboard UI is also pending.**
+
+### Agent onboarding & updates
+
+Nodes are onboarded with a single token-scoped install script that downloads the
+right architecture bundle (arm64 or amd64), installs the agent as a systemd
+service, and connects it back to the manager. When a new agent version ships, the
+dashboard shows an upgrade prompt and the manager serves the updated bundle over
+HTTP — no manual SSH needed. Full details in the
+[Self-Hosting Guide](docs/SELF-HOSTING.md).
+
+For full feature status see [docs/ROADMAP.md](docs/ROADMAP.md).
+
+## Tech stack
+
+TypeScript monorepo (npm workspaces) · Express 5 + `ws` · Next.js 15 / React 19 /
+Tailwind 4 · Prisma 7 + SQLite · Docker / Docker Compose · Ray · DeepSpeed / PEFT /
+TRL / Unsloth · vLLM · Ollama · llama-benchy
+
+## Repository layout
+
+- `packages/server` — Express REST API + WebSocket hubs (:4000)
+- `packages/dashboard` — Next.js web UI (:3000)
+- `packages/agent` — node agent: metrics, deployments, training
+- `docs/` — guides, deep-dive write-ups, ROADMAP, specs/plans
+
+**Related repositories:**
+[spark-vllm-docker](https://github.com/kreuzhofer/spark-vllm-docker) ·
+[dgx-manager-fine-tune-recipes](https://github.com/kreuzhofer/dgx-manager-fine-tune-recipes)
+
+## API
+
+REST under `/api`, plus WebSocket hubs at `/ws/dashboard` and `/ws/agent`.
+
+| Route group | Purpose |
+|-------------|---------|
+| `/api/nodes` | Node lifecycle, provisioning, agent updates |
+| `/api/models` | Model registry |
+| `/api/deployments` | Solo & cluster deployments, logs, restart |
+| `/api/finetune` | Fine-tune jobs, resume, merge, deploy |
+| `/api/lb` | Load-balancer rules & endpoints |
+| `/api/recipes` | vLLM recipes (discovered from agents) |
+| `/api/training-recipes` | Training recipes + inference variants |
+| `/api/tokens` | Single-use agent join tokens |
+| `/api/settings` | Server settings |
+| `/api/ollama-catalog` | Ollama model catalog |
+| `/api/agent` | Agent bundle + install script |
+| `/api/datasets` | Dataset upload/registration/preview |
+| `/api/benchmarks` | llama-benchy benchmark runs |
+| `/api/events` | Server-Sent Events stream for real-time dashboard updates |
+| `/api/health` | Health check |
+
+Full setup and endpoint detail: **[Self-Hosting Guide](docs/SELF-HOSTING.md)**.
+
+## Project status
+
+Nodes & metrics, deployments (solo and multi-node), fine-tuning, datasets, and
+benchmarks are functional end-to-end. The Models and Load Balancer pages have
+complete server APIs with dashboard UIs still pending. Auth and multi-cluster
+support are future phases. See [docs/ROADMAP.md](docs/ROADMAP.md) for the full
+feature status.
