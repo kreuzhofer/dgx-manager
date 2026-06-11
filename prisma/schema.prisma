@@ -250,8 +250,9 @@ model BenchmarkRun {
   error           String?
   startedAt       DateTime?
   completedAt     DateTime?
-  // Raw markdown table emitted by llama-benchy (--format markdown). Rendered
-  // verbatim on the detail page as a fallback if structured parsing fails.
+  // Raw result payload from the benchmark CLI: llama-benchy JSON for throughput
+  // runs, the tool-eval-bench --json payload for tool-eval runs. Kept as the
+  // source of truth / fallback if structured parsing fails.
   rawOutput       String?
   // Aggregate stats surfaced in list/compare views so we don't recompute on
   // every page render.

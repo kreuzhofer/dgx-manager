@@ -182,6 +182,26 @@ describe("POST /api/benchmarks (tool-eval dispatch)", () => {
     expect(detail.body.toolEvalCategories.length).toBe(1);
     expect(detail.body.toolEvalCategories[0].code).toBe("A");
   });
+
+  it("marks the run failed when tool-eval-bench exits non-zero", async () => {
+    const d = await seedRunningDeployment();
+    runToolEvalMock.mockResolvedValue({ exitCode: 1, rawOutput: null, summary: null });
+
+    const app = makeApp();
+    const res = await request(app)
+      .post("/api/benchmarks")
+      .send({ deploymentId: d.id, presetId: "tool-eval-quick" });
+    const runId = res.body.id;
+
+    // Let the floating completion promise settle.
+    await new Promise((r) => setTimeout(r, 20));
+
+    const detail = await request(app).get(`/api/benchmarks/${runId}`);
+    expect(detail.body.status).toBe("failed");
+    expect(detail.body.error).toMatch(/tool-eval-bench exited with code 1/);
+    expect(detail.body.toolEvalScore).toBeNull();
+    expect(detail.body.toolEvalCategories.length).toBe(0);
+  });
 });
 
 describe("POST /api/benchmarks", () => {
