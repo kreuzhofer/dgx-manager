@@ -103,7 +103,9 @@ export default function BenchmarkDetailPage({
 
       {run.rawOutput && (
         <details className="text-sm">
-          <summary className="cursor-pointer text-gray-400">Raw llama-benchy JSON</summary>
+          <summary className="cursor-pointer text-gray-400">
+            Raw {run.kind === "tool-eval" ? "tool-eval-bench" : "llama-benchy"} JSON
+          </summary>
           <pre className="mt-2 p-3 bg-black rounded text-xs overflow-x-auto max-h-96">{run.rawOutput}</pre>
         </details>
       )}

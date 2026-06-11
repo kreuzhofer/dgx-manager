@@ -120,6 +120,10 @@ export default function BenchmarksPage() {
           <option value="chat-long">chat-long</option>
           <option value="code-32k">code-32k</option>
           <option value="throughput">throughput</option>
+          <option value="tool-eval-quick">tool-eval-quick</option>
+          <option value="tool-eval-full">tool-eval-full</option>
+          <option value="tool-eval-hardmode">tool-eval-hardmode</option>
+          <option value="tool-eval-pressure">tool-eval-pressure</option>
         </select>
         <select
           value={filter.status}
