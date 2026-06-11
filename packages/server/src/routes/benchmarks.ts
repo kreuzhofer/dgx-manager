@@ -7,11 +7,14 @@ import {
   BENCHMARK_PRESETS,
   getPreset,
   type BenchmarkConfig,
+  type ToolEvalConfig,
 } from "../benchmarks/presets.js";
 import { buildBenchyArgs } from "../benchmarks/args.js";
+import { buildToolEvalArgs } from "../benchmarks/tool-eval-args.js";
 import { deploymentEndpointUrl } from "../benchmarks/endpoint.js";
 import {
   runBenchmark,
+  runToolEval,
   cancelBenchmark,
 } from "../benchmarks/orchestrator.js";
 
@@ -52,6 +55,7 @@ benchmarksRouter.get("/:id", async (req, res) => {
     where: { id: req.params.id },
     include: {
       results: true,
+      toolEvalCategories: true,
       deployment: { include: { node: true, model: true } },
     },
   });
@@ -124,12 +128,15 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
       .json({ error: "a benchmark is already running for this deployment" });
   }
 
-  let config: BenchmarkConfig;
+  let kind: "throughput" | "tool-eval" = "throughput";
+  let config: BenchmarkConfig | ToolEvalConfig;
   if (presetId) {
     const preset = getPreset(presetId);
     if (!preset) return res.status(400).json({ error: "unknown presetId" });
+    kind = preset.kind;
     config = preset.config;
   } else {
+    // Custom config is throughput-only; tool-eval runs must use a preset.
     config = customConfig!;
   }
 
@@ -148,6 +155,7 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
     data: {
       deploymentId,
       presetId: presetId ?? null,
+      kind,
       modelName: deployment.model.name,
       endpointUrl,
       servedModelName,
@@ -158,11 +166,6 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
   sseBroadcast({ type: "benchmark:created", payload: run });
 
   const outputDir = join(SHARED_STORAGE, "benchmarks", run.id);
-  const args = buildBenchyArgs(config, {
-    baseUrl: endpointUrl,
-    modelName: servedModelName,
-    outputPath: join(outputDir, "result.json"),
-  });
 
   // Move to "running" immediately so the dashboard reflects state.
   await prisma.benchmarkRun.update({
@@ -179,71 +182,102 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
   const logDir = join(SHARED_STORAGE, "logs", "benchmarks");
   mkdirSync(logDir, { recursive: true, mode: 0o777 });
   const logPath = join(logDir, `${run.id}.log`);
+  const onLog = (line: string) => {
+    try {
+      appendFileSync(logPath, line + "\n", { mode: 0o666 });
+    } catch {
+      // Disk-full or perms — keep streaming via SSE even if persistence fails.
+    }
+    sseBroadcast({ type: "benchmark:log", payload: { runId: run.id, log: line } });
+  };
+  const resultPath = join(outputDir, "result.json");
 
-  runBenchmark({
-    runId: run.id,
-    args,
-    outputDir,
-    onLog: (line) => {
-      try {
-        appendFileSync(logPath, line + "\n", { mode: 0o666 });
-      } catch {
-        // Disk-full or perms — keep streaming via SSE even if persistence fails.
-      }
-      sseBroadcast({
-        type: "benchmark:log",
-        payload: { runId: run.id, log: line },
-      });
-    },
-  })
-    .then(async (r) => {
-      // SIGTERM from cancel exits the child non-zero; if the row was already
-      // flipped to "canceled" by the cancel route, leave it alone.
-      const current = await prisma.benchmarkRun.findUnique({ where: { id: run.id } });
-      if (current?.status === "canceled") return;
-
-      if (r.exitCode === 0) {
-        await prisma.benchmarkRun.update({
-          where: { id: run.id },
-          data: {
-            status: "completed",
-            completedAt: new Date(),
-            rawOutput: r.rawOutput,
-            meanTps: r.summary.meanTps,
-            meanTtfrMs: r.summary.meanTtfrMs,
-            results: { create: r.results },
-          },
-        });
-      } else {
-        await prisma.benchmarkRun.update({
-          where: { id: run.id },
-          data: {
-            status: "failed",
-            completedAt: new Date(),
-            error: `llama-benchy exited with code ${r.exitCode}`,
-          },
-        });
-      }
-      const final = await prisma.benchmarkRun.findUnique({
-        where: { id: run.id },
-        include: { results: true },
-      });
-      sseBroadcast({ type: "benchmark:status", payload: final });
-    })
-    .catch(async (e) => {
-      await prisma.benchmarkRun.update({
-        where: { id: run.id },
-        data: {
-          status: "failed",
-          completedAt: new Date(),
-          error: (e as Error).message,
-        },
-      });
-      sseBroadcast({
-        type: "benchmark:status",
-        payload: { id: run.id, status: "failed", error: (e as Error).message },
-      });
+  const finishFailed = async (message: string) => {
+    await prisma.benchmarkRun.update({
+      where: { id: run.id },
+      data: { status: "failed", completedAt: new Date(), error: message },
     });
+    sseBroadcast({
+      type: "benchmark:status",
+      payload: { id: run.id, status: "failed", error: message },
+    });
+  };
+
+  if (kind === "tool-eval") {
+    const args = buildToolEvalArgs(config as ToolEvalConfig, {
+      baseUrl: endpointUrl,
+      modelName: servedModelName,
+      outputPath: resultPath,
+    });
+    runToolEval({ runId: run.id, args, outputDir, onLog })
+      .then(async (r) => {
+        const current = await prisma.benchmarkRun.findUnique({ where: { id: run.id } });
+        if (current?.status === "canceled") return;
+        if (r.exitCode === 0 && r.summary) {
+          const s = r.summary;
+          await prisma.benchmarkRun.update({
+            where: { id: run.id },
+            data: {
+              status: "completed",
+              completedAt: new Date(),
+              rawOutput: r.rawOutput,
+              toolEvalScore: s.finalScore,
+              toolEvalRating: s.rating,
+              toolEvalDeployability: s.deployability,
+              toolEvalResponsiveness: s.responsiveness,
+              toolEvalTotalScenarios: s.totalScenarios,
+              toolEvalTotalPoints: s.totalPoints,
+              toolEvalMaxPoints: s.maxPoints,
+              toolEvalSafetyWarnings: JSON.stringify(s.safetyWarnings),
+              toolEvalCategories: { create: s.categories },
+            },
+          });
+          const final = await prisma.benchmarkRun.findUnique({
+            where: { id: run.id },
+            include: { toolEvalCategories: true },
+          });
+          sseBroadcast({ type: "benchmark:status", payload: final });
+        } else {
+          await finishFailed(`tool-eval-bench exited with code ${r.exitCode}`);
+        }
+      })
+      .catch((e) => finishFailed((e as Error).message));
+  } else {
+    const args = buildBenchyArgs(config as BenchmarkConfig, {
+      baseUrl: endpointUrl,
+      modelName: servedModelName,
+      outputPath: resultPath,
+    });
+    runBenchmark({ runId: run.id, args, outputDir, onLog })
+      .then(async (r) => {
+        // SIGTERM from cancel exits the child non-zero; if the row was already
+        // flipped to "canceled" by the cancel route, leave it alone.
+        const current = await prisma.benchmarkRun.findUnique({ where: { id: run.id } });
+        if (current?.status === "canceled") return;
+        if (r.exitCode === 0) {
+          await prisma.benchmarkRun.update({
+            where: { id: run.id },
+            data: {
+              status: "completed",
+              completedAt: new Date(),
+              rawOutput: r.rawOutput,
+              meanTps: r.summary.meanTps,
+              meanTtfrMs: r.summary.meanTtfrMs,
+              results: { create: r.results },
+            },
+          });
+        } else {
+          await finishFailed(`llama-benchy exited with code ${r.exitCode}`);
+          return;
+        }
+        const final = await prisma.benchmarkRun.findUnique({
+          where: { id: run.id },
+          include: { results: true },
+        });
+        sseBroadcast({ type: "benchmark:status", payload: final });
+      })
+      .catch((e) => finishFailed((e as Error).message));
+  }
 
   res.status(201).json(run);
 });
