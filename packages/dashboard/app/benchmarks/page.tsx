@@ -175,6 +175,7 @@ export default function BenchmarksPage() {
                   <th className="px-4 py-3">When</th>
                   <th className="px-4 py-3">Deployment</th>
                   <th className="px-4 py-3">Preset</th>
+                  <th className="px-4 py-3">Kind</th>
                   <th className="px-4 py-3">Status</th>
                   <th className="px-4 py-3 text-right">Mean t/s</th>
                   <th className="px-4 py-3 text-right">Mean TTFR</th>
@@ -214,6 +215,13 @@ export default function BenchmarksPage() {
                       {r.presetId ?? <span className="text-gray-500 italic">custom</span>}
                     </td>
                     <td className="px-4 py-3">
+                      <span className={`text-xs px-2 py-0.5 rounded ${
+                        r.kind === "tool-eval" ? "bg-purple-900 text-purple-200" : "bg-sky-900 text-sky-200"
+                      }`}>
+                        {r.kind === "tool-eval" ? "tool-eval" : "throughput"}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
                       <StatusPill status={r.status} />
                       {r.error && (
                         <div className="text-xs text-red-400 mt-1 max-w-[240px] truncate" title={r.error}>
@@ -222,7 +230,9 @@ export default function BenchmarksPage() {
                       )}
                     </td>
                     <td className="px-4 py-3 text-right font-mono">
-                      {r.meanTps != null ? r.meanTps.toFixed(1) : <span className="text-gray-500">—</span>}
+                      {r.kind === "tool-eval"
+                        ? (r.toolEvalScore != null ? `${r.toolEvalScore}/100` : "—")
+                        : (r.meanTps != null ? r.meanTps.toFixed(1) : "—")}
                     </td>
                     <td className="px-4 py-3 text-right font-mono">
                       {r.meanTtfrMs != null ? r.meanTtfrMs.toFixed(0) : <span className="text-gray-500">—</span>}
