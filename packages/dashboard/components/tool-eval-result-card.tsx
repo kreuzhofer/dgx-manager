@@ -1,9 +1,20 @@
 import type { BenchmarkRun } from "@/lib/benchmarks";
 
+// Defensive parse: toolEvalSafetyWarnings is server-written JSON, but a
+// malformed value should degrade to "no warnings" rather than blanking the
+// whole detail page.
+function parseSafetyWarnings(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
 export function ToolEvalResultCard({ run }: { run: BenchmarkRun }) {
-  const warnings: string[] = run.toolEvalSafetyWarnings
-    ? (JSON.parse(run.toolEvalSafetyWarnings) as string[])
-    : [];
+  const warnings = parseSafetyWarnings(run.toolEvalSafetyWarnings);
   const cats = run.toolEvalCategories ?? [];
 
   return (
