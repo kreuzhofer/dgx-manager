@@ -27,7 +27,7 @@ DGX Manager aims to be the simplest way to operate a personal or team GPU cluste
 - Deployment persistence across agent restarts
 - Real-time deployment log streaming and full status lifecycle
 - Recipe auto-discovery from the spark-vllm-docker repository
-- Server-side load balancer: rules, endpoints, round-robin/first-available strategy, inference proxy
+- Server-side load balancer: rules + endpoints API (round-robin / first-available strategy implemented); the inference proxy router (`proxy/inference-proxy.ts`) is written but **not yet mounted in the server**
 - Dashboard: Deployment creation (runtime toggle, node/recipe selection), log viewer, stop/restart controls, cluster node visualization
 
 ### Remaining UI work
@@ -181,9 +181,16 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 - [ ] Dataset versioning and lineage tracking
 - [ ] CSV/Parquet format support
 
-## Phase 5: Evaluation & Benchmarks 🔜
+## Phase 5: Evaluation & Benchmarks (in progress)
 
 **Goal:** Measure and track model quality across deployments and fine-tuning runs.
+
+### Benchmarking (shipped)
+
+- llama-benchy benchmark runner integrated via `POST /api/benchmarks { deploymentId, presetId }`
+- Presets: `quick-smoke`, `chat-short`, `chat-long`, `code-32k`, `throughput`
+- Dashboard: results list, per-run detail (`/benchmarks/[id]`), and a compare view (`/benchmarks/compare`)
+- Per-concurrency throughput + TTFR captured to `result.json` and the DB
 
 - SQL evaluation script — implemented and validated on `b-mc2/sql-create-context`
   - **Gemma 4 E2B**: base 4% → fine-tuned 22% exact-match accuracy (+18pp, 5.5× ratio) on 50 examples
@@ -228,13 +235,24 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 
 ---
 
+## Recent work (May–June 2026)
+
+- **Nemotron-3-Ultra NVFP4 TP=4** — 550B-A55B served across 4 DGX Spark nodes (Ray, engine-isolated vLLM container); MTP speculative decoding enabled via per-MoE-type backend selection
+- **Metrics retention** — MetricSnapshot pruning (`METRIC_RETENTION_DAYS`, default 7d) + `(nodeId, timestamp DESC)` index
+- **Inference-variant selector** — choose an inference template per recipe on deploy/restart
+- **Log catch-up** — deployment + fine-tune logs reconcile on tab-visible / SSE reconnect
+- **Node management-IP override** — `NODE_ADVERTISE_IP` for correct multi-node binding
+- **Verboseness eval** — thinking-mode response-length probe
+
+---
+
 ## Status Matrix
 
 | Area | Server | Agent | Dashboard | Database |
 |------|--------|-------|-----------|----------|
 | Nodes & Metrics | ✅ | ✅ | ✅ | ✅ |
 | Deployments | ✅ | ✅ | ✅ | ✅ |
-| Load Balancer | ✅ | — | placeholder | ✅ |
+| Load Balancer | ✅* | — | placeholder | ✅ |
 | Models | ✅ | — | placeholder | ✅ |
 | Fine-Tuning (single) | ✅ | ✅ | ✅ | ✅ |
 | Fine-Tuning (multi-node) | ✅ | ✅ | ✅ | ✅ |
@@ -247,11 +265,14 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 | Heterogeneous Hardware | ✅ | ✅ | ✅ | ✅ |
 | Consumer-GPU Recipes | — | — | — | — |
 | Datasets | ✅ | — | ✅ | ✅ |
-| Evaluation | ✅ | — | partial (in-chart) | ✅ |
+| Evaluation | ✅ | — | ✅ (benchmarks) / partial (eval) | ✅ |
+| Benchmarks | ✅ | — | ✅ | ✅ |
 | Resume from Checkpoint | ✅ | ✅ | ✅ | ✅ |
 | Auth & RBAC | — | — | — | — |
 | Multi-Cluster | — | — | — | — |
 
+*\*Load Balancer: rules/endpoints API complete; inference proxy implemented but not mounted; dashboard UI pending.*
+
 ---
 
-*Last updated: April 14, 2026*
+*Last updated: June 11, 2026*
