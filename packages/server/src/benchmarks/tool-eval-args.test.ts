@@ -45,6 +45,13 @@ describe("buildToolEvalArgs", () => {
     expect(off).not.toContain("--context-pressure");
   });
 
+  // 0 is a valid pressure, distinct from "omit": the guard must be `!== null`,
+  // not falsy, or a zero pressure would be silently dropped.
+  it("emits --context-pressure when contextPressure is 0 (zero is not null)", () => {
+    const args = buildToolEvalArgs({ ...base, contextPressure: 0 }, target);
+    expect(valuesAfter(args, "--context-pressure")).toEqual(["0"]);
+  });
+
   // Invariant: --model is always present exactly once (so the interactive
   // model picker can never hang a headless run).
   test.prop([fc.boolean(), fc.boolean(), fc.option(fc.float({ min: 0, max: 1, noNaN: true }), { nil: null })])(
