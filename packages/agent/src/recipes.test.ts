@@ -18,5 +18,10 @@ describe("discoverRecipes", () => {
     expect(r[0].cluster_only).toBeUndefined();
     expect(r[1].cluster_only).toBe(true);
     expect(r[1].defaults.gpu_memory_utilization).toBe(0.85);
+    // TP must be preserved for multi-node recipes; pipeline_parallel must NOT be
+    // synthesised (sparkrun list --json never emits it, so we must not invent one —
+    // the dashboard dropdown shows TP=N only when pipeline_parallel is absent).
+    expect(r[1].defaults.tensor_parallel).toBe(2);
+    expect(r[1].defaults.pipeline_parallel).toBeUndefined();
   });
 });

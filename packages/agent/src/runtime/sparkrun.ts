@@ -1,4 +1,5 @@
 import { spawn, execFileSync } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { SPARKRUN_PKG } from "../recipes.js";
@@ -7,6 +8,8 @@ import { parseClusterId } from "./sparkrun-parse.js";
 import { saveDeployment, removeDeployment } from "./deployment-store.js";
 
 export type Opts = Omit<SparkrunLaunchOptions, "recipeRef"> & { recipeName?: string };
+
+const logFollowers = new Map<string, ChildProcess>();
 
 export function launchSparkrun(
   deploymentId: string, recipeRef: string, opts: Opts,
@@ -26,7 +29,23 @@ export function launchSparkrun(
   const onData = (b: Buffer) => {
     const s = b.toString();
     onLog(s);
-    if (!clusterId) { buf += s; const id = parseClusterId(buf); if (id) { clusterId = id; persist(); } }
+    if (!clusterId) {
+      buf += s;
+      const id = parseClusterId(buf);
+      if (id) {
+        clusterId = id;
+        persist();
+        const follower = spawn(
+          "uvx",
+          ["--from", SPARKRUN_PKG, "sparkrun", "logs", clusterId, "-H", hosts.join(","), "--tp", String(tp), "--tail", "1000"],
+          { detached: true },
+        );
+        follower.stdout?.on("data", (b: Buffer) => onLog(b.toString()));
+        follower.stderr?.on("data", (b: Buffer) => onLog(b.toString()));
+        follower.on("exit", () => { logFollowers.delete(deploymentId); });
+        logFollowers.set(deploymentId, follower);
+      }
+    }
   };
   child.stdout?.on("data", onData);
   child.stderr?.on("data", onData);
@@ -35,6 +54,8 @@ export function launchSparkrun(
 }
 
 export function stopSparkrun(deploymentId: string, target: string, hosts: string[], tp?: number): void {
+  const f = logFollowers.get(deploymentId);
+  if (f) { try { f.kill(); } catch { /* already gone */ } logFollowers.delete(deploymentId); }
   const args = ["--from", SPARKRUN_PKG, "sparkrun", "stop", target, "-H", hosts.join(",")];
   if (tp != null) args.push("--tp", String(tp));
   try { execFileSync("uvx", args, { timeout: 120_000 }); }

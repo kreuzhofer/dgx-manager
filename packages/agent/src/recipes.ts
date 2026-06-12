@@ -25,7 +25,6 @@ function toRecipe(s: SparkrunRecipeSummary): Recipe {
     solo_only: undefined,
     defaults: {
       tensor_parallel: s.tpDefault ?? 1,
-      pipeline_parallel: 1,
       gpu_memory_utilization: s.gpuMemDefault ?? 0.85,
       port: 8000,
       max_model_len: "",
