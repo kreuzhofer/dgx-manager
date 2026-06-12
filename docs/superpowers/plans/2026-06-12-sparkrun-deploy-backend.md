@@ -322,6 +322,15 @@ Expected: FAIL — current `discoverRecipes` scans the filesystem and ignores th
 
 - [ ] **Step 3: Write minimal implementation** — replace the body of `recipes.ts`
 
+**CONTRACT NOTE (must not break):** the `Recipe` shape the agent emits over `agent:recipes` is
+consumed verbatim by the server (`recipe.file === recipeFile` matching in `deployments.ts`;
+`recipe.defaults.{tensor_parallel,pipeline_parallel,gpu_memory_utilization}`) and the dashboard
+(deploy-form pre-fill from `defaults.{port,max_model_len,tensor_parallel,pipeline_parallel,
+gpu_memory_utilization}`, `cluster_only` for cluster UI, `name`/`description`/`model` display,
+and the form POSTs `recipeFile = recipe.file`). So **keep the `Recipe` interface unchanged** and
+MAP sparkrun summaries into it. `file` MUST be the sparkrun launch ref (what later flows to
+`sparkrun run <ref>`).
+
 ```ts
 import { execFileSync } from "node:child_process";
 import { parseSparkrunList, type SparkrunRecipeSummary } from "./runtime/sparkrun-parse.js";
@@ -329,7 +338,29 @@ import { parseSparkrunList, type SparkrunRecipeSummary } from "./runtime/sparkru
 /** Pinned in Phase 0 findings; keep agent + provisioner in sync. */
 export const SPARKRUN_PKG = "sparkrun==0.2.38";
 
-export type Recipe = SparkrunRecipeSummary;
+// KEEP the existing Recipe interface (file/name/description/model/container/
+// cluster_only/solo_only/defaults) — downstream depends on it. Do NOT alias it
+// to SparkrunRecipeSummary.
+
+/** Map a sparkrun list summary into the wire Recipe shape the dashboard/server expect. */
+function toRecipe(s: SparkrunRecipeSummary): Recipe {
+  return {
+    file: s.ref,                          // launch ref; flows back as recipeFile -> sparkrun run
+    name: s.name,
+    description: s.description,
+    model: s.model,
+    container: "sparkrun",                // not consumed for vLLM deploy; sparkrun resolves the image
+    cluster_only: s.minNodes > 1 ? true : undefined,
+    solo_only: undefined,                 // list --json has no max_nodes; leave unset
+    defaults: {
+      tensor_parallel: s.tpDefault ?? 1,
+      pipeline_parallel: 1,
+      gpu_memory_utilization: s.gpuMemDefault ?? 0.85,
+      port: 8000,
+      max_model_len: "",
+    },
+  };
+}
 
 /** Enumerate recipes from sparkrun's configured registries. */
 export function discoverRecipes(): Recipe[] {
@@ -339,7 +370,7 @@ export function discoverRecipes(): Recipe[] {
       ["--from", SPARKRUN_PKG, "sparkrun", "list", "--json"],
       { encoding: "utf8", timeout: 30_000 },
     );
-    return parseSparkrunList(out);
+    return parseSparkrunList(out).map(toRecipe);
   } catch (err) {
     console.error("sparkrun list failed:", err);
     return [];
@@ -347,7 +378,35 @@ export function discoverRecipes(): Recipe[] {
 }
 ```
 
-(Delete the old `VLLM_REPO_URL`, clone logic, and YAML parser from this file.)
+(Delete the old `VLLM_REPO_URL`, clone logic, and custom YAML parser from this file. Keep the
+exported `Recipe` interface exactly as it is today.)
+
+- [ ] **Step 3b: Strengthen the test** — assert the MAPPING, not just array-ness:
+
+```ts
+import { describe, it, expect, vi } from "vitest";
+vi.mock("node:child_process", () => ({
+  execFileSync: vi.fn(() => JSON.stringify([
+    { name: "@reg/qwen3-1.7b-vllm", file: "qwen3-1.7b-vllm", model: "Qwen/Qwen3-1.7B",
+      description: "", runtime: "vllm-distributed", min_nodes: 1, tp: 1, gpu_mem: 0.3, registry: "reg" },
+    { name: "@reg/big", file: "big", model: "X", runtime: "vllm", min_nodes: 2, tp: 2, gpu_mem: "", registry: "reg" },
+  ])),
+}));
+import { discoverRecipes } from "./recipes.js";
+
+describe("discoverRecipes", () => {
+  it("maps sparkrun summaries to the wire Recipe shape", () => {
+    const r = discoverRecipes();
+    expect(r).toHaveLength(2);
+    expect(r[0].file).toBe("@reg/qwen3-1.7b-vllm");          // file === launch ref
+    expect(r[0].defaults.tensor_parallel).toBe(1);
+    expect(r[0].defaults.gpu_memory_utilization).toBe(0.3);
+    expect(r[0].cluster_only).toBeUndefined();
+    expect(r[1].cluster_only).toBe(true);                     // min_nodes 2 -> cluster_only
+    expect(r[1].defaults.gpu_memory_utilization).toBe(0.85);  // empty gpu_mem -> default
+  });
+});
+```
 
 - [ ] **Step 4: Run test to verify it passes**
 
