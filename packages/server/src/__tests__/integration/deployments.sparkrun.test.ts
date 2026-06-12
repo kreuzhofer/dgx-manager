@@ -187,6 +187,55 @@ describe("POST /api/deployments — inline recipeYaml happy path", () => {
     expect(msg.payload.recipeFile).toBeUndefined();
     expect(msg.payload.runtime).toBe("vllm");
   });
+
+  it("names the Model record after the recipe's model id (not inline-<ts>)", async () => {
+    await wipeAll();
+    await prisma.node.create({
+      data: {
+        id: "node-inline-2", name: "dgx-spark-inline-02", ipAddress: "192.168.44.96",
+        vramTotal: 122_502, status: "online",
+      },
+    });
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    const yaml = "model: google/gemma-4-12B-it-qat-w4a16-ct\nruntime: vllm\ndefaults:\n  served_model_name: gemma4-12b-unified\n";
+    const res = await request(app)
+      .post("/api/deployments")
+      .send({ nodeId: "node-inline-2", recipeYaml: yaml });
+
+    expect(res.status).toBe(201);
+    const created = await prisma.deployment.findUnique({
+      where: { id: res.body.id }, include: { model: true },
+    });
+    // The HF model id is the title — no opaque `inline-<timestamp>`.
+    expect(created?.model.name).toBe("google/gemma-4-12B-it-qat-w4a16-ct");
+    expect(created?.model.name).not.toMatch(/^inline-\d+$/);
+  });
+
+  it("falls back to served_model_name when the recipe has no top-level model:", async () => {
+    await wipeAll();
+    await prisma.node.create({
+      data: {
+        id: "node-inline-3", name: "dgx-spark-inline-03", ipAddress: "192.168.44.95",
+        vramTotal: 122_502, status: "online",
+      },
+    });
+    const { hub } = makeStubHub();
+    const app = makeApp(hub);
+
+    // command-style recipe (no top-level model:) — served_model_name supplies the label
+    const yaml = "command: vllm serve foo --served-model-name my-alias\nruntime: vllm\ndefaults:\n  served_model_name: my-alias\n";
+    const res = await request(app)
+      .post("/api/deployments")
+      .send({ nodeId: "node-inline-3", recipeYaml: yaml });
+
+    expect(res.status).toBe(201);
+    const created = await prisma.deployment.findUnique({
+      where: { id: res.body.id }, include: { model: true },
+    });
+    expect(created?.model.name).toBe("my-alias");
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@ import { ollamaVramEstimateMB } from "../ollama/vram-estimate.js";
 import { normalizeDisplayName, validateDisplayNameUnique, DisplayNameError } from "../deployments/display-name.js";
 import { isValidVariantSlug } from "./finetune.js";
 import { resolveRecipePath } from "../deployments/recipe-path.js";
-import { validateInlineRecipe } from "../deployments/recipe-inline.js";
+import { validateInlineRecipe, parseInlineRecipeModel } from "../deployments/recipe-inline.js";
 
 export const deploymentsRouter = Router();
 
@@ -325,7 +325,13 @@ deploymentsRouter.post("/", async (req, res) => {
     ? recipeFile.replace(/^recipes\//, "").replace(/\.yaml$/, "")
     : recipeRef
       ? recipeRef.replace(/.*\//, "").replace(/\.yaml$/, "")  // basename, no ext
-      : `inline-${Date.now()}`;
+      // Inline YAML: surface the real model identity (HF model id, falling back
+      // to the served alias) so the dashboard shows a meaningful name instead of
+      // an opaque timestamp. `inline-<ts>` remains only if neither is parseable.
+      : (() => {
+          const meta = inlineRecipeYaml ? parseInlineRecipeModel(inlineRecipeYaml) : {};
+          return meta.model ?? meta.servedModelName ?? `inline-${Date.now()}`;
+        })();
   const modelKey = isOllama ? modelName : vllmModelKey;
   let model = await prisma.model.findUnique({ where: { name: modelKey } });
   if (!model) {
