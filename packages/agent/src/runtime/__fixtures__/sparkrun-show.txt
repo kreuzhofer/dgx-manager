@@ -1,0 +1,41 @@
+Name:         @sparkrun-transitional/qwen3-1.7b-vllm
+Description:  Qwen3 1.7B -- small test model, solo or cluster
+Maintainer:   scitrera.ai <open-source-team@scitrera.com>
+Runtime:      vllm-distributed
+Model:        Qwen/Qwen3-1.7B
+Container:    ghcr.io/spark-arena/dgx-vllm-eugr-nightly-tf5:latest
+Nodes:        1 - unlimited
+
+Defaults:
+  gpu_memory_utilization: 0.3
+  host: 0.0.0.0
+  port: 8000
+  served_model_name: qwen3-1.7b
+  tensor_parallel: 1
+
+Command:
+  vllm serve \
+    {model} \
+    --served-model-name {served_model_name} \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    -tp {tensor_parallel} \
+    --host {host} \
+    --port {port} \
+    --reasoning-parser deepseek_r1 \
+    --trust-remote-code
+
+VRAM Estimation:
+  Model dtype:      bfloat16
+  Model params:     1,700,000,000
+  KV cache dtype:   bfloat16
+  Architecture:     28 layers, 8 KV heads, 128 head_dim
+  Model weights:    3.17 GB
+  Tensor parallel:  1
+  Per-GPU total:    3.17 GB
+  DGX Spark fit:    YES
+
+  GPU Memory Budget:
+    gpu_memory_utilization: 30%
+    Usable GPU memory:     36.3 GB (121 GB x 30%)
+    Available for KV:      33.1 GB
+    Max context tokens:    310,205

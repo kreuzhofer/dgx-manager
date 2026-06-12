@@ -21,6 +21,7 @@ mkdirSync(DATASETS_DIR, { recursive: true });
 
 const upload = multer({ dest: "/tmp/dgx-uploads" });
 
+
 /** Auto-detect dataset format from a parsed JSON row. */
 function detectFormat(row: Record<string, unknown>): string {
   if ("conversations" in row) return "sharegpt";
@@ -51,7 +52,22 @@ async function analyzeFile(
   return { sampleCount: lineCount, detectedFormat };
 }
 
-// List all datasets
+/**
+ * @openapi
+ * /api/datasets:
+ *   get:
+ *     tags: [Datasets]
+ *     summary: List all registered datasets
+ *     description: >
+ *       Returns every Dataset record ordered by creation date descending. Datasets
+ *       can be local JSONL files (uploaded or path-referenced) or HuggingFace
+ *       repository identifiers. The `format` field is auto-detected from the first
+ *       line (sharegpt, openai, instruct, qa, jsonl). Used by the fine-tune job form
+ *       to populate the dataset selector.
+ *     responses:
+ *       '200':
+ *         description: Array of dataset records
+ */
 datasetsRouter.get("/", async (_req, res) => {
   const datasets = await prisma.dataset.findMany({
     orderBy: { createdAt: "desc" },
@@ -59,7 +75,27 @@ datasetsRouter.get("/", async (_req, res) => {
   res.json(datasets);
 });
 
-// Get single dataset
+/**
+ * @openapi
+ * /api/datasets/{id}:
+ *   get:
+ *     tags: [Datasets]
+ *     summary: Get a single dataset record
+ *     description: >
+ *       Returns the Dataset row by ID, including its path, format, sample count,
+ *       and source type. Use this to confirm dataset metadata before attaching it
+ *       to a fine-tune job.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       '200':
+ *         description: Dataset record
+ *       '404':
+ *         description: Dataset not found
+ */
 datasetsRouter.get("/:id", async (req, res) => {
   const dataset = await prisma.dataset.findUnique({
     where: { id: req.params.id },
@@ -68,7 +104,34 @@ datasetsRouter.get("/:id", async (req, res) => {
   res.json(dataset);
 });
 
-// Preview first N rows
+/**
+ * @openapi
+ * /api/datasets/{id}/preview:
+ *   get:
+ *     tags: [Datasets]
+ *     summary: Preview the first N rows of a dataset file
+ *     description: >
+ *       Reads up to `limit` lines (default 10, max 100) from the dataset's JSONL
+ *       file and returns them as a parsed JSON array. Lines that are not valid JSON
+ *       are returned as `{ _raw: string }`. Not available for HuggingFace datasets
+ *       (returns empty preview with a message). Returns 404 if the file is missing
+ *       from disk.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: limit
+ *         required: false
+ *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *         description: Number of rows to return (default 10)
+ *     responses:
+ *       '200':
+ *         description: '{ preview: any[] } or { preview: [], message: string } for HuggingFace datasets'
+ *       '404':
+ *         description: Dataset or file not found
+ */
 datasetsRouter.get("/:id/preview", async (req, res) => {
   const dataset = await prisma.dataset.findUnique({
     where: { id: req.params.id },
@@ -104,7 +167,50 @@ datasetsRouter.get("/:id/preview", async (req, res) => {
   res.json({ preview: rows });
 });
 
-// Create dataset — multipart upload or JSON body
+/**
+ * @openapi
+ * /api/datasets:
+ *   post:
+ *     tags: [Datasets]
+ *     summary: Register a new dataset (upload, path, or HuggingFace)
+ *     description: >
+ *       Supports three intake modes selected by the request: (1) **File upload**
+ *       — multipart/form-data with a `file` field; the file is moved to
+ *       `$SHARED_STORAGE/datasets/{id}/{filename}`, line count and format are
+ *       auto-detected. (2) **Path reference** — JSON body with `path` pointing to
+ *       an existing file on shared storage; metadata is read if the file exists.
+ *       (3) **HuggingFace** — JSON body with `source: "huggingface"` and
+ *       `huggingfaceId` (e.g. `"tatsu-lab/alpaca"`); no file is stored server-side.
+ *       The `format` field is auto-detected from the first JSONL line if not
+ *       explicitly provided (or set to `"auto"`).
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               file: { type: string, format: binary, description: "Dataset file to upload (JSONL)." }
+ *               name: { type: string, description: "Human-readable dataset name." }
+ *               description: { type: string }
+ *               format: { type: string, description: "Format override: jsonl, sharegpt, openai, instruct, qa, auto." }
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name: { type: string }
+ *               description: { type: string }
+ *               format: { type: string }
+ *               source: { type: string, enum: [path, huggingface] }
+ *               path: { type: string, description: "Absolute path on shared storage for source=path." }
+ *               huggingfaceId: { type: string, description: "HuggingFace dataset repo id for source=huggingface." }
+ *     responses:
+ *       '201':
+ *         description: Created dataset record
+ *       '400':
+ *         description: name required, or missing path/huggingfaceId for the chosen source
+ */
 datasetsRouter.post("/", upload.single("file"), async (req, res) => {
   const { name, description, format, source, path, huggingfaceId } = req.body;
 
@@ -205,7 +311,28 @@ datasetsRouter.post("/", upload.single("file"), async (req, res) => {
   res.status(201).json(dataset);
 });
 
-// Delete dataset
+/**
+ * @openapi
+ * /api/datasets/{id}:
+ *   delete:
+ *     tags: [Datasets]
+ *     summary: Delete a dataset record and its uploaded files
+ *     description: >
+ *       Removes the Dataset row from the database. For `source: "upload"` datasets,
+ *       also recursively deletes the dataset's directory under
+ *       `$SHARED_STORAGE/datasets/{id}`. Path-reference and HuggingFace datasets
+ *       have no server-side files to clean up. Broadcasts `dataset:deleted` over SSE.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       '200':
+ *         description: '{ deleted: true }'
+ *       '404':
+ *         description: Dataset not found
+ */
 datasetsRouter.delete("/:id", async (req, res) => {
   const dataset = await prisma.dataset.findUnique({
     where: { id: req.params.id },

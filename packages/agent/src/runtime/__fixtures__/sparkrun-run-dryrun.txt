@@ -1,0 +1,39 @@
+sparkrun v0.2.38
+
+Runtime:   vllm-distributed
+Image:     ghcr.io/spark-arena/dgx-vllm-eugr-nightly-tf5:latest
+Model:     Qwen/Qwen3-1.7B
+Mode:      solo
+
+VRAM Estimation:
+  Model dtype:      bfloat16
+  Model params:     1,700,000,000
+  KV cache dtype:   bfloat16
+  Architecture:     28 layers, 8 KV heads, 128 head_dim
+  Model weights:    3.17 GB
+  Tensor parallel:  1
+  Per-GPU total:    3.17 GB
+  DGX Spark fit:    YES
+
+  GPU Memory Budget:
+    gpu_memory_utilization: 30%
+    Usable GPU memory:     36.3 GB (121 GB x 30%)
+    Available for KV:      33.1 GB
+    Max context tokens:    310,205
+
+Hosts:     --hosts
+  Target:  192.168.44.36
+
+Cluster:   sparkrun_2cf3f3031766
+
+Serve command:
+  vllm serve \
+      Qwen/Qwen3-1.7B \
+      --served-model-name qwen3-1.7b \
+      --gpu-memory-utilization 0.3 \
+      -tp 1 \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --reasoning-parser deepseek_r1 \
+      --trust-remote-code
+

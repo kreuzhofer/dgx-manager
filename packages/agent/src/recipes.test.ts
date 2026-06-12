@@ -1,0 +1,22 @@
+import { describe, it, expect, vi } from "vitest";
+vi.mock("node:child_process", () => ({
+  execFileSync: vi.fn(() => JSON.stringify([
+    { name: "@reg/qwen3-1.7b-vllm", file: "qwen3-1.7b-vllm", model: "Qwen/Qwen3-1.7B",
+      description: "", runtime: "vllm-distributed", min_nodes: 1, tp: 1, gpu_mem: 0.3, registry: "reg" },
+    { name: "@reg/big", file: "big", model: "X", runtime: "vllm", min_nodes: 2, tp: 2, gpu_mem: "", registry: "reg" },
+  ])),
+}));
+import { discoverRecipes } from "./recipes.js";
+
+describe("discoverRecipes", () => {
+  it("maps sparkrun summaries to the wire Recipe shape", () => {
+    const r = discoverRecipes();
+    expect(r).toHaveLength(2);
+    expect(r[0].file).toBe("@reg/qwen3-1.7b-vllm");
+    expect(r[0].defaults.tensor_parallel).toBe(1);
+    expect(r[0].defaults.gpu_memory_utilization).toBe(0.3);
+    expect(r[0].cluster_only).toBeUndefined();
+    expect(r[1].cluster_only).toBe(true);
+    expect(r[1].defaults.gpu_memory_utilization).toBe(0.85);
+  });
+});

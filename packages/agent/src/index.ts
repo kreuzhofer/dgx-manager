@@ -1,16 +1,19 @@
 import WebSocket from "ws";
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { execSync, spawn } from "child_process";
-import { hostname as osHostname } from "os";
+import { hostname as osHostname, homedir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
 import { discoverRecipes } from "./recipes.js";
-import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, isStopping, getTrackedDeployments, reattachLogs, generateLocalModelRecipe, isLaunchInProgress, untrackDeployment } from "./runtime/vllm.js";
-import { classifyDeadContainer } from "./runtime/deploy-status.js";
-import { shouldForceStopSharedContainer, selectContainerOwnerId } from "./runtime/undeploy-policy.js";
+import { untrackDeployment } from "./runtime/vllm.js";
+import { classifyDeadContainer, reconcileDeployStatus } from "./runtime/deploy-status.js";
+import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe } from "./runtime/sparkrun.js";
+import { checkSparkrunDeployments } from "./runtime/sparkrun-metrics.js";
+import { loadDeployments, saveDeployment } from "./runtime/deployment-store.js";
 import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth } from "./runtime/ollama.js";
 import { discoverTrainingRecipes } from "./training-recipes.js";
+import { findInferenceTemplate, applyFinetuneSubstitutions, renderSparkrunFinetuneRecipe } from "./runtime/inference-template.js";
 import { startFinetuneJob, stopFinetuneJob, mergeLoraAdapter, reattachFinetuneJobs } from "./runtime/finetune.js";
 import { quantizeMergedToFp8 } from "./runtime/finetune-quantize.js";
 import { selfAudit } from "./self-audit.js";
@@ -73,6 +76,7 @@ function ipToInt(ip: string): number {
 }
 const METRICS_INTERVAL = 5_000;
 const HEALTH_CHECK_INTERVAL = 15_000;
+const SPARKRUN_ADHOC_DIR = join(homedir(), ".dgx-agent", "adhoc");
 const RECONNECT_BASE = 1_000;
 const RECONNECT_MAX = 30_000;
 
@@ -167,49 +171,26 @@ function connect() {
 
   /** Setup tasks that run after successful registration (either nodeId or token flow). */
   function postRegistrationSetup() {
-    // Reconcile tracked deployments after restart.
-    //
-    // Important: this runs on every WS reconnect, not just after a full agent
-    // process restart. A WS-only reconnect (e.g. server container redeploy)
-    // leaves the in-process `running` map intact — the launch subprocess and
-    // its log forwarder are still alive. In that case we must NOT report
-    // "failed" just because no docker container exists yet; the subprocess
-    // could simply still be downloading or building. Reporting "failed" in
-    // that window flips the deployment to failed in the DB while bytes are
-    // still streaming to disk.
-    //
-    // Decision tree for each tracked deployment on reconnect:
-    //   1. Launch subprocess still alive in this process → in-progress, do
-    //      nothing. The existing log/phase stream will drive status.
-    //   2. Container running → "running" (post-restart reattach).
-    //   3. Container not running AND subprocess dead → "failed".
-    const tracked = getTrackedDeployments();
-    if (tracked.length > 0) {
-      console.log(`Reconciling ${tracked.length} tracked deployment(s)`);
-      const containerUp = isVllmContainerRunning();
-      for (const t of tracked) {
-        if (isLaunchInProgress(t.deploymentId)) {
-          console.log(`[reconcile] ${t.deploymentId}: launch subprocess still alive, leaving status to existing log stream`);
-          continue;
-        }
+    // Reconcile sparkrun deployments from the persistent store.
+    // On a WS-only reconnect the sparkrun workload may still be running as a
+    // separate cluster job — we use check-job liveness (isWorkloadRunning) to
+    // determine status rather than tracking a local subprocess.
+    const sparkrunDeployments = loadDeployments().filter((d) => d.kind === "sparkrun");
+    if (sparkrunDeployments.length > 0) {
+      console.log(`Reconciling ${sparkrunDeployments.length} sparkrun deployment(s)`);
+      for (const d of sparkrunDeployments) {
+        const target = d.clusterId ?? d.recipeFile;
+        const hosts = d.clusterNodes ?? [];
+        const listed = isWorkloadRunning(target, hosts);
+        const status = reconcileDeployStatus({ launcherAlive: false, listed });
+        console.log(`[reconcile-sparkrun] ${d.deploymentId}: target=${target} listed=${listed} → ${status}`);
         sendMsg("agent:deployment:status", {
-          deploymentId: t.deploymentId,
-          status: containerUp ? "running" : "failed",
-          port: t.port,
-          error: containerUp ? undefined : "Container not running after agent restart",
+          deploymentId: d.deploymentId,
+          status,
+          port: d.port,
+          error: status === "failed" ? "Workload not running after agent restart" : undefined,
         });
-        // Reattach to docker logs for live streaming
-        if (containerUp) {
-          reattachLogs(t.deploymentId, (line) => {
-            sendMsg("agent:deployment:log", { deploymentId: t.deploymentId, log: line });
-          });
-        }
       }
-    } else if (isVllmContainerRunning()) {
-      // Container running but no tracked deployment — likely a Ray worker
-      // started by another node's head agent. Do NOT stop it automatically
-      // as it may be part of an active cluster deployment.
-      console.log("Found vLLM container with no local tracking — may be a cluster worker, leaving it running");
     }
 
     // Reattach to any running finetune containers (survives agent restart)
@@ -249,11 +230,11 @@ function connect() {
       if (ws?.readyState !== WebSocket.OPEN) return;
       const m = await collectMetrics();
 
-      // Enrich with vLLM deployment metrics
+      // Enrich with vLLM/sparkrun deployment metrics
       let activeRequests: number | null = null;
       let tps: number | null = null;
       try {
-        const statuses = await checkDeployments();
+        const statuses = await checkSparkrunDeployments();
         const active = statuses.filter((s) => s.containerRunning);
         if (active.length > 0) {
           activeRequests = active.reduce((sum, s) => sum + (s.requestsRunning ?? 0) + (s.requestsWaiting ?? 0), 0);
@@ -283,15 +264,14 @@ function connect() {
     healthTimer = setInterval(async () => {
       if (ws?.readyState !== WebSocket.OPEN) return;
       try {
-        const statuses = await checkDeployments();
+        const statuses = await checkSparkrunDeployments();
         for (const status of statuses) {
-          // Report if container died or has errors
+          // Report if container died or has errors.
+          // Intentional stops (cmd:undeploy set stopping===true in the store)
+          // are already excluded by checkSparkrunDeployments, so reaching here
+          // means the workload died on its own — treat as a crash.
           if (!status.containerRunning && !status.alive) {
-            // Distinguish an intentional stop (user cmd:undeploy → stopRecipe
-            // marked the instance `stopping`) from a real crash, so the UI
-            // shows "stopped" instead of a misleading "failed".
-            const intentional = isStopping(status.deploymentId);
-            const verdict = classifyDeadContainer(intentional, status.error);
+            const verdict = classifyDeadContainer(false, status.error);
             sendMsg("agent:deployment:status", {
               deploymentId: status.deploymentId,
               status: verdict.status,
@@ -571,112 +551,96 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         break;
       }
 
-      // vLLM deployment
-      if (!recipeFile) {
-        sendMsg("agent:deployment:status", {
-          deploymentId,
-          status: "failed",
-          error: "No recipeFile specified",
-        });
-        return;
-      }
-      try {
-        sendMsg("agent:deployment:status", { deploymentId, status: "starting" });
-        let lastPhase = "starting";
-        // Auto-skip the model-download phase when the recipe's `model:` field
-        // is a local path (e.g. `/workspace/outputs/.../merged`). Without
-        // this, run-recipe.sh's hf-download step interprets the path as a
-        // HuggingFace repo id ("Repo id must be in the form 'repo_name' or
-        // 'namespace/repo_name'") and the deploy fails before vLLM starts.
-        // cmd:finetune:deploy already does this; cmd:deploy now matches.
-        let recipeModelIsLocal = false;
+      // sparkrun deployment — triggered by inlineRecipeYaml or an explicit recipeRef field
+      const { inlineRecipeYaml, recipeRef: payloadRecipeRef, displayName: payloadDisplayName } = msg.payload as {
+        inlineRecipeYaml?: string;
+        recipeRef?: string;
+        displayName?: string;
+      };
+      if (inlineRecipeYaml != null || payloadRecipeRef != null) {
         try {
-          const recipeContent = readFileSync(`${process.env.VLLM_REPO_PATH || `${process.env.SHARED_STORAGE || "/mnt/tank"}/src/github/spark-vllm-docker`}/${recipeFile}`, "utf-8");
-          const m = recipeContent.match(/^model:\s*(.+)$/m);
-          if (m && m[1].trim().startsWith("/")) recipeModelIsLocal = true;
-        } catch { /* if we can't read the recipe, fall back to default behavior */ }
-        const port = launchRecipe(
-          deploymentId,
-          recipeFile,
-          {
+          sendMsg("agent:deployment:status", { deploymentId, status: "starting" });
+          let lastPhase = "starting";
+
+          // Resolve the recipe reference: inline YAML wins, then explicit recipeRef
+          const recipeRef = inlineRecipeYaml != null
+            ? writeInlineRecipe(deploymentId, inlineRecipeYaml, SPARKRUN_ADHOC_DIR)
+            : payloadRecipeRef!;
+
+          // Build hosts: clusterNodes head-first when provided, else local solo
+          const hosts: string[] = (Array.isArray(clusterNodes) && clusterNodes.length > 0)
+            ? clusterNodes as string[]
+            : ["localhost"];
+
+          const opts = {
+            hosts,
+            tp: config?.tensorParallel as number | undefined,
+            pp: config?.pipelineParallel as number | undefined,
             port: (config?.port as number) ?? 8000,
-            gpuMem: config?.gpuMem as number,
-            maxModelLen: config?.maxModelLen as number,
-            tensorParallel: config?.tensorParallel as number,
-            pipelineParallel: config?.pipelineParallel as number,
-            clusterNodes,
-            clusterNodeFastIps,
-            skipSetup: recipeModelIsLocal,
-            servedModelName,
-          },
-          (line) => {
-            // Collapse tqdm carriage-return updates so the log viewer doesn't
-            // accumulate one massive line per `Fetching ... files:` tick.
-            const cleaned = collapseCarriageReturns(line);
-            sendMsg("agent:deployment:log", { deploymentId, log: cleaned });
+            gpuMem: config?.gpuMem as number | undefined,
+            maxModelLen: config?.maxModelLen as number | undefined,
+            servedModelName: servedModelName ?? undefined,
+            // For inline deployments recipeRef is a temp file path — use the
+            // server-sent ref, display name, or deployment id as the human-
+            // readable name instead. recipeRef (the temp path) is still passed
+            // as the first positional arg to launchSparkrun below.
+            recipeName: payloadRecipeRef ?? payloadDisplayName ?? deploymentId,
+          };
 
-            // Parse aggregate download progress (huggingface_hub multi-file
-            // tqdm) and emit a throttled progress event for the UI bar.
-            const progress = parseFetchingProgress(line);
-            if (progress) emitDeploymentProgress(deploymentId, progress);
+          launchSparkrun(
+            deploymentId,
+            recipeRef,
+            opts,
+            (line) => {
+              const cleaned = collapseCarriageReturns(line);
+              sendMsg("agent:deployment:log", { deploymentId, log: cleaned });
 
-            // Detect deployment phase from log output
-            const phase = detectPhase(line);
-            if (phase && phase !== lastPhase) {
-              lastPhase = phase;
-              sendMsg("agent:deployment:status", {
-                deploymentId,
-                status: phase,
-                port: phase === "running" ? (config?.port as number) ?? 8000 : undefined,
-              });
-            }
-          },
-          (code) => {
-            // If we're being undeployed, don't report — the undeploy handler owns status
-            if (isStopping(deploymentId)) {
-              console.log(`[deploy] run-recipe.sh exited ${code} during undeploy, ignoring`);
-              return;
-            }
-            // run-recipe.sh exits after launching the docker container.
-            // Code 0 = container launched successfully (still running).
-            // Code != 0 = setup/launch failed.
-            if (code === 0) {
-              // Container should be running — verify and keep status as running
-              if (isVllmContainerRunning()) {
-                console.log(`[deploy] run-recipe.sh exited 0, container still running`);
+              const progress = parseFetchingProgress(line);
+              if (progress) emitDeploymentProgress(deploymentId, progress);
+
+              const phase = detectPhase(line);
+              if (phase && phase !== lastPhase) {
+                lastPhase = phase;
+                sendMsg("agent:deployment:status", {
+                  deploymentId,
+                  status: phase,
+                  port: phase === "running" ? opts.port : undefined,
+                });
+              }
+            },
+            (code) => {
+              // sparkrun run exits 0 once the workload is launched (--no-follow).
+              // Non-zero means the launch itself failed.
+              if (code === 0) {
+                console.log(`[sparkrun:deploy] launcher exited 0 for ${deploymentId}`);
+                // Workload should now be discoverable via check-job; health-check
+                // loop will confirm and report "running".
               } else {
                 sendMsg("agent:deployment:status", {
                   deploymentId,
                   status: "failed",
-                  error: "Container not running after launch script exited",
+                  error: `Sparkrun launch failed with exit code ${code}`,
                 });
-                untrackDeployment(deploymentId);
               }
-            } else {
-              // Check if container started despite script error (e.g. download warning)
-              if (isVllmContainerRunning()) {
-                console.log(`[deploy] run-recipe.sh exited ${code}, but container is running`);
-                sendMsg("agent:deployment:status", { deploymentId, status: "running", port });
-              } else {
-                sendMsg("agent:deployment:status", {
-                  deploymentId,
-                  status: "failed",
-                  error: `Launch failed with exit code ${code}`,
-                });
-                untrackDeployment(deploymentId);
-              }
-            }
-          }
-        );
-        // Status updates are driven by log phase detection, not sent here
-      } catch (err) {
-        sendMsg("agent:deployment:status", {
-          deploymentId,
-          status: "failed",
-          error: String(err),
-        });
-        untrackDeployment(deploymentId);
+            },
+          );
+          // Status updates are driven by log phase detection and health-check loop
+        } catch (err) {
+          sendMsg("agent:deployment:status", {
+            deploymentId,
+            status: "failed",
+            error: String(err),
+          });
+        }
+        break;
       }
+
+      // Unknown deploy kind (no inlineRecipeYaml, no recipeRef, no ollama runtime)
+      sendMsg("agent:deployment:status", {
+        deploymentId,
+        status: "failed",
+        error: "No recipeRef or inlineRecipeYaml specified",
+      });
       break;
     }
 
@@ -699,32 +663,26 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             return;
           }
 
-          // All vLLM deployments on a node share ONE `vllm_node` container, and
-          // forceStopVllm is scoped to that container *name*. Only force-stop it
-          // if THIS deployment owns the running container — otherwise undeploying
-          // an unrelated (often already-dead) deployment would tear down whatever
-          // is actively serving. Owner comes from the persistent store, computed
-          // BEFORE stopRecipe (which drops this id from the store), so it holds
-          // across agent restarts where the in-memory map is empty.
-          const ownerId = selectContainerOwnerId(getTrackedDeployments());
-          const ownsContainer = shouldForceStopSharedContainer(
-            deploymentId,
-            ownerId ? [ownerId] : [],
-            isVllmContainerRunning(),
-          );
-
-          // Safe no-op (returns false, touches nothing) when this deployment
-          // isn't the tracked running instance; kills its own wrapper otherwise.
-          stopRecipe(deploymentId, clusterNodes);
-
-          if (!ownsContainer) {
-            // A different deployment owns the live container (or nothing is
-            // running). Drop only this record; leave the serving container alone.
-            untrackDeployment(deploymentId);
+          // sparkrun deployment — identified by presence in the deployment store
+          const stored = loadDeployments().find((d) => d.deploymentId === deploymentId);
+          if (stored != null) {
             sendMsg("agent:deployment:log", {
               deploymentId,
-              log: "\n=== Removed deployment record — the node's vLLM container belongs to another deployment and was left running ===\n",
+              log: "\n=== Stop requested by user — stopping sparkrun workload ===\n",
             });
+            // Mark stopping BEFORE calling stopSparkrun so that any health tick
+            // racing between here and the workload vanishing sees stopping===true
+            // and does NOT classify the deployment as failed.
+            saveDeployment({ ...stored, stopping: true });
+            const target = stored.clusterId ?? stored.recipeFile;
+            const hosts = stored.clusterNodes ?? [];
+            try {
+              stopSparkrun(deploymentId, target, hosts, stored.tp);
+            } catch (stopErr) {
+              console.warn(`[undeploy] sparkrun stop error (continuing): ${stopErr}`);
+            }
+            // Clean up any inline recipe YAML file we may have written
+            removeInlineRecipe(deploymentId, SPARKRUN_ADHOC_DIR);
             sendMsg("agent:deployment:status", {
               deploymentId,
               status: "stopped",
@@ -733,33 +691,12 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             return;
           }
 
-          // This deployment owns the container — stop it for real.
-          sendMsg("agent:deployment:log", {
+          // No tracked deployment found — report stopped (idempotent)
+          sendMsg("agent:deployment:status", {
             deploymentId,
-            log: "\n=== Stop requested by user — shutting down vLLM container ===\n",
+            status: "stopped",
+            deleteAfter: deleteAfter || false,
           });
-          forceStopVllm(clusterNodes);
-
-          // Wait for container to actually stop
-          let retries = 10;
-          while (retries > 0 && isVllmContainerRunning()) {
-            await new Promise((r) => setTimeout(r, 2000));
-            retries--;
-          }
-
-          if (isVllmContainerRunning()) {
-            sendMsg("agent:deployment:status", {
-              deploymentId,
-              status: "failed",
-              error: "Container did not stop within timeout",
-            });
-          } else {
-            sendMsg("agent:deployment:status", {
-              deploymentId,
-              status: "stopped",
-              deleteAfter: deleteAfter || false,
-            });
-          }
         } catch (err) {
           sendMsg("agent:deployment:status", {
             deploymentId,
@@ -875,7 +812,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
     case "cmd:finetune:deploy": {
       const {
         jobId, deploymentId, modelPath, deployContainer, config,
-        clusterNodes, clusterNodeFastIps, modelName, recipeFile, artifactVariant,
+        clusterNodes, modelName, recipeFile, artifactVariant,
       } = msg.payload as {
         jobId: string;
         deploymentId: string;
@@ -889,89 +826,115 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         artifactVariant?: "bf16" | "fp8";
       };
 
-      const isCluster = Array.isArray(clusterNodes) && clusterNodes.length > 1;
       const port = (config?.port as number) ?? 8000;
       const gpuMem = (config?.gpuMem as number) ?? 0.85;
       const maxModelLen = (config?.maxModelLen as number) ?? 4096;
       const tensorParallel = config?.tensorParallel as number | undefined;
       const pipelineParallel = config?.pipelineParallel as number | undefined;
+      const servedModelName = modelName || jobId;
 
-      console.log(`[finetune] Deploying merged model from ${modelPath} (container: ${deployContainer || "vllm-node"}, cluster: ${isCluster ? clusterNodes!.length + " nodes" : "solo"}${recipeFile ? `, recipe: ${recipeFile}` : ""})`);
+      console.log(`[finetune] Deploying merged model via sparkrun from ${modelPath} (container: ${deployContainer || "vllm-node"}${recipeFile ? `, recipe: ${recipeFile}` : ""})`);
 
       try {
-        // Resolve the training recipe's directory on the NFS share so
-        // generateLocalModelRecipe can pick up an `inference.yaml` /
-        // `inference.j2` override shipped alongside the recipe. Falls back
-        // to undefined → fully auto-generated recipe when the deploy
-        // payload doesn't carry a recipeFile.
+        // Resolve the recipe YAML to deploy.
+        // PREFER an inference template if the training recipe ships one —
+        // those templates are sparkrun-compatible and carry hand-tuned
+        // launch flags for the specific model family.
+        // Fall back to synthesising a generic sparkrun recipe from params.
+        let recipeYaml: string;
         const recipeDir = recipeFile
           ? join(FINETUNE_RECIPES_REPO, recipeFile)
           : undefined;
+        const variantId = artifactVariant ?? "bf16";
+        const templatePath = recipeDir
+          ? findInferenceTemplate(recipeDir, variantId)
+          : null;
 
-        const generatedRecipeFile = generateLocalModelRecipe({
-          jobId,
-          modelPath,
-          container: deployContainer || "vllm-node",
+        if (templatePath) {
+          console.log(`[finetune] Using inference template: ${templatePath}`);
+          const raw = readFileSync(templatePath, "utf-8");
+          recipeYaml = applyFinetuneSubstitutions(raw, {
+            modelPath,
+            servedModelName,
+          });
+        } else {
+          console.log(`[finetune] No inference template found — synthesising sparkrun recipe`);
+          recipeYaml = renderSparkrunFinetuneRecipe({
+            mergedModelPath: modelPath,
+            servedModelName,
+            container: deployContainer || "vllm-node",
+            maxModelLen,
+            gpuMem,
+          });
+        }
+
+        // Write the resolved YAML to shared storage so sparkrun can locate it.
+        const recipesDir = `${process.env.SHARED_STORAGE || "/mnt/tank"}/recipes`;
+        mkdirSync(recipesDir, { recursive: true });
+        const recipeFilePath = join(recipesDir, `finetune-${jobId.slice(0, 12)}.yaml`);
+        writeFileSync(recipeFilePath, recipeYaml, "utf-8");
+        console.log(`[finetune] Wrote sparkrun recipe to ${recipeFilePath}`);
+
+        // Build hosts: clusterNodes head-first when provided, else local solo.
+        const hosts: string[] = (Array.isArray(clusterNodes) && clusterNodes.length > 0)
+          ? clusterNodes
+          : ["localhost"];
+
+        const opts = {
+          hosts,
+          tp: tensorParallel,
+          pp: pipelineParallel,
           port,
-          gpuMemoryUtilization: gpuMem,
+          gpuMem,
           maxModelLen,
-          // For cluster mode, both the recipe YAML's solo_only marker AND
-          // the actual launch topology need to be set. The YAML drops
-          // solo_only; the command gains `--distributed-executor-backend
-          // ray` + a SPREAD placement env. tensorParallel/pipelineParallel
-          // are embedded as `defaults` AND substituted into the command
-          // template — without this, run-recipe.py silently dropped the
-          // `--tp N` CLI override (no `{tensor_parallel}` placeholder to
-          // substitute into) and vLLM defaulted to TP=1 even though Ray
-          // was correctly spanning the cluster.
-          isCluster,
-          tensorParallel: tensorParallel ?? 1,
-          pipelineParallel: pipelineParallel ?? 1,
-          servedModelName: modelName,
-          recipeDir,
-          artifactVariant: artifactVariant ?? "bf16",
-        });
+          servedModelName,
+          recipeName: servedModelName,
+        };
 
         sendMsg("agent:deployment:status", { deploymentId, status: "starting" });
         let lastPhase = "starting";
-        launchRecipe(
+
+        launchSparkrun(
           deploymentId,
-          generatedRecipeFile,
-          {
-            port,
-            gpuMem,
-            maxModelLen,
-            tensorParallel,
-            pipelineParallel,
-            clusterNodes: isCluster ? clusterNodes : undefined,
-            clusterNodeFastIps: isCluster ? clusterNodeFastIps : undefined,
-            skipSetup: true,
-          },
+          recipeFilePath,
+          opts,
           (line) => {
-            sendMsg("agent:deployment:log", { deploymentId, log: line });
+            const cleaned = collapseCarriageReturns(line);
+            sendMsg("agent:deployment:log", { deploymentId, log: cleaned });
+
+            const progress = parseFetchingProgress(line);
+            if (progress) emitDeploymentProgress(deploymentId, progress);
+
             const phase = detectPhase(line);
             if (phase && phase !== lastPhase) {
               lastPhase = phase;
-              sendMsg("agent:deployment:status", { deploymentId, status: phase });
+              sendMsg("agent:deployment:status", {
+                deploymentId,
+                status: phase,
+                port: phase === "running" ? port : undefined,
+              });
             }
           },
           (code) => {
-            if (code === 0 && isVllmContainerRunning()) {
-              console.log(`[finetune] Deploy run-recipe.sh exited 0, container running`);
-            } else if (!isVllmContainerRunning()) {
+            // sparkrun run exits 0 once the workload is launched (--no-follow).
+            // Non-zero means the launch itself failed.
+            if (code === 0) {
+              console.log(`[finetune] sparkrun launcher exited 0 for ${deploymentId}`);
+              // Workload should now be discoverable via check-job; health-check
+              // loop will confirm and report "running".
+            } else {
               sendMsg("agent:deployment:status", {
-                deploymentId, status: "failed",
-                error: code === 0 ? "Container not running after launch" : `Launch failed with exit code ${code}`,
+                deploymentId,
+                status: "failed",
+                error: `Sparkrun finetune deploy failed with exit code ${code}`,
               });
-              untrackDeployment(deploymentId);
             }
-          }
+          },
         );
       } catch (err) {
         sendMsg("agent:deployment:status", {
           deploymentId, status: "failed", error: String(err),
         });
-        untrackDeployment(deploymentId);
       }
       break;
     }

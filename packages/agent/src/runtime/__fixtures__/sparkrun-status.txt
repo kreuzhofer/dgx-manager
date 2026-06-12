@@ -1,0 +1,6 @@
+Job: @sparkrun-transitional/qwen3-1.7b-vllm  (tp=1)  [8a0bcc7080b5]  (1 container(s))
+  solo       192.168.44.36                            Up 3 minutes              sparkrun-eugr-vllm-tf5
+  logs: sparkrun logs 8a0bcc7080b5
+  stop: sparkrun stop 8a0bcc7080b5
+
+Total: 1 container(s) across 1 host(s)

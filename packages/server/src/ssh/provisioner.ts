@@ -2,6 +2,45 @@ import { sshExec, SshResult } from "./executor.js";
 import { SHARED_STORAGE } from "../env.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 
+// ---------------------------------------------------------------------------
+// sparkrun command-string builders (pure, exported for callers + tests)
+// ---------------------------------------------------------------------------
+
+export const SPARKRUN_PKG = "sparkrun==0.2.38";
+const SPARKRUN = `uvx --from ${SPARKRUN_PKG} sparkrun`;
+
+/** Audit: is sparkrun runnable via uvx on this host? */
+export function sparkrunAuditCmd(): string {
+  return `${SPARKRUN} --version >/dev/null 2>&1 && echo installed`;
+}
+
+/** Non-interactive per-host setup steps (run over SSH on the node). */
+export function sparkrunSetupCmds(host: string): string[] {
+  return [
+    `${SPARKRUN} setup install -H ${host}`,
+    `${SPARKRUN} setup docker-group -H ${host}`,
+    `${SPARKRUN} setup earlyoom -H ${host}`,
+  ];
+}
+
+/**
+ * Cluster-wide SSH mesh setup (all nodes must trust each other).
+ * This is a cluster-level op — do NOT wire into per-node provisioning.
+ * Exported for callers that orchestrate multi-node setup.
+ */
+export function sparkrunMeshCmd(hosts: string[]): string {
+  return `${SPARKRUN} setup ssh -H ${hosts.join(",")}`;
+}
+
+/**
+ * OPT-IN, EXPENSIVE (~15 min): pre-build the sparkrun image on a host by
+ * launching a real recipe run.  Do NOT call this inside auditNode/provisionNode
+ * automatically — it blocks a node for up to 15 minutes.
+ */
+export function sparkrunPrewarmCmd(recipe: string, host: string): string {
+  return `${SPARKRUN} run ${recipe} -H ${host} --no-follow`;
+}
+
 export interface PrereqCheck {
   name: string;
   status: "green" | "yellow" | "red";
@@ -132,6 +171,19 @@ export async function auditNode(host: string, nodeId?: string): Promise<Provisio
         detail: r.stdout.includes("mounted") ? "Mounted" : "Not mounted — configure NFS manually",
       }),
     },
+    {
+      // sparkrun orchestrates multi-node vLLM launches via uvx; no sudo
+      // needed — runs entirely as the SSH user under ~/.local/bin.
+      name: "sparkrun",
+      cmd: sparkrunAuditCmd(),
+      eval: (r) => ({
+        name: "sparkrun",
+        status: r.stdout.includes("installed") ? "green" : "yellow",
+        detail: r.stdout.includes("installed")
+          ? `Installed (${SPARKRUN_PKG})`
+          : "Not installed — can auto-install (no sudo needed)",
+      }),
+    },
   ];
 
   for (const item of checkItems) {
@@ -204,6 +256,29 @@ export async function provisionNode(host: string, checks: PrereqCheck[], nodeId?
           "sudo systemctl restart ollama",
         ].join(" && "), { timeout: 300_000 });
         break;
+      case "sparkrun": {
+        // Run setup steps in sequence; no sudo required.
+        const setupCmds = sparkrunSetupCmds(host);
+        let lastResult: SshResult = { code: 0, stdout: "", stderr: "" };
+        for (const cmd of setupCmds) {
+          lastResult = await sshExec(host, cmd, { timeout: 120_000 });
+          if (lastResult.code !== 0) break;
+        }
+        r = lastResult;
+        // Remind operators that image pre-warm is opt-in (~15 min).
+        console.log(
+          `[provisioner] sparkrun setup complete for ${host}. ` +
+          `Image pre-warm is opt-in (first deploy will build ~15 min). ` +
+          `To pre-warm manually: sparkrunPrewarmCmd("<recipe>", "${host}")`
+        );
+        emit(
+          "sparkrun",
+          "info",
+          `Image pre-warm is opt-in (~15 min first-build). ` +
+          `Use sparkrunPrewarmCmd() to trigger it explicitly.`
+        );
+        break;
+      }
       default:
         continue;
     }

@@ -12,6 +12,7 @@ export const agentBundleRouter = Router();
 const BUNDLES_DIR = join(__dirname, "../../agent-bundles");
 const AGENT_PKG_PATH = join(__dirname, "../../../agent/package.json");
 
+
 const SUPPORTED_ARCHES = ["amd64", "arm64"] as const;
 type Arch = (typeof SUPPORTED_ARCHES)[number];
 
@@ -31,13 +32,55 @@ function getAgentVersion(): string {
   }
 }
 
-// GET /api/agent/version — return the bundled agent version
+/**
+ * @openapi
+ * /api/agent/version:
+ *   get:
+ *     tags: [Agent bundle]
+ *     summary: Return the bundled agent version
+ *     description: >
+ *       Returns the version string from the agent's `package.json` that was baked
+ *       into the server image at build time. This is the same value as
+ *       GET /api/nodes/agent-version and is used by the install script to
+ *       verify the downloaded bundle matches expectations.
+ *     responses:
+ *       '200':
+ *         description: '{ version: string }'
+ */
 agentBundleRouter.get("/version", (_req, res) => {
   res.json({ version: getAgentVersion() });
 });
 
-// GET /api/agent/bundle?arch=amd64|arm64 — serve the agent tarball for the requested arch.
-// When arch is omitted, falls back to the manager's own arch (back-compat for pre-multi-arch agents).
+/**
+ * @openapi
+ * /api/agent/bundle:
+ *   get:
+ *     tags: [Agent bundle]
+ *     summary: Download the agent tarball for a given architecture
+ *     description: >
+ *       Serves the prebuilt agent bundle (`agent-bundle-{arch}.tar.gz`) for the
+ *       requested CPU architecture. The install script and the in-agent self-updater
+ *       (`cmd:update`) download from this endpoint. Built by
+ *       `scripts/build-agent-bundles.sh` via docker buildx and baked into the server
+ *       image. Falls back to the manager's own arch if `arch` is not provided
+ *       (backward compatibility for pre-multi-arch agents).
+ *     parameters:
+ *       - in: query
+ *         name: arch
+ *         required: false
+ *         schema: { type: string, enum: [amd64, arm64] }
+ *         description: Target CPU architecture. Defaults to the manager's own arch.
+ *     responses:
+ *       '200':
+ *         description: Agent tarball (application/gzip)
+ *         content:
+ *           application/gzip:
+ *             schema: { type: string, format: binary }
+ *       '400':
+ *         description: Unsupported architecture
+ *       '404':
+ *         description: Bundle not found — run scripts/build-agent-bundles.sh
+ */
 agentBundleRouter.get("/bundle", (req, res) => {
   const requested = typeof req.query.arch === "string" ? req.query.arch : undefined;
   let arch: Arch;
@@ -62,7 +105,27 @@ agentBundleRouter.get("/bundle", (req, res) => {
   createReadStream(path).pipe(res);
 });
 
-// GET /api/agent/install.sh — serve the install script with server URL baked in
+/**
+ * @openapi
+ * /api/agent/install.sh:
+ *   get:
+ *     tags: [Agent bundle]
+ *     summary: Generate and serve the agent bootstrap install script
+ *     description: >
+ *       Returns a bash script that, when run with `sudo bash -s -- --token TOKEN`,
+ *       installs all prerequisites (Docker, nvidia-container-toolkit, Node.js 22,
+ *       Ollama, uv/uvx) and the DGX Manager agent on a fresh DGX node. The script
+ *       auto-detects the node architecture (x86_64/aarch64), downloads the matching
+ *       agent bundle from GET /api/agent/bundle, installs it under `/opt/dgx-agent`,
+ *       and creates a systemd service that connects back to the manager. The server
+ *       URL is baked into the script from `MANAGER_ADVERTISE_HOST`/`PORT` env vars.
+ *     responses:
+ *       '200':
+ *         description: Bash install script (text/plain)
+ *         content:
+ *           text/plain:
+ *             schema: { type: string }
+ */
 agentBundleRouter.get("/install.sh", (req, res) => {
   const host = process.env.MANAGER_ADVERTISE_HOST || req.hostname;
   const port = process.env.PORT || "4000";

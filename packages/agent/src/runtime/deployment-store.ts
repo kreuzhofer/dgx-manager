@@ -9,6 +9,17 @@ export interface TrackedDeployment {
   port: number;
   startedAt: string;
   clusterNodes?: string[];
+  clusterId?: string;
+  tp?: number;
+  /** Discriminates deployment kind so each reconcile loop only processes its own entries. */
+  kind?: "sparkrun" | "vllm";
+  /**
+   * Set to `true` by the cmd:undeploy handler BEFORE calling stopSparkrun so
+   * that checkSparkrunDeployments can distinguish an intentional stop from a
+   * real crash when the health tick lands between the undeploy command and the
+   * workload actually vanishing.
+   */
+  stopping?: boolean;
 }
 
 // Default to a user-writable location. The agent runs as a non-root systemd

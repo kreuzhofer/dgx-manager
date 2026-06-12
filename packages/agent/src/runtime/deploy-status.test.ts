@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyDeadContainer } from "./deploy-status.js";
+import { classifyDeadContainer, reconcileDeployStatus } from "./deploy-status.js";
 
 describe("classifyDeadContainer", () => {
   // An intentional stop (user cmd:undeploy → stopRecipe set `stopping`) must be
@@ -24,5 +24,17 @@ describe("classifyDeadContainer", () => {
       status: "failed",
       error: "CUDA illegal memory access",
     });
+  });
+});
+
+describe("reconcileDeployStatus", () => {
+  // Invariant: listed workload is always "running" regardless of launcher state.
+  // Unlisted + alive launcher means the workload is still coming up ("deploying").
+  // Unlisted + dead launcher means the workload failed to start or crashed ("failed").
+  it("running when listed, deploying when launcher alive but not listed, else failed", () => {
+    expect(reconcileDeployStatus({ launcherAlive: false, listed: true })).toBe("running");
+    expect(reconcileDeployStatus({ launcherAlive: true, listed: true })).toBe("running");
+    expect(reconcileDeployStatus({ launcherAlive: true, listed: false })).toBe("deploying");
+    expect(reconcileDeployStatus({ launcherAlive: false, listed: false })).toBe("failed");
   });
 });
