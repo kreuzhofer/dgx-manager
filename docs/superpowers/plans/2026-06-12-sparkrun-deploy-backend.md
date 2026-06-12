@@ -551,86 +551,65 @@ git add packages/agent/src/runtime/sparkrun-args.ts packages/agent/src/runtime/s
 git commit -m "feat(agent): buildSparkrunArgs pure helper for sparkrun run argv"
 ```
 
-### Task 5: `sparkrun status` parser (liveness for checkDeployments + reconcile)
+### Task 5: `parseClusterId` (REVISED per Phase 0 — drop brittle status-list parser)
+
+**Rationale:** Phase 0 showed `status` is human text and the clean liveness probe is
+`sparkrun cluster check-job <clusterId|recipe> -H <hosts>` (exit 0 = running) — see Task 6.
+Reconciliation works off the **stored cluster ID per deployment** + check-job, so a full
+status-list parser is unnecessary (YAGNI). The one pure thing we need from sparkrun output is to
+**capture the cluster ID** that `run` prints (`Cluster: sparkrun_<hex>`), to store for later
+`stop`/`check-job`.
 
 **Files:**
 - Modify: `packages/agent/src/runtime/sparkrun-parse.ts`
 - Test: `packages/agent/src/runtime/sparkrun-parse.test.ts`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing test** (fixture `sparkrun-run-dryrun.txt` contains a real
+  `Cluster:   sparkrun_2cf3f3031766` line)
 
 ```ts
-import { parseSparkrunStatus, type SparkrunWorkload } from "./sparkrun-parse.js";
+import { parseClusterId } from "./sparkrun-parse.js";
 
-const statusFixture = readFileSync(
-  join(__dirname, "__fixtures__/sparkrun-status.txt"),
+const runFixture = readFileSync(
+  join(__dirname, "__fixtures__/sparkrun-run-dryrun.txt"),
   "utf8",
 );
 
-describe("parseSparkrunStatus", () => {
-  it("lists running workloads keyed by ref with their port/host", () => {
-    const wls: SparkrunWorkload[] = parseSparkrunStatus(statusFixture);
-    expect(Array.isArray(wls)).toBe(true);
-    for (const w of wls) {
-      expect(typeof w.ref).toBe("string");
-    }
+describe("parseClusterId", () => {
+  it("extracts the sparkrun_<hex> cluster id from run output", () => {
+    expect(parseClusterId(runFixture)).toBe("sparkrun_2cf3f3031766");
   });
-
-  it("empty status yields no workloads", () => {
-    expect(parseSparkrunStatus("")).toEqual([]);
+  it("returns undefined when absent", () => {
+    expect(parseClusterId("no cluster line here")).toBeUndefined();
   });
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run packages/agent/src/runtime/sparkrun-parse.test.ts -t parseSparkrunStatus`
+Run: `npx vitest run packages/agent/src/runtime/sparkrun-parse.test.ts -t parseClusterId`
 Expected: FAIL — not defined.
 
-- [ ] **Step 3: Write minimal implementation** (append to `sparkrun-parse.ts`; reconcile keys vs Phase 0 status fixture)
+- [ ] **Step 3: Write minimal implementation** (append to `sparkrun-parse.ts`)
 
 ```ts
-export interface SparkrunWorkload {
-  ref: string;          // stable identifier confirmed in Phase 0 (recipe name or id)
-  host?: string;        // head host
-  port?: number;
-  state?: string;       // sparkrun-reported state string (running/starting/...)
-}
-
-export function parseSparkrunStatus(raw: string): SparkrunWorkload[] {
-  const text = raw.trim();
-  if (!text) return [];
-  if (text.startsWith("[") || text.startsWith("{")) {
-    const data = JSON.parse(text);
-    const arr: any[] = Array.isArray(data) ? data : (data.workloads ?? data.jobs ?? []);
-    return arr.map((w) => ({
-      ref: String(w.ref ?? w.recipe ?? w.name ?? w.id),
-      host: w.host ?? w.head,
-      port: w.port != null ? Number(w.port) : undefined,
-      state: w.state ?? w.status,
-    }));
-  }
-  return text
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l && !/^ref\b|^recipe\b|^name\b/i.test(l) && !/^-+$/.test(l))
-    .map((l) => {
-      const [ref] = l.split(/\s{2,}|\t/);
-      return { ref: ref.trim() };
-    });
+/** Extract the `Cluster: sparkrun_<hex>` workload id printed by `sparkrun run`. */
+export function parseClusterId(runOutput: string): string | undefined {
+  const m = runOutput.match(/\bsparkrun_[0-9a-f]+\b/);
+  return m ? m[0] : undefined;
 }
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run packages/agent/src/runtime/sparkrun-parse.test.ts -t parseSparkrunStatus`
+Run: `npx vitest run packages/agent/src/runtime/sparkrun-parse.test.ts -t parseClusterId`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add packages/agent/src/runtime/sparkrun-parse.ts packages/agent/src/runtime/sparkrun-parse.test.ts
-git commit -m "feat(agent): parse sparkrun status into workload liveness list"
+git commit -m "feat(agent): parseClusterId extracts sparkrun workload id from run output"
 ```
 
 ### Task 6: `launchSparkrun` / `stopSparkrun` (spawn + lifecycle)
