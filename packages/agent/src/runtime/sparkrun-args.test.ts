@@ -3,13 +3,15 @@ import { it as itProp, fc } from "@fast-check/vitest";
 import { buildSparkrunArgs } from "./sparkrun-args.js";
 
 describe("buildSparkrunArgs", () => {
-  it("solo deploy: ref, --no-follow, port forwarded; no host flag", () => {
+  it("solo deploy: ref, --no-follow, port forwarded, -H with single host", () => {
     const args = buildSparkrunArgs({ recipeRef: "qwen3-1.7b-vllm", hosts: ["10.0.0.1"], port: 8000 });
     expect(args).toContain("run");
     expect(args).toContain("qwen3-1.7b-vllm");
     expect(args).toContain("--no-follow");
     expect(args.join(" ")).toContain("--port 8000");
-    expect(args).not.toContain("-H");
+    const hIdx = args.indexOf("-H");
+    expect(hIdx).toBeGreaterThanOrEqual(0);
+    expect(args[hIdx + 1]).toBe("10.0.0.1");
   });
 
   it("cluster deploy: -H lists head first, --tp equals host count", () => {

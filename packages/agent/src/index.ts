@@ -187,7 +187,7 @@ function connect() {
     //      nothing. The existing log/phase stream will drive status.
     //   2. Container running → "running" (post-restart reattach).
     //   3. Container not running AND subprocess dead → "failed".
-    const tracked = getTrackedDeployments();
+    const tracked = getTrackedDeployments().filter((t) => t.kind !== "sparkrun");
     if (tracked.length > 0) {
       console.log(`Reconciling ${tracked.length} tracked deployment(s)`);
       const containerUp = isVllmContainerRunning();
@@ -220,7 +220,7 @@ function connect() {
     // On a WS-only reconnect the launcher subprocess may still be alive in
     // this process (isLaunchInProgress is not applicable for sparkrun — we
     // use the store). Check-job liveness drives the status.
-    const sparkrunDeployments = loadDeployments();
+    const sparkrunDeployments = loadDeployments().filter((d) => d.kind === "sparkrun");
     if (sparkrunDeployments.length > 0) {
       console.log(`Reconciling ${sparkrunDeployments.length} sparkrun deployment(s)`);
       for (const d of sparkrunDeployments) {
@@ -598,9 +598,10 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
       }
 
       // sparkrun deployment — triggered by inlineRecipeYaml or an explicit recipeRef field
-      const { inlineRecipeYaml, recipeRef: payloadRecipeRef } = msg.payload as {
+      const { inlineRecipeYaml, recipeRef: payloadRecipeRef, displayName: payloadDisplayName } = msg.payload as {
         inlineRecipeYaml?: string;
         recipeRef?: string;
+        displayName?: string;
       };
       if (inlineRecipeYaml != null || payloadRecipeRef != null) {
         try {
@@ -625,7 +626,11 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             gpuMem: config?.gpuMem as number | undefined,
             maxModelLen: config?.maxModelLen as number | undefined,
             servedModelName: servedModelName ?? undefined,
-            recipeName: recipeRef,
+            // For inline deployments recipeRef is a temp file path — use the
+            // server-sent ref, display name, or deployment id as the human-
+            // readable name instead. recipeRef (the temp path) is still passed
+            // as the first positional arg to launchSparkrun below.
+            recipeName: payloadRecipeRef ?? payloadDisplayName ?? deploymentId,
           };
 
           launchSparkrun(

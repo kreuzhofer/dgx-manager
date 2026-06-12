@@ -13,7 +13,7 @@ export interface SparkrunLaunchOptions {
 /** Build the argv for `uvx --from <pkg> sparkrun <argv>`. Pure + deterministic. */
 export function buildSparkrunArgs(o: SparkrunLaunchOptions): string[] {
   const args: string[] = ["run", o.recipeRef, "--no-follow"];
-  if (o.hosts.length > 1) args.push("-H", o.hosts.join(","));
+  if (o.hosts.length > 0) args.push("-H", o.hosts.join(","));
   const tp = o.tp ?? o.hosts.length;
   args.push("--tp", String(tp));
   if (o.pp != null) args.push("--pp", String(o.pp));

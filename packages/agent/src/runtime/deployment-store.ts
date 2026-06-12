@@ -11,6 +11,8 @@ export interface TrackedDeployment {
   clusterNodes?: string[];
   clusterId?: string;
   tp?: number;
+  /** Discriminates deployment kind so each reconcile loop only processes its own entries. */
+  kind?: "sparkrun" | "vllm";
 }
 
 // Default to a user-writable location. The agent runs as a non-root systemd

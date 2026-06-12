@@ -21,7 +21,7 @@ export function launchSparkrun(
   const persist = () => saveDeployment({
     deploymentId, recipeFile: recipeRef, recipeName: opts.recipeName ?? recipeRef,
     port: opts.port ?? 8000, startedAt: new Date().toISOString(),
-    clusterNodes: hosts, clusterId, tp,
+    clusterNodes: hosts, clusterId, tp, kind: "sparkrun",
   });
   const onData = (b: Buffer) => {
     const s = b.toString();
