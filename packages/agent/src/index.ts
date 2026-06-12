@@ -1,14 +1,17 @@
 import WebSocket from "ws";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { execSync, spawn } from "child_process";
-import { hostname as osHostname } from "os";
+import { hostname as osHostname, homedir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
 import { discoverRecipes } from "./recipes.js";
 import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, isStopping, getTrackedDeployments, reattachLogs, generateLocalModelRecipe, isLaunchInProgress, untrackDeployment } from "./runtime/vllm.js";
-import { classifyDeadContainer } from "./runtime/deploy-status.js";
+import { classifyDeadContainer, reconcileDeployStatus } from "./runtime/deploy-status.js";
 import { shouldForceStopSharedContainer, selectContainerOwnerId } from "./runtime/undeploy-policy.js";
+import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe } from "./runtime/sparkrun.js";
+import { checkSparkrunDeployments } from "./runtime/sparkrun-metrics.js";
+import { loadDeployments } from "./runtime/deployment-store.js";
 import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth } from "./runtime/ollama.js";
 import { discoverTrainingRecipes } from "./training-recipes.js";
 import { startFinetuneJob, stopFinetuneJob, mergeLoraAdapter, reattachFinetuneJobs } from "./runtime/finetune.js";
@@ -73,6 +76,7 @@ function ipToInt(ip: string): number {
 }
 const METRICS_INTERVAL = 5_000;
 const HEALTH_CHECK_INTERVAL = 15_000;
+const SPARKRUN_ADHOC_DIR = join(homedir(), ".dgx-agent", "adhoc");
 const RECONNECT_BASE = 1_000;
 const RECONNECT_MAX = 30_000;
 
@@ -212,6 +216,28 @@ function connect() {
       console.log("Found vLLM container with no local tracking — may be a cluster worker, leaving it running");
     }
 
+    // Reconcile sparkrun deployments from the persistent store.
+    // On a WS-only reconnect the launcher subprocess may still be alive in
+    // this process (isLaunchInProgress is not applicable for sparkrun — we
+    // use the store). Check-job liveness drives the status.
+    const sparkrunDeployments = loadDeployments();
+    if (sparkrunDeployments.length > 0) {
+      console.log(`Reconciling ${sparkrunDeployments.length} sparkrun deployment(s)`);
+      for (const d of sparkrunDeployments) {
+        const target = d.clusterId ?? d.recipeFile;
+        const hosts = d.clusterNodes ?? [];
+        const listed = isWorkloadRunning(target, hosts);
+        const status = reconcileDeployStatus({ launcherAlive: false, listed });
+        console.log(`[reconcile-sparkrun] ${d.deploymentId}: target=${target} listed=${listed} → ${status}`);
+        sendMsg("agent:deployment:status", {
+          deploymentId: d.deploymentId,
+          status,
+          port: d.port,
+          error: status === "failed" ? "Workload not running after agent restart" : undefined,
+        });
+      }
+    }
+
     // Reattach to any running finetune containers (survives agent restart)
     reattachFinetuneJobs(sendMsg);
 
@@ -249,11 +275,11 @@ function connect() {
       if (ws?.readyState !== WebSocket.OPEN) return;
       const m = await collectMetrics();
 
-      // Enrich with vLLM deployment metrics
+      // Enrich with vLLM/sparkrun deployment metrics
       let activeRequests: number | null = null;
       let tps: number | null = null;
       try {
-        const statuses = await checkDeployments();
+        const statuses = await checkSparkrunDeployments();
         const active = statuses.filter((s) => s.containerRunning);
         if (active.length > 0) {
           activeRequests = active.reduce((sum, s) => sum + (s.requestsRunning ?? 0) + (s.requestsWaiting ?? 0), 0);
@@ -283,7 +309,7 @@ function connect() {
     healthTimer = setInterval(async () => {
       if (ws?.readyState !== WebSocket.OPEN) return;
       try {
-        const statuses = await checkDeployments();
+        const statuses = await checkSparkrunDeployments();
         for (const status of statuses) {
           // Report if container died or has errors
           if (!status.containerRunning && !status.alive) {
@@ -571,7 +597,86 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         break;
       }
 
-      // vLLM deployment
+      // sparkrun deployment — triggered by inlineRecipeYaml or an explicit recipeRef field
+      const { inlineRecipeYaml, recipeRef: payloadRecipeRef } = msg.payload as {
+        inlineRecipeYaml?: string;
+        recipeRef?: string;
+      };
+      if (inlineRecipeYaml != null || payloadRecipeRef != null) {
+        try {
+          sendMsg("agent:deployment:status", { deploymentId, status: "starting" });
+          let lastPhase = "starting";
+
+          // Resolve the recipe reference: inline YAML wins, then explicit recipeRef
+          const recipeRef = inlineRecipeYaml != null
+            ? writeInlineRecipe(deploymentId, inlineRecipeYaml, SPARKRUN_ADHOC_DIR)
+            : payloadRecipeRef!;
+
+          // Build hosts: clusterNodes head-first when provided, else local solo
+          const hosts: string[] = (Array.isArray(clusterNodes) && clusterNodes.length > 0)
+            ? clusterNodes as string[]
+            : ["localhost"];
+
+          const opts = {
+            hosts,
+            tp: config?.tensorParallel as number | undefined,
+            pp: config?.pipelineParallel as number | undefined,
+            port: (config?.port as number) ?? 8000,
+            gpuMem: config?.gpuMem as number | undefined,
+            maxModelLen: config?.maxModelLen as number | undefined,
+            servedModelName: servedModelName ?? undefined,
+            recipeName: recipeRef,
+          };
+
+          launchSparkrun(
+            deploymentId,
+            recipeRef,
+            opts,
+            (line) => {
+              const cleaned = collapseCarriageReturns(line);
+              sendMsg("agent:deployment:log", { deploymentId, log: cleaned });
+
+              const progress = parseFetchingProgress(line);
+              if (progress) emitDeploymentProgress(deploymentId, progress);
+
+              const phase = detectPhase(line);
+              if (phase && phase !== lastPhase) {
+                lastPhase = phase;
+                sendMsg("agent:deployment:status", {
+                  deploymentId,
+                  status: phase,
+                  port: phase === "running" ? opts.port : undefined,
+                });
+              }
+            },
+            (code) => {
+              // sparkrun run exits 0 once the workload is launched (--no-follow).
+              // Non-zero means the launch itself failed.
+              if (code === 0) {
+                console.log(`[sparkrun:deploy] launcher exited 0 for ${deploymentId}`);
+                // Workload should now be discoverable via check-job; health-check
+                // loop will confirm and report "running".
+              } else {
+                sendMsg("agent:deployment:status", {
+                  deploymentId,
+                  status: "failed",
+                  error: `Sparkrun launch failed with exit code ${code}`,
+                });
+              }
+            },
+          );
+          // Status updates are driven by log phase detection and health-check loop
+        } catch (err) {
+          sendMsg("agent:deployment:status", {
+            deploymentId,
+            status: "failed",
+            error: String(err),
+          });
+        }
+        break;
+      }
+
+      // vLLM (eugr) deployment — legacy path, recipeFile required
       if (!recipeFile) {
         sendMsg("agent:deployment:status", {
           deploymentId,
@@ -691,6 +796,30 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         try {
           if (runtime === "ollama") {
             await ollamaStopModel(deploymentId, undeployModelName);
+            sendMsg("agent:deployment:status", {
+              deploymentId,
+              status: "stopped",
+              deleteAfter: deleteAfter || false,
+            });
+            return;
+          }
+
+          // sparkrun deployment — identified by presence in the deployment store
+          const stored = loadDeployments().find((d) => d.deploymentId === deploymentId);
+          if (stored != null) {
+            sendMsg("agent:deployment:log", {
+              deploymentId,
+              log: "\n=== Stop requested by user — stopping sparkrun workload ===\n",
+            });
+            const target = stored.clusterId ?? stored.recipeFile;
+            const hosts = stored.clusterNodes ?? [];
+            try {
+              stopSparkrun(deploymentId, target, hosts, stored.tp);
+            } catch (stopErr) {
+              console.warn(`[undeploy] sparkrun stop error (continuing): ${stopErr}`);
+            }
+            // Clean up any inline recipe YAML file we may have written
+            removeInlineRecipe(deploymentId, SPARKRUN_ADHOC_DIR);
             sendMsg("agent:deployment:status", {
               deploymentId,
               status: "stopped",

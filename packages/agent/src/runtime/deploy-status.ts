@@ -16,3 +16,25 @@ export function classifyDeadContainer(
   if (intentional) return { status: "stopped" };
   return { status: "failed", error: lastError || "Container stopped unexpectedly" };
 }
+
+/**
+ * Derive the deployment status for a sparkrun workload from two orthogonal
+ * signals available at reconnect / health-check time:
+ *
+ *   - `listed`        — isWorkloadRunning returned true (workload is up in the
+ *                       sparkrun cluster)
+ *   - `launcherAlive` — the launcher subprocess is still running in this process
+ *
+ * Decision:
+ *   - If the workload is listed (serving), it is "running" regardless of the
+ *     launcher subprocess state.
+ *   - If the launcher subprocess is alive but the workload is not yet listed,
+ *     the workload is still coming up → "deploying".
+ *   - If neither is true, the workload has died → "failed".
+ */
+export function reconcileDeployStatus(
+  s: { launcherAlive: boolean; listed: boolean },
+): "running" | "deploying" | "failed" {
+  if (s.listed) return "running";
+  return s.launcherAlive ? "deploying" : "failed";
+}

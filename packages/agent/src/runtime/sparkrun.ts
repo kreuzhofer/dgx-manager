@@ -1,4 +1,6 @@
 import { spawn, execFileSync } from "node:child_process";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { SPARKRUN_PKG } from "../recipes.js";
 import { buildSparkrunArgs, type SparkrunLaunchOptions } from "./sparkrun-args.js";
 import { parseClusterId } from "./sparkrun-parse.js";
@@ -45,4 +47,25 @@ export function isWorkloadRunning(target: string, hosts: string[]): boolean {
       { timeout: 30_000, stdio: "ignore" });
     return true;
   } catch { return false; }
+}
+
+/**
+ * Write an inline recipe YAML string to `<dir>/<deploymentId>.yaml` and return
+ * the absolute path. Creates `dir` if it does not exist.
+ *
+ * Used by cmd:deploy when the server sends `inlineRecipeYaml` directly rather
+ * than a registry name or shared-filesystem path.
+ */
+export function writeInlineRecipe(deploymentId: string, yaml: string, dir: string): string {
+  mkdirSync(dir, { recursive: true });
+  const filePath = join(dir, `${deploymentId}.yaml`);
+  writeFileSync(filePath, yaml, "utf-8");
+  return filePath;
+}
+
+/**
+ * Remove a previously written inline recipe file (no-op if already gone).
+ */
+export function removeInlineRecipe(deploymentId: string, dir: string): void {
+  rmSync(join(dir, `${deploymentId}.yaml`), { force: true });
 }
