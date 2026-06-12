@@ -172,9 +172,14 @@ list`/`show`.
 
 ## 6. Risks & Verification Items
 
-These are flagged to resolve **during** implementation; none invalidate the design, but each
-shapes a sub-task. Fail-fast: if a verification fails, surface it explicitly rather than
-falling back silently.
+These are resolved by an explicit **Phase 0 — Discovery Spike** that is the *first* step of the
+implementation plan: run sparkrun on a real node and capture actual behavior/output before any
+code depends on it. The spike answers V1–V5 empirically (run `sparkrun setup` and inspect for a
+non-interactive path; capture `sparkrun list`/`show`/`status` raw output as test fixtures; do a
+detached `run` + agent-restart + `status` reconnect; scrape `/metrics`; pin the version). Its
+captured output feeds the parser fixtures in §7. None of these invalidate the design, but each
+shapes a sub-task. Fail-fast: if a verification fails, surface it explicitly rather than falling
+back silently.
 
 - **V1 — Non-interactive `sparkrun setup`** (mesh/sudoers/earlyoom/CX7). Flags/config vs.
   manual replication. Gates §4.2 only.
