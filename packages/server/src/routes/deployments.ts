@@ -9,6 +9,8 @@ import { readCatalog as readOllamaCatalog } from "../ollama/catalog-store.js";
 import { ollamaVramEstimateMB } from "../ollama/vram-estimate.js";
 import { normalizeDisplayName, validateDisplayNameUnique, DisplayNameError } from "../deployments/display-name.js";
 import { isValidVariantSlug } from "./finetune.js";
+import { resolveRecipePath } from "../deployments/recipe-path.js";
+import { validateInlineRecipe } from "../deployments/recipe-inline.js";
 
 export const deploymentsRouter = Router();
 
@@ -47,14 +49,29 @@ deploymentsRouter.get("/:id/logs", async (req, res) => {
 });
 
 deploymentsRouter.post("/", async (req, res) => {
-  let { nodeId, nodeIds, recipeFile, config, runtime, modelName, modelType, displayName: rawDisplayName } = req.body;
+  let { nodeId, nodeIds, recipeFile, recipePath, recipeYaml, config, runtime, modelName, modelType, displayName: rawDisplayName } = req.body;
   const isOllama = runtime === "ollama";
 
-  if (!isOllama && !recipeFile) {
-    return res.status(400).json({ error: "recipeFile required for vLLM deployments" });
-  }
   if (isOllama && !modelName) {
     return res.status(400).json({ error: "modelName required for Ollama deployments" });
+  }
+
+  // Resolve the recipe source for vLLM deployments. Three mutually-exclusive
+  // sources: inline YAML (D7), absolute path (D5), registry ref (recipeFile).
+  let recipeRef: string | undefined;          // registry ref or validated abs path
+  let inlineRecipeYaml: string | undefined;   // raw YAML body (D7)
+  if (!isOllama) {
+    if (recipeYaml) {
+      try { validateInlineRecipe(recipeYaml); } catch (e) { return res.status(400).json({ error: (e as Error).message }); }
+      inlineRecipeYaml = recipeYaml;
+      console.log(`[deploy] inline recipeYaml (${Buffer.byteLength(recipeYaml, "utf8")} bytes) from ${req.ip}`);
+    } else if (recipePath) {
+      try { recipeRef = resolveRecipePath(recipePath, SHARED_STORAGE); } catch (e) { return res.status(400).json({ error: (e as Error).message }); }
+    } else if (recipeFile) {
+      recipeRef = recipeFile; // registry ref from `sparkrun list`
+    } else {
+      return res.status(400).json({ error: "recipeFile, recipePath, or recipeYaml required for vLLM deployments" });
+    }
   }
 
   // Normalize + uniqueness-check displayName up front. 400 on bad chars,
@@ -213,8 +230,15 @@ deploymentsRouter.post("/", async (req, res) => {
     }
   }
 
-  // Ensure a model record exists
-  const modelKey = isOllama ? modelName : recipeFile.replace(/^recipes\//, "").replace(/\.yaml$/, "");
+  // Ensure a model record exists. For vLLM the key is derived from whichever
+  // recipe source was supplied: registry ref (recipeFile), abs path
+  // (recipeRef when recipePath was used), or a synthetic key for inline YAML.
+  const vllmModelKey = recipeFile
+    ? recipeFile.replace(/^recipes\//, "").replace(/\.yaml$/, "")
+    : recipeRef
+      ? recipeRef.replace(/.*\//, "").replace(/\.yaml$/, "")  // basename, no ext
+      : `inline-${Date.now()}`;
+  const modelKey = isOllama ? modelName : vllmModelKey;
   let model = await prisma.model.findUnique({ where: { name: modelKey } });
   if (!model) {
     model = await prisma.model.create({
@@ -275,6 +299,9 @@ deploymentsRouter.post("/", async (req, res) => {
       modelName: isOllama ? modelName : undefined,
       modelType: isOllama ? (modelType || "chat") : undefined,
       recipeFile: isOllama ? undefined : recipeFile,
+      // Sparkrun recipe sources (D5/D7): agent branch triggers on these.
+      recipeRef: isOllama ? undefined : recipeRef,
+      inlineRecipeYaml: isOllama ? undefined : inlineRecipeYaml,
       // Per-deploy custom name → vLLM's --served-model-name. Undefined when
       // the user didn't set displayName, so the agent falls back to the
       // recipe's authored defaults.served_model_name.
