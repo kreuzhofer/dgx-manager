@@ -219,16 +219,22 @@ describe("snapshotContainerLogs", () => {
     expect(snapshotContainerLogs("sparkrun_abc123")).toBe("");
   });
 
-  it("concatenates stdout and stderr from docker logs", () => {
+  it("captures full stdout+stderr, stderr (errors) first so the root crash leads", () => {
     spawnSyncMock
       .mockReturnValueOnce({ stdout: "sparkrun_abc123_solo\n", stderr: "" })   // ps
-      .mockReturnValueOnce({                                                    // logs
+      .mockReturnValueOnce({                                                    // logs (no --tail)
         stdout: "Starting vllm...\n",
         stderr: "vllm serve: error: argument --compilation-config: Invalid JSON\n",
       });
-    const result = snapshotContainerLogs("sparkrun_abc123", 200);
+    const result = snapshotContainerLogs("sparkrun_abc123");
     expect(result).toContain("Starting vllm...");
     expect(result).toContain("vllm serve: error: argument --compilation-config: Invalid JSON");
+    // stderr (the error) must come before stdout so firstErrorLine finds the root
+    expect(result.indexOf("Invalid JSON")).toBeLessThan(result.indexOf("Starting vllm"));
+    // full capture: docker logs called WITHOUT --tail
+    const logsCall = spawnSyncMock.mock.calls.find((c: any) => c[1]?.includes("logs")) as any[] | undefined;
+    expect(logsCall).toBeTruthy();
+    expect(logsCall?.[1]).not.toContain("--tail");
   });
 
   it("trims the combined output", () => {

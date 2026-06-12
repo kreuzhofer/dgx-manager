@@ -85,14 +85,26 @@ export function inspectSparkrunContainer(clusterId?: string): SparkrunContainerS
   return { name, state, restartCount: Number(rc) || 0 };
 }
 
-/** Read-only: snapshot the last `tail` lines of a sparkrun container's combined stdout+stderr. */
-export function snapshotContainerLogs(clusterId?: string, tail = 200): string {
+/** Read-only: snapshot a sparkrun container's FULL stdout+stderr (all restarts). */
+export function snapshotContainerLogs(clusterId?: string): string {
   if (!clusterId) return "";
   const name = containerNameFor(clusterId);
   if (!name) return "";
-  const r = spawnSync("docker", ["logs", name, "--tail", String(tail)],
-    { encoding: "utf8", timeout: 15_000 });
-  return ((r.stdout || "") + (r.stderr || "")).trim();
+  // Capture the FULL container log, not just the tail. The ROOT crash is at the
+  // START of the log; docker's unless-stopped restarts append a re-mangled
+  // command error at the END (the eugr entrypoint rebuilds the serve command
+  // differently on restart). stderr (where vLLM errors go) is placed FIRST and
+  // kept from its head, so `firstErrorLine` surfaces the root cause — not the
+  // latest restart's masked error. Goal: an API consumer sees ALL of it.
+  const r = spawnSync("docker", ["logs", name],
+    { encoding: "utf8", timeout: 20_000, maxBuffer: 32 * 1024 * 1024 });
+  const headCap = (s: string | null | undefined, n: number) => {
+    const t = (s || "").trim();
+    return t.length > n ? t.slice(0, n) + "\n…[truncated]" : t;
+  };
+  const stderr = headCap(r.stderr, 120_000); // errors incl. the root crash
+  const stdout = headCap(r.stdout, 40_000);  // download/progress noise
+  return [stderr, stdout].filter(Boolean).join("\n").trim();
 }
 
 export function isWorkloadRunning(target: string, hosts: string[]): boolean {

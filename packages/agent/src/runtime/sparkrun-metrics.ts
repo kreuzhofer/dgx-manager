@@ -75,7 +75,7 @@ export async function checkSparkrunDeployments(): Promise<VllmStatus[]> {
     const c = inspectSparkrunContainer(d.clusterId);
     const failing = c != null && (c.restartCount >= CRASH_LOOP_THRESHOLD || (c.state !== "running" && c.state !== "created"));
     if (failing && !d.stopping) {
-      const snap = snapshotContainerLogs(d.clusterId, 200);
+      const snap = snapshotContainerLogs(d.clusterId);
       results.push({
         deploymentId: d.deploymentId,
         recipeName: d.recipeName,
