@@ -230,3 +230,46 @@ Behind the existing deploy flow — no schema migration required (Deployment/rec
 their shape; `recipeFile` semantics widen to "recipe ref or path"). Reversible: the eugr path is
 deleted in the same change, so rollback = revert the branch. Land provisioning (§4.2) and the
 launcher (§4.1) together so a freshly provisioned node can actually deploy.
+
+---
+
+## Addendum (2026-06-12) — inline recipe API + OpenAPI docs
+
+### D7 — Deploy a recipe from an inline YAML body (remote dev workflow)
+
+A remote machine dedicated to authoring sparkrun recipes must be able to test a recipe on this
+cluster **via the API alone**, without staging files on the cluster filesystem. So
+`POST /api/deployments` accepts a third recipe source (mutually exclusive with `recipeFile` /
+`recipePath`):
+
+- **`recipeYaml`** (string) — the full sparkrun recipe YAML.
+
+Flow: server validates it (non-empty; size ≤ 512 KB; looks like a recipe — contains at least one
+of `model:` / `command:` / `runtime:`), rejecting with 400 otherwise (fail-fast). The validated
+YAML is passed **inline in the `cmd:deploy` WS payload** as `inlineRecipeYaml`. The head-node
+**agent writes it to a transient file** (`~/.dgx-agent/adhoc/<deploymentId>.yaml`) and runs
+`sparkrun run <that file>`. Nothing is written to NFS; the remote dev never touches the cluster
+filesystem. The temp file is removed on undeploy.
+
+**Security:** an inline recipe's `command:` runs in a container — this is effectively arbitrary
+container-command execution. The system currently ships no API auth (LAN-trusted appliance), so
+this endpoint matches that posture, with a **size cap + an audit log line** (who/when/size). If
+API auth is later added, this endpoint is a priority to gate.
+
+### D8 — OpenAPI 3 spec + Swagger UI for agent/human API discovery
+
+There is no API documentation today. Add machine-readable, self-describing docs so an agent can
+discover and understand the whole API without reading source:
+
+- **`GET /api/openapi.json`** — the OpenAPI 3 document.
+- **`GET /api/docs`** — Swagger UI rendering of it.
+
+Built with `swagger-jsdoc` (JSDoc `@openapi` annotations on the route handlers) + `swagger-ui-express`.
+The document carries three layers of description so an agent gets a full mental model:
+1. `info.description` — a markdown **system overview** of dgx-manager (nodes → provisioning →
+   agents → deployments via sparkrun → inference proxy/load balancer → fine-tune → benchmarks)
+   and how the pieces relate.
+2. **Tag descriptions** — one per domain (Nodes, Deployments, Recipes, Fine-tune, Load Balancer,
+   Benchmarks, Datasets, Models, Settings, Tokens, Agent bundle) summarizing that domain's role.
+3. **Per-operation descriptions** — every endpoint documents what it does, its place in the
+   workflow, params, request body, and responses, comprehensively enough to use without the source.

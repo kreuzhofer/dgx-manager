@@ -836,7 +836,7 @@ export function parseVllmMetrics(text: string): VllmMetrics {
 Run: `npx vitest run packages/agent/src/runtime/sparkrun-metrics.test.ts`
 Expected: PASS.
 
-- [ ] **Step 5: Wire `checkDeployments`** — update the agent's deployment-status loop to: (a) call `listSparkrunWorkloads()` for liveness, (b) for each tracked deployment, `fetch http://localhost:{port}/metrics` and `parseVllmMetrics`. Keep the `VllmStatus` output shape so `index.ts`/`agent-hub` are unchanged. Run:
+- [ ] **Step 5: Wire `checkDeployments`** — update the agent's deployment-status loop to: (a) for each tracked deployment, probe liveness via `isWorkloadRunning(clusterId ?? recipeFile, clusterNodes)` (from Task 6's `sparkrun.ts`), (b) `fetch http://localhost:{port}/metrics` and `parseVllmMetrics`. Keep the `VllmStatus` output shape so `index.ts`/`agent-hub` are unchanged. Run:
 Run: `npm run build -w packages/agent`
 Expected: no type errors.
 
@@ -890,15 +890,34 @@ export function reconcileDeployStatus(s: {
 Run: `npx vitest run packages/agent/src/runtime/deploy-status.test.ts -t reconcileDeployStatus`
 Expected: PASS.
 
-- [ ] **Step 5: Wire `index.ts`** — in the `cmd:deploy` handler, build `Opts` from the payload (`hosts` = `clusterNodes` head-first, or `[localIp]` solo; `port`, `gpuMem`, etc. from `config`) and call `launchSparkrun`. In `cmd:undeploy`, call `stopSparkrun(deploymentId, recipeRef, tp)`. On reconnect, for each stored deployment compute `reconcileDeployStatus` using `listSparkrunWorkloads()`. Run:
-Run: `npm run build -w packages/agent`
-Expected: no type errors.
+- [ ] **Step 5: Wire `index.ts`** — in the `cmd:deploy` handler, build `Opts` from the payload (`hosts` = `clusterNodes` head-first, or `[localIp]` solo; `port`, `gpuMem`, etc. from `config`) and call `launchSparkrun(deploymentId, recipeRef, opts, onLog, onExit)`. In `cmd:undeploy`, look up the stored deployment and call `stopSparkrun(deploymentId, storedClusterId ?? recipeFile, clusterNodes, tp)`. On reconnect, for each stored deployment compute `reconcileDeployStatus({ ref, launcherAlive, listed: isWorkloadRunning(clusterId ?? recipeFile, clusterNodes) })`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5b: Handle `inlineRecipeYaml` (D7)** — in `cmd:deploy`, if the payload carries `inlineRecipeYaml`, write it to a transient file before launching and use that path as `recipeRef`:
+
+```ts
+// in cmd:deploy handler, before launchSparkrun:
+import { writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+let recipeRef = payload.recipeRef as string | undefined;
+if (payload.inlineRecipeYaml) {
+  const dir = join(homedir(), ".dgx-agent", "adhoc");
+  mkdirSync(dir, { recursive: true });
+  recipeRef = join(dir, `${payload.deploymentId}.yaml`);
+  writeFileSync(recipeRef, payload.inlineRecipeYaml as string, "utf8");
+}
+// ... launchSparkrun(deploymentId, recipeRef!, opts, ...)
+```
+
+On `cmd:undeploy`/cleanup, `rmSync(join(homedir(), ".dgx-agent", "adhoc", \`${deploymentId}.yaml\`), { force: true })` for the temp file. Add a unit test for a tiny `writeInlineRecipe(deploymentId, yaml, dir): string` helper (extract the write+path logic so it's testable without the WS handler): asserts the file is written under `dir` and the returned path ends with `<deploymentId>.yaml`.
+
+- [ ] **Step 6: Run build + commit**
 
 ```bash
-git add packages/agent/src/index.ts packages/agent/src/runtime/deploy-status.ts packages/agent/src/runtime/deploy-status.test.ts
-git commit -m "feat(agent): route cmd:deploy/undeploy through sparkrun + reconnect reconcile"
+npm run build -w packages/agent
+git add packages/agent/src/index.ts packages/agent/src/runtime/deploy-status.ts packages/agent/src/runtime/deploy-status.test.ts packages/agent/src/runtime/sparkrun.ts packages/agent/src/runtime/sparkrun.test.ts
+git commit -m "feat(agent): route cmd:deploy/undeploy through sparkrun + inline YAML + reconnect reconcile"
 ```
 
 ---
@@ -971,11 +990,74 @@ git add packages/server/src/deployments/recipe-path.ts packages/server/src/deplo
 git commit -m "feat(server): validate custom recipePath stays within shared storage"
 ```
 
-### Task 10: Accept `recipePath` in the deploy route + emit sparkrun ref
+### Task 9b: `validateInlineRecipe` helper (inline YAML body — D7)
 
 **Files:**
-- Modify: `packages/server/src/routes/deployments.ts` (accept `recipePath` as an alternative to `recipeFile`; validate via `resolveRecipePath`; carry the resolved ref into the `cmd:deploy` payload)
+- Create: `packages/server/src/deployments/recipe-inline.ts`
+- Test: `packages/server/src/deployments/recipe-inline.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+import { describe, it, expect } from "vitest";
+import { validateInlineRecipe, MAX_INLINE_RECIPE_BYTES } from "./recipe-inline.js";
+
+describe("validateInlineRecipe", () => {
+  it("accepts a plausible sparkrun recipe", () => {
+    expect(() => validateInlineRecipe("model: Qwen/Qwen3-1.7B\nruntime: vllm\n")).not.toThrow();
+  });
+  it("rejects empty / whitespace", () => {
+    expect(() => validateInlineRecipe("   ")).toThrow(/empty/i);
+  });
+  it("rejects content that doesn't look like a recipe", () => {
+    expect(() => validateInlineRecipe("hello world")).toThrow(/recipe/i);
+  });
+  it("rejects oversized input", () => {
+    expect(() => validateInlineRecipe("model:\n" + "x".repeat(MAX_INLINE_RECIPE_BYTES))).toThrow(/too large/i);
+  });
+});
+```
+
+- [ ] **Step 2: Run → FAIL.** `npx vitest run packages/server/src/deployments/recipe-inline.test.ts`
+
+- [ ] **Step 3: Implement**
+
+```ts
+/** Cap on an inline recipe body (defensive — a recipe is a few KB at most). */
+export const MAX_INLINE_RECIPE_BYTES = 512 * 1024;
+
+/**
+ * Validate an inline sparkrun recipe YAML sent over the API (D7). Fail-fast: throws on
+ * empty, oversized, or content that doesn't look like a recipe. NOTE: an accepted recipe's
+ * `command:` runs in a container — this is an arbitrary-execution surface; callers must audit-log.
+ */
+export function validateInlineRecipe(yaml: string): void {
+  if (!yaml || !yaml.trim()) throw new Error("recipeYaml is empty");
+  if (Buffer.byteLength(yaml, "utf8") > MAX_INLINE_RECIPE_BYTES) {
+    throw new Error(`recipeYaml too large (> ${MAX_INLINE_RECIPE_BYTES} bytes)`);
+  }
+  // Minimal shape check: a sparkrun recipe declares at least one of these top-level keys.
+  if (!/^\s*(model|command|runtime)\s*:/m.test(yaml)) {
+    throw new Error("recipeYaml does not look like a sparkrun recipe (needs model:/command:/runtime:)");
+  }
+}
+```
+
+- [ ] **Step 4: Run → PASS.**
+
+- [ ] **Step 5: Commit**
+```bash
+git add packages/server/src/deployments/recipe-inline.ts packages/server/src/deployments/recipe-inline.test.ts
+git commit -m "feat(server): validate inline recipe YAML body for API deploy (D7)"
+```
+
+### Task 10: Accept `recipePath` AND `recipeYaml` in the deploy route (D5 + D7)
+
+**Files:**
+- Modify: `packages/server/src/routes/deployments.ts` (accept `recipePath` and `recipeYaml` as alternatives to `recipeFile`; validate; carry into the `cmd:deploy` payload — `recipeRef` for file/path, `inlineRecipeYaml` for the YAML body)
 - Test: `packages/server/src/__tests__/integration/deployments.sparkrun.test.ts`
+
+> NOTE: the agent side of `inlineRecipeYaml` (write to `~/.dgx-agent/adhoc/<id>.yaml`, run sparkrun against it) is implemented in **Task 8 Step 5b**. This task only adds the server route handling: validate the body and put `inlineRecipeYaml` in the `cmd:deploy` payload.
 
 - [ ] **Step 1: Write the failing test** (supertest; stub `agentHub`; model on `deployments.vram-admission.test.ts` setup)
 
@@ -1015,15 +1097,26 @@ describe("POST /api/deployments with recipePath", () => {
 Run: `npx vitest run packages/server/src/__tests__/integration/deployments.sparkrun.test.ts`
 Expected: FAIL — route does not yet handle `recipePath` (likely 400 "recipeFile required" but for the wrong reason, or 500).
 
-- [ ] **Step 3: Write minimal implementation** — in `deployments.ts`, after destructuring the body add:
+- [ ] **Step 3: Write minimal implementation** — in `deployments.ts`, after destructuring the body (incl. `recipePath`, `recipeYaml`) add:
 
 ```ts
 import { resolveRecipePath } from "../deployments/recipe-path.js";
+import { validateInlineRecipe } from "../deployments/recipe-inline.js";
 import { SHARED_STORAGE } from "../env.js";
 
 // ...inside the POST handler, before building the deploy payload:
-let recipeRef: string | undefined;
-if (recipePath) {
+let recipeRef: string | undefined;          // registry ref or validated path
+let inlineRecipeYaml: string | undefined;   // raw YAML body (D7)
+if (recipeYaml) {
+  try {
+    validateInlineRecipe(recipeYaml);
+  } catch (e) {
+    return res.status(400).json({ error: (e as Error).message });
+  }
+  inlineRecipeYaml = recipeYaml;
+  // audit: inline recipe = arbitrary container command; log who/when/size
+  console.log(`[deploy] inline recipeYaml (${Buffer.byteLength(recipeYaml, "utf8")} bytes) from ${req.ip}`);
+} else if (recipePath) {
   try {
     recipeRef = resolveRecipePath(recipePath, SHARED_STORAGE);
   } catch (e) {
@@ -1032,11 +1125,14 @@ if (recipePath) {
 } else if (recipeFile) {
   recipeRef = recipeFile; // registry ref / name from `sparkrun list`
 } else if (!isOllama) {
-  return res.status(400).json({ error: "recipeFile or recipePath required for vLLM deployments" });
+  return res.status(400).json({ error: "recipeFile, recipePath, or recipeYaml required for vLLM deployments" });
 }
 ```
 
-Then pass `recipeRef` (instead of `recipeFile`) into the `cmd:deploy` payload field the agent reads.
+Then include both `recipeRef` and `inlineRecipeYaml` in the `cmd:deploy` payload the agent reads
+(the agent prefers `inlineRecipeYaml` when present — Task 8 Step 5b). Add a `recipeYaml`
+happy-path test asserting the emitted `cmd:deploy` carries `inlineRecipeYaml` and that an
+oversized/empty body is rejected 400 with no deploy emitted.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1205,6 +1301,194 @@ git commit -m "feat(agent): deploy fine-tuned models via sparkrun recipe-by-path
 ```
 
 ---
+
+## Phase 7 — OpenAPI spec + Swagger UI (D8)
+
+> Execute after Phase 5; **Phase 6 (retire + version bump) runs last.** Goal: an agent or human
+> can discover and understand the whole API from `GET /api/openapi.json` / `GET /api/docs`
+> without reading source.
+
+### Task 15: OpenAPI infrastructure + system overview
+
+**Files:**
+- Create: `packages/server/src/openapi.ts` (build the spec; rich `info.description` + tag descriptions)
+- Modify: `packages/server/src/index.ts` (serve `/api/openapi.json` + `/api/docs`)
+- Modify: `packages/server/package.json` (add deps)
+- Test: `packages/server/src/__tests__/integration/openapi.routes.test.ts`
+
+- [ ] **Step 1: Add deps**
+
+Run: `npm i -w packages/server swagger-jsdoc swagger-ui-express && npm i -w packages/server -D @types/swagger-jsdoc @types/swagger-ui-express`
+
+- [ ] **Step 2: Write the failing test**
+
+```ts
+import { describe, it, expect } from "vitest";
+import request from "supertest";
+import express from "express";
+import { mountOpenApi } from "../../openapi.js";
+
+function app() { const a = express(); mountOpenApi(a); return a; }
+
+describe("OpenAPI", () => {
+  it("serves a 3.x spec with system overview + domain tags", async () => {
+    const res = await request(app()).get("/api/openapi.json");
+    expect(res.status).toBe(200);
+    expect(res.body.openapi).toMatch(/^3\./);
+    expect(res.body.info.title).toMatch(/DGX Manager/i);
+    expect(res.body.info.description.length).toBeGreaterThan(200); // system overview present
+    const tagNames = (res.body.tags ?? []).map((t: any) => t.name);
+    expect(tagNames).toEqual(expect.arrayContaining(["Deployments", "Nodes", "Recipes"]));
+  });
+  it("serves Swagger UI HTML", async () => {
+    const res = await request(app()).get("/api/docs/");
+    expect(res.status).toBe(200);
+    expect(res.text).toMatch(/swagger-ui/i);
+  });
+});
+```
+
+- [ ] **Step 3: Run → FAIL.** `npx vitest run packages/server/src/__tests__/integration/openapi.routes.test.ts`
+
+- [ ] **Step 4: Implement `openapi.ts`**
+
+```ts
+import swaggerJsdoc from "swagger-jsdoc";
+import swaggerUi from "swagger-ui-express";
+import type { Express } from "express";
+
+const SYSTEM_OVERVIEW = `
+# DGX Manager API
+
+Full-stack control plane for a DGX Spark cluster. Domains and how they relate:
+
+- **Nodes** — register/provision DGX Spark nodes over SSH; agents on each node report GPU metrics.
+- **Recipes** — inference recipes discovered from sparkrun registries; the catalog the deploy form uses.
+- **Deployments** — launch a recipe on one or more nodes via **sparkrun** (the head-node agent runs
+  \`sparkrun run\`). Accepts a registry recipe (\`recipeFile\`), an NFS path (\`recipePath\`), or an
+  **inline recipe body** (\`recipeYaml\`) for remote recipe development. Stopped via DELETE.
+- **Load Balancer** — round-robin inference proxy routing to running deployments.
+- **Fine-tune** — training jobs (train → merge → quantize → deploy the merged model via sparkrun).
+- **Benchmarks** — server-side benchmark runs (llama-benchy / tool-eval-bench) against a deployment.
+- **Datasets / Models / Settings / Tokens / Agent bundle** — supporting resources.
+
+Typical flow: register a Node → it provisions (incl. sparkrun) → pick a Recipe → create a
+Deployment → route traffic through the Load Balancer → optionally Benchmark it.
+`;
+
+export function buildOpenApiSpec() {
+  return swaggerJsdoc({
+    definition: {
+      openapi: "3.0.3",
+      info: { title: "DGX Manager API", version: "1.0.0", description: SYSTEM_OVERVIEW },
+      tags: [
+        { name: "Nodes", description: "Register, audit, and provision DGX Spark nodes." },
+        { name: "Recipes", description: "Inference recipe catalog from sparkrun registries." },
+        { name: "Deployments", description: "Launch/stop inference workloads via sparkrun (registry ref, NFS path, or inline YAML)." },
+        { name: "Load Balancer", description: "Round-robin inference proxy over running deployments." },
+        { name: "Fine-tune", description: "Training jobs and deploying fine-tuned models." },
+        { name: "Benchmarks", description: "Server-side benchmark runs against deployments." },
+        { name: "Datasets", description: "Training/eval dataset management." },
+        { name: "Models", description: "Model records." },
+        { name: "Settings", description: "Server settings." },
+        { name: "Tokens", description: "HF / API tokens." },
+        { name: "Agent bundle", description: "Per-arch agent tarballs + install script." },
+      ],
+    },
+    // JSDoc @openapi annotations live in the route files (Task 16)
+    apis: ["packages/server/src/routes/*.ts", "packages/server/src/routes/*.js"],
+  });
+}
+
+/** Mount GET /api/openapi.json (spec) and GET /api/docs (Swagger UI). */
+export function mountOpenApi(app: Express) {
+  const spec = buildOpenApiSpec();
+  app.get("/api/openapi.json", (_req, res) => res.json(spec));
+  app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(spec));
+}
+```
+
+Then in `packages/server/src/index.ts` call `mountOpenApi(app)` after the routers are mounted.
+
+- [ ] **Step 5: Run test → PASS; full `npm test`; commit**
+```bash
+git add packages/server/src/openapi.ts packages/server/src/index.ts packages/server/package.json package-lock.json packages/server/src/__tests__/integration/openapi.routes.test.ts
+git commit -m "feat(server): OpenAPI spec + Swagger UI with system overview (D8)"
+```
+
+### Task 16: Annotate every route with comprehensive `@openapi` JSDoc
+
+**Files (modify — add JSDoc `@openapi` blocks above each handler):** all 13 routers —
+`nodes.ts`, `models.ts`, `deployments.ts`, `finetune.ts`, `loadbalancer.ts`, `recipes.ts`,
+`training-recipes.ts`, `tokens.ts`, `settings.ts`, `ollama-catalog.ts`, `agent-bundle.ts`,
+`datasets.ts`, `benchmarks.ts`.
+**Test:** extend `openapi.routes.test.ts`.
+
+- [ ] **Step 1: Extend the failing test** — assert real operations are documented with descriptions
+
+```ts
+it("documents key operations with comprehensive descriptions + tags", async () => {
+  const res = await request(app()).get("/api/openapi.json");
+  const paths = res.body.paths ?? {};
+  // deploy, list recipes, list nodes are all present and tagged + described
+  const deploy = paths["/api/deployments"]?.post;
+  expect(deploy).toBeTruthy();
+  expect(deploy.tags).toContain("Deployments");
+  expect((deploy.description ?? "").length).toBeGreaterThan(80); // comprehensive, not a stub
+  expect(paths["/api/recipes"]?.get?.tags).toContain("Recipes");
+  expect(paths["/api/nodes"]?.get?.tags).toContain("Nodes");
+  // the inline-recipe body field is documented on the deploy operation
+  expect(JSON.stringify(deploy.requestBody ?? {})).toMatch(/recipeYaml/);
+});
+```
+
+- [ ] **Step 2: Run → FAIL** (operations not yet annotated).
+
+- [ ] **Step 3: Annotate each route handler.** For every endpoint add a JSDoc block, e.g. above the deployments POST:
+
+```ts
+/**
+ * @openapi
+ * /api/deployments:
+ *   post:
+ *     tags: [Deployments]
+ *     summary: Launch an inference deployment via sparkrun
+ *     description: >
+ *       Launches a recipe on one or more DGX Spark nodes. The head-node agent runs
+ *       `sparkrun run`, which distributes the image+model and starts containers. Provide
+ *       exactly one recipe source: `recipeFile` (a registry recipe from GET /api/recipes),
+ *       `recipePath` (a YAML already staged under shared storage), or `recipeYaml` (an inline
+ *       recipe body — used by remote recipe-development machines that never touch the cluster
+ *       filesystem). VRAM admission runs before launch; returns the created Deployment record.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               nodeId: { type: string, description: "Single-node deploy target (or 'auto')." }
+ *               nodeIds: { type: array, items: { type: string }, description: "Cluster node ids, head first." }
+ *               recipeFile: { type: string, description: "Registry recipe ref from GET /api/recipes." }
+ *               recipePath: { type: string, description: "Path under shared storage to a recipe YAML." }
+ *               recipeYaml: { type: string, description: "Inline sparkrun recipe YAML body (remote dev)." }
+ *               config: { type: object, description: "Overrides: port, gpuMem, tensorParallel, maxModelLen…" }
+ *               displayName: { type: string }
+ *     responses:
+ *       200: { description: Created deployment record }
+ *       400: { description: Invalid request (bad recipe source / VRAM shortfall) }
+ */
+```
+
+Do the same for every operation in all 13 routers: a `tags`, a one-line `summary`, a multi-line
+`description` explaining the endpoint's role in the dgx-manager workflow, and request/response
+shapes. Keep descriptions comprehensive (an agent should understand the endpoint without source).
+
+- [ ] **Step 4: Run the OpenAPI test → PASS; full `npm test`; commit**
+```bash
+git add packages/server/src/routes/ packages/server/src/__tests__/integration/openapi.routes.test.ts
+git commit -m "docs(server): comprehensive @openapi annotations on all routes"
+```
 
 ## Phase 6 — Retire eugr code + finalize
 
