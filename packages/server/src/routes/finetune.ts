@@ -15,7 +15,7 @@ const VLLM_REPO_PATH = `${SHARED_STORAGE}/src/github/spark-vllm-docker`;
 
 /**
  * Path to the auto-generated vLLM recipe YAML for a given FineTuneJob.
- * Must match `generateLocalModelRecipe` in packages/agent/src/runtime/vllm.ts.
+ * Used for server-side cleanup of legacy eugr recipe files on disk.
  */
 function generatedRecipePath(jobId: string): string {
   return join(VLLM_REPO_PATH, "recipes", `finetune-${jobId.slice(0, 12)}.yaml`);

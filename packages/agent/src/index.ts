@@ -6,9 +6,8 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
 import { discoverRecipes } from "./recipes.js";
-import { launchRecipe, stopRecipe, checkDeployments, forceStopVllm, isVllmContainerRunning, isStopping, getTrackedDeployments, reattachLogs, generateLocalModelRecipe, isLaunchInProgress, untrackDeployment } from "./runtime/vllm.js";
+import { isStopping, untrackDeployment } from "./runtime/vllm.js";
 import { classifyDeadContainer, reconcileDeployStatus } from "./runtime/deploy-status.js";
-import { shouldForceStopSharedContainer, selectContainerOwnerId } from "./runtime/undeploy-policy.js";
 import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe } from "./runtime/sparkrun.js";
 import { checkSparkrunDeployments } from "./runtime/sparkrun-metrics.js";
 import { loadDeployments } from "./runtime/deployment-store.js";
@@ -172,51 +171,6 @@ function connect() {
 
   /** Setup tasks that run after successful registration (either nodeId or token flow). */
   function postRegistrationSetup() {
-    // Reconcile tracked deployments after restart.
-    //
-    // Important: this runs on every WS reconnect, not just after a full agent
-    // process restart. A WS-only reconnect (e.g. server container redeploy)
-    // leaves the in-process `running` map intact — the launch subprocess and
-    // its log forwarder are still alive. In that case we must NOT report
-    // "failed" just because no docker container exists yet; the subprocess
-    // could simply still be downloading or building. Reporting "failed" in
-    // that window flips the deployment to failed in the DB while bytes are
-    // still streaming to disk.
-    //
-    // Decision tree for each tracked deployment on reconnect:
-    //   1. Launch subprocess still alive in this process → in-progress, do
-    //      nothing. The existing log/phase stream will drive status.
-    //   2. Container running → "running" (post-restart reattach).
-    //   3. Container not running AND subprocess dead → "failed".
-    const tracked = getTrackedDeployments().filter((t) => t.kind !== "sparkrun");
-    if (tracked.length > 0) {
-      console.log(`Reconciling ${tracked.length} tracked deployment(s)`);
-      const containerUp = isVllmContainerRunning();
-      for (const t of tracked) {
-        if (isLaunchInProgress(t.deploymentId)) {
-          console.log(`[reconcile] ${t.deploymentId}: launch subprocess still alive, leaving status to existing log stream`);
-          continue;
-        }
-        sendMsg("agent:deployment:status", {
-          deploymentId: t.deploymentId,
-          status: containerUp ? "running" : "failed",
-          port: t.port,
-          error: containerUp ? undefined : "Container not running after agent restart",
-        });
-        // Reattach to docker logs for live streaming
-        if (containerUp) {
-          reattachLogs(t.deploymentId, (line) => {
-            sendMsg("agent:deployment:log", { deploymentId: t.deploymentId, log: line });
-          });
-        }
-      }
-    } else if (isVllmContainerRunning()) {
-      // Container running but no tracked deployment — likely a Ray worker
-      // started by another node's head agent. Do NOT stop it automatically
-      // as it may be part of an active cluster deployment.
-      console.log("Found vLLM container with no local tracking — may be a cluster worker, leaving it running");
-    }
-
     // Reconcile sparkrun deployments from the persistent store.
     // On a WS-only reconnect the launcher subprocess may still be alive in
     // this process (isLaunchInProgress is not applicable for sparkrun — we
@@ -682,112 +636,12 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         break;
       }
 
-      // vLLM (eugr) deployment — legacy path, recipeFile required
-      if (!recipeFile) {
-        sendMsg("agent:deployment:status", {
-          deploymentId,
-          status: "failed",
-          error: "No recipeFile specified",
-        });
-        return;
-      }
-      try {
-        sendMsg("agent:deployment:status", { deploymentId, status: "starting" });
-        let lastPhase = "starting";
-        // Auto-skip the model-download phase when the recipe's `model:` field
-        // is a local path (e.g. `/workspace/outputs/.../merged`). Without
-        // this, run-recipe.sh's hf-download step interprets the path as a
-        // HuggingFace repo id ("Repo id must be in the form 'repo_name' or
-        // 'namespace/repo_name'") and the deploy fails before vLLM starts.
-        // cmd:finetune:deploy already does this; cmd:deploy now matches.
-        let recipeModelIsLocal = false;
-        try {
-          const recipeContent = readFileSync(`${process.env.VLLM_REPO_PATH || `${process.env.SHARED_STORAGE || "/mnt/tank"}/src/github/spark-vllm-docker`}/${recipeFile}`, "utf-8");
-          const m = recipeContent.match(/^model:\s*(.+)$/m);
-          if (m && m[1].trim().startsWith("/")) recipeModelIsLocal = true;
-        } catch { /* if we can't read the recipe, fall back to default behavior */ }
-        const port = launchRecipe(
-          deploymentId,
-          recipeFile,
-          {
-            port: (config?.port as number) ?? 8000,
-            gpuMem: config?.gpuMem as number,
-            maxModelLen: config?.maxModelLen as number,
-            tensorParallel: config?.tensorParallel as number,
-            pipelineParallel: config?.pipelineParallel as number,
-            clusterNodes,
-            clusterNodeFastIps,
-            skipSetup: recipeModelIsLocal,
-            servedModelName,
-          },
-          (line) => {
-            // Collapse tqdm carriage-return updates so the log viewer doesn't
-            // accumulate one massive line per `Fetching ... files:` tick.
-            const cleaned = collapseCarriageReturns(line);
-            sendMsg("agent:deployment:log", { deploymentId, log: cleaned });
-
-            // Parse aggregate download progress (huggingface_hub multi-file
-            // tqdm) and emit a throttled progress event for the UI bar.
-            const progress = parseFetchingProgress(line);
-            if (progress) emitDeploymentProgress(deploymentId, progress);
-
-            // Detect deployment phase from log output
-            const phase = detectPhase(line);
-            if (phase && phase !== lastPhase) {
-              lastPhase = phase;
-              sendMsg("agent:deployment:status", {
-                deploymentId,
-                status: phase,
-                port: phase === "running" ? (config?.port as number) ?? 8000 : undefined,
-              });
-            }
-          },
-          (code) => {
-            // If we're being undeployed, don't report — the undeploy handler owns status
-            if (isStopping(deploymentId)) {
-              console.log(`[deploy] run-recipe.sh exited ${code} during undeploy, ignoring`);
-              return;
-            }
-            // run-recipe.sh exits after launching the docker container.
-            // Code 0 = container launched successfully (still running).
-            // Code != 0 = setup/launch failed.
-            if (code === 0) {
-              // Container should be running — verify and keep status as running
-              if (isVllmContainerRunning()) {
-                console.log(`[deploy] run-recipe.sh exited 0, container still running`);
-              } else {
-                sendMsg("agent:deployment:status", {
-                  deploymentId,
-                  status: "failed",
-                  error: "Container not running after launch script exited",
-                });
-                untrackDeployment(deploymentId);
-              }
-            } else {
-              // Check if container started despite script error (e.g. download warning)
-              if (isVllmContainerRunning()) {
-                console.log(`[deploy] run-recipe.sh exited ${code}, but container is running`);
-                sendMsg("agent:deployment:status", { deploymentId, status: "running", port });
-              } else {
-                sendMsg("agent:deployment:status", {
-                  deploymentId,
-                  status: "failed",
-                  error: `Launch failed with exit code ${code}`,
-                });
-                untrackDeployment(deploymentId);
-              }
-            }
-          }
-        );
-        // Status updates are driven by log phase detection, not sent here
-      } catch (err) {
-        sendMsg("agent:deployment:status", {
-          deploymentId,
-          status: "failed",
-          error: String(err),
-        });
-        untrackDeployment(deploymentId);
-      }
+      // Unknown deploy kind (no inlineRecipeYaml, no recipeRef, no ollama runtime)
+      sendMsg("agent:deployment:status", {
+        deploymentId,
+        status: "failed",
+        error: "No recipeRef or inlineRecipeYaml specified",
+      });
       break;
     }
 
@@ -834,67 +688,12 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             return;
           }
 
-          // All vLLM deployments on a node share ONE `vllm_node` container, and
-          // forceStopVllm is scoped to that container *name*. Only force-stop it
-          // if THIS deployment owns the running container — otherwise undeploying
-          // an unrelated (often already-dead) deployment would tear down whatever
-          // is actively serving. Owner comes from the persistent store, computed
-          // BEFORE stopRecipe (which drops this id from the store), so it holds
-          // across agent restarts where the in-memory map is empty.
-          const ownerId = selectContainerOwnerId(getTrackedDeployments());
-          const ownsContainer = shouldForceStopSharedContainer(
+          // No tracked deployment found — report stopped (idempotent)
+          sendMsg("agent:deployment:status", {
             deploymentId,
-            ownerId ? [ownerId] : [],
-            isVllmContainerRunning(),
-          );
-
-          // Safe no-op (returns false, touches nothing) when this deployment
-          // isn't the tracked running instance; kills its own wrapper otherwise.
-          stopRecipe(deploymentId, clusterNodes);
-
-          if (!ownsContainer) {
-            // A different deployment owns the live container (or nothing is
-            // running). Drop only this record; leave the serving container alone.
-            untrackDeployment(deploymentId);
-            sendMsg("agent:deployment:log", {
-              deploymentId,
-              log: "\n=== Removed deployment record — the node's vLLM container belongs to another deployment and was left running ===\n",
-            });
-            sendMsg("agent:deployment:status", {
-              deploymentId,
-              status: "stopped",
-              deleteAfter: deleteAfter || false,
-            });
-            return;
-          }
-
-          // This deployment owns the container — stop it for real.
-          sendMsg("agent:deployment:log", {
-            deploymentId,
-            log: "\n=== Stop requested by user — shutting down vLLM container ===\n",
+            status: "stopped",
+            deleteAfter: deleteAfter || false,
           });
-          forceStopVllm(clusterNodes);
-
-          // Wait for container to actually stop
-          let retries = 10;
-          while (retries > 0 && isVllmContainerRunning()) {
-            await new Promise((r) => setTimeout(r, 2000));
-            retries--;
-          }
-
-          if (isVllmContainerRunning()) {
-            sendMsg("agent:deployment:status", {
-              deploymentId,
-              status: "failed",
-              error: "Container did not stop within timeout",
-            });
-          } else {
-            sendMsg("agent:deployment:status", {
-              deploymentId,
-              status: "stopped",
-              deleteAfter: deleteAfter || false,
-            });
-          }
         } catch (err) {
           sendMsg("agent:deployment:status", {
             deploymentId,
