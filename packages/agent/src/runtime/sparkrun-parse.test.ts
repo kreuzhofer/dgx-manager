@@ -1,10 +1,15 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parseSparkrunList, type SparkrunRecipeSummary } from "./sparkrun-parse.js";
+import { parseSparkrunList, parseClusterId, type SparkrunRecipeSummary } from "./sparkrun-parse.js";
 
 const fixture = readFileSync(
   join(__dirname, "__fixtures__/sparkrun-list.json"),  // captured in Phase 0 (48 recipes)
+  "utf8",
+);
+
+const runFixture = readFileSync(
+  join(__dirname, "__fixtures__/sparkrun-run-dryrun.txt"),
   "utf8",
 );
 
@@ -42,5 +47,14 @@ describe("parseSparkrunList — deploy defaults", () => {
       if (r.gpuMemDefault !== undefined) expect(Number.isFinite(r.gpuMemDefault)).toBe(true);
     }
     expect(recipes.some((r) => r.minNodes >= 2)).toBe(true);
+  });
+});
+
+describe("parseClusterId", () => {
+  it("extracts the sparkrun_<hex> cluster id from run output", () => {
+    expect(parseClusterId(runFixture)).toBe("sparkrun_2cf3f3031766");
+  });
+  it("returns undefined when absent", () => {
+    expect(parseClusterId("no cluster line here")).toBeUndefined();
   });
 });

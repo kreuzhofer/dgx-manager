@@ -54,3 +54,9 @@ export function parseSparkrunList(raw: string): SparkrunRecipeSummary[] {
       return { ref: ref.trim(), name: ref.trim(), description: rest.join(" ").trim() || undefined, minNodes: 1 };
     });
 }
+
+/** Extract the `Cluster: sparkrun_<hex>` workload id printed by `sparkrun run`. */
+export function parseClusterId(runOutput: string): string | undefined {
+  const m = runOutput.match(/\bsparkrun_[0-9a-f]+\b/);
+  return m ? m[0] : undefined;
+}
