@@ -630,11 +630,14 @@ const spawnMock = vi.fn(() => ({
   on: vi.fn(),
   unref: vi.fn(),
 }));
-vi.mock("node:child_process", () => ({ spawn: spawnMock, execFileSync: vi.fn(() => "[]") }));
+const execFileSyncMock = vi.fn(() => "");
+vi.mock("node:child_process", () => ({ spawn: spawnMock, execFileSync: execFileSyncMock }));
+// avoid real ~/.dgx-agent writes during the launch test
+vi.mock("./deployment-store.js", () => ({ saveDeployment: vi.fn(), removeDeployment: vi.fn() }));
 
-import { launchSparkrun } from "./sparkrun.js";
+import { launchSparkrun, stopSparkrun, isWorkloadRunning } from "./sparkrun.js";
 
-beforeEach(() => spawnMock.mockClear());
+beforeEach(() => { spawnMock.mockClear(); execFileSyncMock.mockReset(); execFileSyncMock.mockReturnValue(""); });
 
 describe("launchSparkrun", () => {
   it("spawns uvx with sparkrun run argv for the given recipe + hosts", () => {
@@ -648,6 +651,24 @@ describe("launchSparkrun", () => {
     expect(argv).toContain("--no-follow");
   });
 });
+
+describe("stopSparkrun", () => {
+  it("calls sparkrun stop with target, -H hosts, and --tp", () => {
+    stopSparkrun("dep-1", "sparkrun_abc123", ["10.0.0.1", "10.0.0.2"], 2);
+    const [cmd, argv] = execFileSyncMock.mock.calls[0];
+    expect(cmd).toBe("uvx");
+    expect(argv).toEqual(expect.arrayContaining(["stop", "sparkrun_abc123", "-H", "10.0.0.1,10.0.0.2", "--tp", "2"]));
+  });
+});
+
+describe("isWorkloadRunning", () => {
+  it("true when check-job exits 0, false when it throws", () => {
+    execFileSyncMock.mockReturnValueOnce("");
+    expect(isWorkloadRunning("sparkrun_abc", ["10.0.0.1"])).toBe(true);
+    execFileSyncMock.mockImplementationOnce(() => { throw new Error("exit 1"); });
+    expect(isWorkloadRunning("sparkrun_abc", ["10.0.0.1"])).toBe(false);
+  });
+});
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -655,18 +676,24 @@ describe("launchSparkrun", () => {
 Run: `npx vitest run packages/agent/src/runtime/sparkrun.test.ts`
 Expected: FAIL — `launchSparkrun` not defined.
 
-- [ ] **Step 3: Write minimal implementation** (model `spawnTracked`/log-streaming on `vllm.ts` `launchRecipe`; reuse the existing phase-detection callbacks)
+- [ ] **Step 3: Write minimal implementation** (REVISED per Phase 0 — `parseClusterId` capture + `cluster check-job` liveness, no status-list parser)
+
+First extend `deployment-store.ts`'s `TrackedDeployment` interface with two optional fields:
+`clusterId?: string;` and `tp?: number;` (additive — existing `recipeFile`/`recipeName`/`port`/
+`clusterNodes` already cover the rest). No other store change.
 
 ```ts
+// packages/agent/src/runtime/sparkrun.ts
 import { spawn, execFileSync } from "node:child_process";
 import { SPARKRUN_PKG } from "../recipes.js";
 import { buildSparkrunArgs, type SparkrunLaunchOptions } from "./sparkrun-args.js";
-import { parseSparkrunStatus, type SparkrunWorkload } from "./sparkrun-parse.js";
+import { parseClusterId } from "./sparkrun-parse.js";
 import { saveDeployment, removeDeployment } from "./deployment-store.js";
 
-type Opts = Omit<SparkrunLaunchOptions, "recipeRef">;
+export type Opts = Omit<SparkrunLaunchOptions, "recipeRef"> & { recipeName?: string };
 
-/** Launch a recipe via sparkrun on the head node (this agent). Detached. */
+/** Launch a recipe via sparkrun on the head node (this agent). Detached.
+ *  Captures the `Cluster: sparkrun_<hex>` id from output and persists it for stop/check-job. */
 export function launchSparkrun(
   deploymentId: string,
   recipeRef: string,
@@ -674,41 +701,64 @@ export function launchSparkrun(
   onLog: (line: string) => void,
   onExit: (code: number | null) => void,
 ): void {
-  const sparkArgs = buildSparkrunArgs({ recipeRef, ...opts });
-  const argv = ["--from", SPARKRUN_PKG, "sparkrun", ...sparkArgs];
+  const argv = ["--from", SPARKRUN_PKG, "sparkrun", ...buildSparkrunArgs({ recipeRef, ...opts })];
   const child = spawn("uvx", argv, { detached: true });
-  child.stdout?.on("data", (b) => onLog(b.toString()));
-  child.stderr?.on("data", (b) => onLog(b.toString()));
+  const hosts = opts.hosts;
+  const tp = opts.tp ?? hosts.length;
+  let buf = "";
+  let clusterId: string | undefined;
+  const persist = () =>
+    saveDeployment({
+      deploymentId,
+      recipeFile: recipeRef,
+      recipeName: opts.recipeName ?? recipeRef,
+      port: opts.port ?? 8000,
+      startedAt: new Date().toISOString(),
+      clusterNodes: hosts,
+      clusterId,
+      tp,
+    });
+  const onData = (b: Buffer) => {
+    const s = b.toString();
+    onLog(s);
+    if (!clusterId) {
+      buf += s;
+      const id = parseClusterId(buf);
+      if (id) { clusterId = id; persist(); }   // re-persist once we know the id
+    }
+  };
+  child.stdout?.on("data", onData);
+  child.stderr?.on("data", onData);
   child.on("exit", (code) => onExit(code));
-  saveDeployment({ deploymentId, recipeRef, hosts: opts.hosts, port: opts.port, tp: opts.tp ?? opts.hosts.length });
+  persist();   // initial record (clusterId fills in when sparkrun prints it)
 }
 
-/** Stop a sparkrun workload. `--tp` is threaded for cluster resolution (V3). */
-export function stopSparkrun(deploymentId: string, recipeRef: string, tp?: number): void {
-  const args = ["--from", SPARKRUN_PKG, "sparkrun", "stop", recipeRef];
+/** Stop a sparkrun workload. target = stored clusterId (preferred) or recipe ref.
+ *  `-H hosts` and `--tp` are required to match the run-time cluster resolution (Phase 0). */
+export function stopSparkrun(deploymentId: string, target: string, hosts: string[], tp?: number): void {
+  const args = ["--from", SPARKRUN_PKG, "sparkrun", "stop", target, "-H", hosts.join(",")];
   if (tp != null) args.push("--tp", String(tp));
   try {
-    execFileSync("uvx", args, { timeout: 60_000 });
+    execFileSync("uvx", args, { timeout: 120_000 });
   } finally {
     removeDeployment(deploymentId);
   }
 }
 
-/** Query sparkrun for currently-running workloads (liveness source of truth). */
-export function listSparkrunWorkloads(): SparkrunWorkload[] {
+/** Liveness probe via `sparkrun cluster check-job` (exit 0 = running). target = clusterId|ref. */
+export function isWorkloadRunning(target: string, hosts: string[]): boolean {
   try {
-    const out = execFileSync("uvx", ["--from", SPARKRUN_PKG, "sparkrun", "status", "--json"], {
-      encoding: "utf8",
-      timeout: 30_000,
-    });
-    return parseSparkrunStatus(out);
+    execFileSync(
+      "uvx",
+      ["--from", SPARKRUN_PKG, "sparkrun", "cluster", "check-job", target, "-H", hosts.join(",")],
+      { timeout: 30_000, stdio: "ignore" },
+    );
+    return true;
   } catch {
-    return [];
+    return false;
   }
 }
 ```
-
-> NOTE: `saveDeployment`/`removeDeployment` signatures must match `deployment-store.ts`. If the current store keys on different fields, adjust the store's record type in this task to carry `{ deploymentId, recipeRef, hosts, port, tp }` and update its tests accordingly.
 
 - [ ] **Step 4: Run test to verify it passes**
 
