@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { parseVllmMetrics, firstErrorLine } from "./sparkrun-metrics.js";
+import { parseVllmMetrics, firstErrorLine, computeTps } from "./sparkrun-metrics.js";
 
 // Real Phase 0 shape: metric names carry {labels}; this vLLM uses kv_cache_usage_perc.
 const sample = `
@@ -38,6 +38,44 @@ vllm:kv_cache_usage_perc{engine="0"} 0.20
 `;
     const m = parseVllmMetrics(text);
     expect(m.kvCacheUsagePerc).toBeCloseTo(0.20);
+  });
+
+  it("extracts the generation_tokens_total counter (for tps)", () => {
+    const text = `
+vllm:num_requests_running{engine="0"} 1.0
+vllm:generation_tokens_total{engine="0",model_name="qwen3-1.7b"} 12345.0
+`;
+    expect(parseVllmMetrics(text).generationTokensTotal).toBe(12345);
+  });
+
+  it("leaves generationTokensTotal undefined when absent", () => {
+    expect(parseVllmMetrics(sample).generationTokensTotal).toBeUndefined();
+  });
+});
+
+// ── computeTps ──────────────────────────────────────────────────────────────
+
+describe("computeTps", () => {
+  it("returns null on the first sample (no baseline)", () => {
+    expect(computeTps(undefined, { total: 100, time: 1000 })).toBeNull();
+  });
+
+  it("computes tokens/sec as counter delta over elapsed seconds", () => {
+    // 200 tokens over 2s = 100 tok/s
+    expect(computeTps({ total: 100, time: 1000 }, { total: 300, time: 3000 })).toBe(100);
+  });
+
+  it("rounds to one decimal place", () => {
+    // 100 tokens over 3s = 33.33… → 33.3
+    expect(computeTps({ total: 0, time: 0 }, { total: 100, time: 3000 })).toBe(33.3);
+  });
+
+  it("returns null when the counter went backwards (container restart reset it)", () => {
+    expect(computeTps({ total: 500, time: 1000 }, { total: 10, time: 2000 })).toBeNull();
+  });
+
+  it("returns null on a non-positive interval", () => {
+    expect(computeTps({ total: 100, time: 2000 }, { total: 300, time: 2000 })).toBeNull();
   });
 });
 
@@ -285,6 +323,37 @@ describe("checkSparkrunDeployments", () => {
     expect(s.restartCount).toBe(5);
     expect(s.capturedLog).toContain("vllm serve: error: argument --compilation-config: Invalid JSON");
     expect(s.error).toBe("vllm serve: error: argument --compilation-config: Invalid JSON");
+  });
+
+  it("reports tps from the generation_tokens counter rate across two scrapes", async () => {
+    const dep = {
+      deploymentId: "dep-tps",
+      recipeFile: "qwen3-1.7b-vllm",
+      recipeName: "qwen3-1.7b",
+      port: 8000,
+      startedAt: "2026-01-01T00:00:00Z",
+      clusterNodes: ["10.0.0.1"],
+      clusterId: "sparkrun_tps01",
+    };
+    loadDeploymentsMock.mockReturnValue([dep]);
+    isWorkloadRunningMock.mockReturnValue(true);
+    const body = (gen: number) => `vllm:num_requests_running{engine="0"} 1.0\nvllm:generation_tokens_total{engine="0"} ${gen}.0\n`;
+
+    const nowSpy = vi.spyOn(Date, "now");
+
+    // First scrape: counter=1000 at t=10s → no baseline yet → tps null.
+    nowSpy.mockReturnValue(10_000);
+    fetchMock.mockResolvedValueOnce({ ok: true, text: async () => body(1000) });
+    let results = await checkSparkrunDeployments();
+    expect(results[0].tps).toBeNull();
+
+    // Second scrape: counter=1300 at t=12s → (1300-1000)/2s = 150 tok/s.
+    nowSpy.mockReturnValue(12_000);
+    fetchMock.mockResolvedValueOnce({ ok: true, text: async () => body(1300) });
+    results = await checkSparkrunDeployments();
+    expect(results[0].tps).toBe(150);
+
+    nowSpy.mockRestore();
   });
 
   it("does NOT flag a healthy loading container (state=running, restartCount=0)", async () => {

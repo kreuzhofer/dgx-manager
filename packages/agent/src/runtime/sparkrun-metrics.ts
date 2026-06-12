@@ -16,7 +16,30 @@ export function firstErrorLine(text: string): string | undefined {
 export interface VllmMetrics {
   numRequestsRunning?: number;
   kvCacheUsagePerc?: number;
+  generationTokensTotal?: number;
 }
+
+/** A reading of the cumulative generation-tokens counter at a point in time. */
+export interface TokenSample { total: number; time: number; }
+
+/**
+ * Tokens/sec from two `vllm:generation_tokens_total` counter samples — the
+ * throughput figure the dashboard shows. The metric is a monotonic counter, so
+ * the rate is the delta over elapsed wall-clock between two health-loop scrapes.
+ * Returns null on the first sample (no baseline), a non-positive interval, or a
+ * negative delta (the counter reset to 0 when the container restarted).
+ */
+export function computeTps(prev: TokenSample | undefined, curr: TokenSample): number | null {
+  if (!prev) return null;
+  const elapsedSec = (curr.time - prev.time) / 1000;
+  if (elapsedSec <= 0) return null;
+  const delta = curr.total - prev.total;
+  if (delta < 0) return null; // counter reset (container restart) — skip this interval
+  return Math.round((delta / elapsedSec) * 10) / 10;
+}
+
+/** Previous generation-tokens counter sample per deployment, for the tps rate. */
+const prevTokens = new Map<string, TokenSample>();
 
 /**
  * Parse a single Prometheus gauge from a metrics text blob.
@@ -43,6 +66,7 @@ export function parseVllmMetrics(text: string): VllmMetrics {
     numRequestsRunning: num(text, "vllm:num_requests_running"),
     kvCacheUsagePerc:
       num(text, "vllm:kv_cache_usage_perc") ?? num(text, "vllm:gpu_cache_usage_perc"),
+    generationTokensTotal: num(text, "vllm:generation_tokens_total"),
   };
 }
 
@@ -122,6 +146,13 @@ export async function checkSparkrunDeployments(): Promise<VllmStatus[]> {
         const m = parseVllmMetrics(text);
         status.requestsRunning = m.numRequestsRunning ?? null;
         status.kvCacheUsage = m.kvCacheUsagePerc ?? null;
+        // tps = rate of the generation-tokens counter between this scrape and
+        // the previous one for this deployment.
+        if (m.generationTokensTotal != null) {
+          const curr: TokenSample = { total: m.generationTokensTotal, time: Date.now() };
+          status.tps = computeTps(prevTokens.get(d.deploymentId), curr);
+          prevTokens.set(d.deploymentId, curr);
+        }
       } catch {
         // Metrics endpoint not ready yet — workload still alive, metrics null
       }
@@ -129,6 +160,11 @@ export async function checkSparkrunDeployments(): Promise<VllmStatus[]> {
 
     results.push(status);
   }
+
+  // Drop counter baselines for deployments that are no longer tracked, so a
+  // future deployment reusing an id doesn't inherit a stale (huge-delta) sample.
+  const liveIds = new Set(deployments.map((d) => d.deploymentId));
+  for (const id of prevTokens.keys()) if (!liveIds.has(id)) prevTokens.delete(id);
 
   return results;
 }
