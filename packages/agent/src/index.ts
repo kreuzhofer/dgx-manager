@@ -271,18 +271,28 @@ function connect() {
           // are already excluded by checkSparkrunDeployments, so reaching here
           // means the workload died on its own — treat as a crash.
           if (!status.containerRunning && !status.alive) {
-            const verdict = classifyDeadContainer(false, status.error);
+            // When we have captured container output (crash-loop or clean exit
+            // with logs), emit it to the deployment logstream so the real error
+            // (e.g. vllm serve argument errors) is visible via GET /api/deployments/:id/logs.
+            if (status.capturedLog || status.crashLoop) {
+              const head = status.crashLoop
+                ? `[agent] container is crash-looping (restart #${status.restartCount}) — capturing container output:`
+                : `[agent] container exited — capturing container output:`;
+              sendMsg("agent:deployment:log", { deploymentId: status.deploymentId, log: `${head}\n${status.capturedLog ?? ""}\n` });
+            }
             sendMsg("agent:deployment:status", {
               deploymentId: status.deploymentId,
-              status: verdict.status,
-              ...(verdict.error ? { error: verdict.error } : {}),
+              status: "failed",
+              error: status.error ?? classifyDeadContainer(false, status.error).error,
             });
-            // Untrack so the next health tick doesn't keep reporting this
-            // deployment as failed/running based on a shared vllm_node
-            // container. Without this, stale records from prior failed
-            // launches caused live containers to be misattributed across
-            // multiple deployment IDs.
-            untrackDeployment(status.deploymentId);
+            // Stop the actual container to cancel the unless-stopped restart loop,
+            // then untrack so the next health tick doesn't re-report this deployment.
+            const d = loadDeployments().find((x) => x.deploymentId === status.deploymentId);
+            if (d) {
+              try { stopSparkrun(d.deploymentId, d.clusterId ?? d.recipeFile, d.clusterNodes ?? [], d.tp); } catch { /* best effort */ }
+            } else {
+              untrackDeployment(status.deploymentId);
+            }
           } else if (status.containerRunning) {
             // Report vramActual for running vLLM containers
             const m = await collectMetrics();

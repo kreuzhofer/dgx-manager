@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { parseVllmMetrics } from "./sparkrun-metrics.js";
+import { parseVllmMetrics, firstErrorLine } from "./sparkrun-metrics.js";
 
 // Real Phase 0 shape: metric names carry {labels}; this vLLM uses kv_cache_usage_perc.
 const sample = `
@@ -41,16 +41,51 @@ vllm:kv_cache_usage_perc{engine="0"} 0.20
   });
 });
 
+// ── firstErrorLine ──────────────────────────────────────────────────────────
+
+describe("firstErrorLine", () => {
+  it("returns the first error-ish line from a multi-line blob", () => {
+    const blob = [
+      "Starting vllm server...",
+      "Loading model weights...",
+      "vllm serve: error: argument --compilation-config: Invalid JSON",
+      "Traceback (most recent call last):",
+    ].join("\n");
+    const result = firstErrorLine(blob);
+    expect(result).toBe("vllm serve: error: argument --compilation-config: Invalid JSON");
+  });
+
+  it("returns undefined when no error-ish line is found", () => {
+    const blob = "Starting up\nLoading weights\nAll good";
+    expect(firstErrorLine(blob)).toBeUndefined();
+  });
+
+  it("matches traceback keyword case-insensitively", () => {
+    const blob = "INFO: something\nTraceback (most recent call last):";
+    expect(firstErrorLine(blob)).toBe("Traceback (most recent call last):");
+  });
+
+  it("returns undefined on empty string", () => {
+    expect(firstErrorLine("")).toBeUndefined();
+  });
+});
+
 // ── checkSparkrunDeployments tests ──────────────────────────────────────────
 
-const { loadDeploymentsMock, isWorkloadRunningMock, fetchMock } = vi.hoisted(() => ({
+const { loadDeploymentsMock, isWorkloadRunningMock, inspectSparkrunContainerMock, snapshotContainerLogsMock, fetchMock } = vi.hoisted(() => ({
   loadDeploymentsMock: vi.fn(),
   isWorkloadRunningMock: vi.fn(),
+  inspectSparkrunContainerMock: vi.fn(),
+  snapshotContainerLogsMock: vi.fn(),
   fetchMock: vi.fn(),
 }));
 
 vi.mock("./deployment-store.js", () => ({ loadDeployments: loadDeploymentsMock }));
-vi.mock("./sparkrun.js", () => ({ isWorkloadRunning: isWorkloadRunningMock }));
+vi.mock("./sparkrun.js", () => ({
+  isWorkloadRunning: isWorkloadRunningMock,
+  inspectSparkrunContainer: inspectSparkrunContainerMock,
+  snapshotContainerLogs: snapshotContainerLogsMock,
+}));
 
 // Override global fetch
 vi.stubGlobal("fetch", fetchMock);
@@ -65,7 +100,12 @@ vllm:kv_cache_usage_perc{engine="0",model_name="qwen3-1.7b"} 0.42
 beforeEach(() => {
   loadDeploymentsMock.mockReset();
   isWorkloadRunningMock.mockReset();
+  inspectSparkrunContainerMock.mockReset();
+  snapshotContainerLogsMock.mockReset();
   fetchMock.mockReset();
+  // Default: no container found (healthy path — inspect returns null)
+  inspectSparkrunContainerMock.mockReturnValue(null);
+  snapshotContainerLogsMock.mockReturnValue("");
 });
 
 describe("checkSparkrunDeployments", () => {
@@ -187,5 +227,64 @@ describe("checkSparkrunDeployments", () => {
     expect(results).toHaveLength(1);
     expect(results[0].deploymentId).toBe("dep-stop-2");
     expect(results[0].containerRunning).toBe(true);
+  });
+
+  it("returns crashed status with capturedLog when container is crash-looping", async () => {
+    // Invariant: when a sparkrun container has restarted >= CRASH_LOOP_THRESHOLD
+    // times, checkSparkrunDeployments must surface the real error from container
+    // logs (not just "not running") so the deployment logstream shows the cause.
+    const crashLog = [
+      "INFO: Starting vllm server...",
+      "vllm serve: error: argument --compilation-config: Invalid JSON",
+      "Process exited with code 1",
+    ].join("\n");
+
+    loadDeploymentsMock.mockReturnValue([{
+      deploymentId: "dep-crash-1",
+      recipeFile: "qwen3-1.7b-vllm",
+      recipeName: "qwen3-1.7b",
+      port: 8000,
+      startedAt: "2026-01-01T00:00:00Z",
+      clusterNodes: ["10.0.0.1"],
+      clusterId: "sparkrun_crash01",
+    }]);
+    isWorkloadRunningMock.mockReturnValue(false);
+    inspectSparkrunContainerMock.mockReturnValue({ name: "sparkrun_crash01_solo", state: "restarting", restartCount: 5 });
+    snapshotContainerLogsMock.mockReturnValue(crashLog);
+
+    const results = await checkSparkrunDeployments();
+    expect(results).toHaveLength(1);
+    const s = results[0];
+    expect(s.deploymentId).toBe("dep-crash-1");
+    expect(s.alive).toBe(false);
+    expect(s.containerRunning).toBe(false);
+    expect(s.crashLoop).toBe(true);
+    expect(s.restartCount).toBe(5);
+    expect(s.capturedLog).toContain("vllm serve: error: argument --compilation-config: Invalid JSON");
+    expect(s.error).toBe("vllm serve: error: argument --compilation-config: Invalid JSON");
+  });
+
+  it("does NOT flag a healthy loading container (state=running, restartCount=0)", async () => {
+    // A container that is still starting up has state="running" + restartCount=0.
+    // It must NOT be flagged as failing — the health loop should see it as alive.
+    loadDeploymentsMock.mockReturnValue([{
+      deploymentId: "dep-loading-1",
+      recipeFile: "qwen3-1.7b-vllm",
+      recipeName: "qwen3-1.7b",
+      port: 8000,
+      startedAt: "2026-01-01T00:00:00Z",
+      clusterNodes: ["10.0.0.1"],
+      clusterId: "sparkrun_load01",
+    }]);
+    isWorkloadRunningMock.mockReturnValue(true);
+    inspectSparkrunContainerMock.mockReturnValue({ name: "sparkrun_load01_solo", state: "running", restartCount: 0 });
+    fetchMock.mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const results = await checkSparkrunDeployments();
+    expect(results).toHaveLength(1);
+    const s = results[0];
+    expect(s.alive).toBe(true);
+    expect(s.containerRunning).toBe(true);
+    expect(s.crashLoop).toBeUndefined();
   });
 });

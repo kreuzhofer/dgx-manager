@@ -23,16 +23,17 @@ function makeChild() {
 
 const children: ReturnType<typeof makeChild>[] = [];
 
-const { spawnMock, execFileSyncMock } = vi.hoisted(() => {
+const { spawnMock, execFileSyncMock, spawnSyncMock } = vi.hoisted(() => {
   const spawnMock = vi.fn();
   const execFileSyncMock = vi.fn(() => "");
-  return { spawnMock, execFileSyncMock };
+  const spawnSyncMock = vi.fn(() => ({ stdout: "", stderr: "" }));
+  return { spawnMock, execFileSyncMock, spawnSyncMock };
 });
 
-vi.mock("node:child_process", () => ({ spawn: spawnMock, execFileSync: execFileSyncMock }));
+vi.mock("node:child_process", () => ({ spawn: spawnMock, execFileSync: execFileSyncMock, spawnSync: spawnSyncMock }));
 vi.mock("./deployment-store.js", () => ({ saveDeployment: vi.fn(), removeDeployment: vi.fn() }));
 
-import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe } from "./sparkrun.js";
+import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe, inspectSparkrunContainer, snapshotContainerLogs } from "./sparkrun.js";
 
 beforeEach(() => {
   children.length = 0;
@@ -44,6 +45,8 @@ beforeEach(() => {
   });
   execFileSyncMock.mockReset();
   execFileSyncMock.mockReturnValue("");
+  spawnSyncMock.mockReset();
+  spawnSyncMock.mockReturnValue({ stdout: "", stderr: "" });
 });
 
 // ---------------------------------------------------------------------------
@@ -151,6 +154,89 @@ describe("isWorkloadRunning", () => {
     expect(isWorkloadRunning("sparkrun_abc", ["10.0.0.1"])).toBe(true);
     execFileSyncMock.mockImplementationOnce(() => { throw new Error("exit 1"); });
     expect(isWorkloadRunning("sparkrun_abc", ["10.0.0.1"])).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// writeInlineRecipe / removeInlineRecipe
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// inspectSparkrunContainer
+// ---------------------------------------------------------------------------
+
+describe("inspectSparkrunContainer", () => {
+  it("returns null when clusterId is undefined", () => {
+    expect(inspectSparkrunContainer(undefined)).toBeNull();
+  });
+
+  it("returns null when docker ps finds no container", () => {
+    // docker ps returns empty → containerNameFor returns null
+    spawnSyncMock.mockReturnValue({ stdout: "", stderr: "" });
+    expect(inspectSparkrunContainer("sparkrun_abc123")).toBeNull();
+  });
+
+  it("parses state and restartCount from docker inspect output", () => {
+    // First call: docker ps to find name; second call: docker inspect
+    spawnSyncMock
+      .mockReturnValueOnce({ stdout: "sparkrun_abc123_solo\n", stderr: "" })   // ps
+      .mockReturnValueOnce({ stdout: "exited 5\n", stderr: "" });              // inspect
+    const result = inspectSparkrunContainer("sparkrun_abc123");
+    expect(result).not.toBeNull();
+    expect(result!.name).toBe("sparkrun_abc123_solo");
+    expect(result!.state).toBe("exited");
+    expect(result!.restartCount).toBe(5);
+  });
+
+  it("parses restarting state with restartCount 3", () => {
+    spawnSyncMock
+      .mockReturnValueOnce({ stdout: "sparkrun_abc456_solo\n", stderr: "" })
+      .mockReturnValueOnce({ stdout: "restarting 3\n", stderr: "" });
+    const result = inspectSparkrunContainer("sparkrun_abc456");
+    expect(result!.state).toBe("restarting");
+    expect(result!.restartCount).toBe(3);
+  });
+
+  it("returns null when docker inspect returns empty output", () => {
+    spawnSyncMock
+      .mockReturnValueOnce({ stdout: "sparkrun_abc789_solo\n", stderr: "" })
+      .mockReturnValueOnce({ stdout: "", stderr: "" });
+    expect(inspectSparkrunContainer("sparkrun_abc789")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// snapshotContainerLogs
+// ---------------------------------------------------------------------------
+
+describe("snapshotContainerLogs", () => {
+  it("returns empty string when clusterId is undefined", () => {
+    expect(snapshotContainerLogs(undefined)).toBe("");
+  });
+
+  it("returns empty string when no container found", () => {
+    spawnSyncMock.mockReturnValue({ stdout: "", stderr: "" });
+    expect(snapshotContainerLogs("sparkrun_abc123")).toBe("");
+  });
+
+  it("concatenates stdout and stderr from docker logs", () => {
+    spawnSyncMock
+      .mockReturnValueOnce({ stdout: "sparkrun_abc123_solo\n", stderr: "" })   // ps
+      .mockReturnValueOnce({                                                    // logs
+        stdout: "Starting vllm...\n",
+        stderr: "vllm serve: error: argument --compilation-config: Invalid JSON\n",
+      });
+    const result = snapshotContainerLogs("sparkrun_abc123", 200);
+    expect(result).toContain("Starting vllm...");
+    expect(result).toContain("vllm serve: error: argument --compilation-config: Invalid JSON");
+  });
+
+  it("trims the combined output", () => {
+    spawnSyncMock
+      .mockReturnValueOnce({ stdout: "sparkrun_abc123_solo\n", stderr: "" })
+      .mockReturnValueOnce({ stdout: "  log line  \n  ", stderr: "\n  " });
+    const result = snapshotContainerLogs("sparkrun_abc123");
+    expect(result).toBe("log line");
   });
 });
 

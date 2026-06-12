@@ -1,6 +1,17 @@
 import { loadDeployments } from "./deployment-store.js";
-import { isWorkloadRunning } from "./sparkrun.js";
+import { isWorkloadRunning, inspectSparkrunContainer, snapshotContainerLogs } from "./sparkrun.js";
 import type { VllmStatus } from "./vllm.js";
+
+const CRASH_LOOP_THRESHOLD = 2;
+
+/**
+ * Pick a representative error line from captured container logs.
+ * Looks for the first line that contains a recognisable error keyword.
+ */
+export function firstErrorLine(text: string): string | undefined {
+  const m = text.split("\n").find((l) => /error|invalid|traceback|exception|keyerror|raise |fatal|not found/i.test(l));
+  return m?.trim();
+}
 
 export interface VllmMetrics {
   numRequestsRunning?: number;
@@ -56,6 +67,32 @@ export async function checkSparkrunDeployments(): Promise<VllmStatus[]> {
     // that hasn't fully vanished yet must NOT be reported as a crash — exclude
     // it from the results so the health loop never mis-classifies it as failed.
     if (d.stopping && !running) continue;
+
+    // Inspect the underlying container to detect crash-loops or unexpected exits.
+    // A healthy loading container has state="running" + restartCount=0, so it is
+    // NOT flagged here.  Only act when the container has restarted too many times
+    // or is in a non-running/non-created terminal state.
+    const c = inspectSparkrunContainer(d.clusterId);
+    const failing = c != null && (c.restartCount >= CRASH_LOOP_THRESHOLD || (c.state !== "running" && c.state !== "created"));
+    if (failing && !d.stopping) {
+      const snap = snapshotContainerLogs(d.clusterId, 200);
+      results.push({
+        deploymentId: d.deploymentId,
+        recipeName: d.recipeName,
+        port: d.port,
+        alive: false,
+        containerRunning: false,
+        requestsRunning: null,
+        requestsWaiting: null,
+        kvCacheUsage: null,
+        tps: null,
+        crashLoop: c.restartCount >= CRASH_LOOP_THRESHOLD,
+        restartCount: c.restartCount,
+        capturedLog: snap || undefined,
+        error: firstErrorLine(snap) ?? `container ${c.state} (restart #${c.restartCount})`,
+      });
+      continue;
+    }
 
     const status: VllmStatus = {
       deploymentId: d.deploymentId,

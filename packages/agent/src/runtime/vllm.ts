@@ -12,6 +12,9 @@ export interface VllmStatus {
   kvCacheUsage: number | null;
   tps: number | null;
   error?: string;
+  crashLoop?: boolean;
+  restartCount?: number;
+  capturedLog?: string;
 }
 
 interface VllmInstance {

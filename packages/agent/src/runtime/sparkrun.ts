@@ -1,4 +1,4 @@
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, execFileSync, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -60,6 +60,39 @@ export function stopSparkrun(deploymentId: string, target: string, hosts: string
   if (tp != null) args.push("--tp", String(tp));
   try { execFileSync("uvx", args, { timeout: 120_000 }); }
   finally { removeDeployment(deploymentId); }
+}
+
+/** Find the container name for a sparkrun cluster id (e.g. sparkrun_<hex>_solo). */
+function containerNameFor(clusterId: string): string | null {
+  const r = spawnSync("docker", ["ps", "-a", "--filter", `name=${clusterId}`, "--format", "{{.Names}}"],
+    { encoding: "utf8", timeout: 10_000 });
+  const name = (r.stdout || "").trim().split("\n")[0];
+  return name || null;
+}
+
+export interface SparkrunContainerState { name: string; state: string; restartCount: number; }
+
+/** Read-only: docker state + restart count for a sparkrun workload. null if not found. */
+export function inspectSparkrunContainer(clusterId?: string): SparkrunContainerState | null {
+  if (!clusterId) return null;
+  const name = containerNameFor(clusterId);
+  if (!name) return null;
+  const r = spawnSync("docker", ["inspect", name, "--format", "{{.State.Status}} {{.RestartCount}}"],
+    { encoding: "utf8", timeout: 10_000 });
+  const out = (r.stdout || "").trim();
+  if (!out) return null;
+  const [state, rc] = out.split(/\s+/);
+  return { name, state, restartCount: Number(rc) || 0 };
+}
+
+/** Read-only: snapshot the last `tail` lines of a sparkrun container's combined stdout+stderr. */
+export function snapshotContainerLogs(clusterId?: string, tail = 200): string {
+  if (!clusterId) return "";
+  const name = containerNameFor(clusterId);
+  if (!name) return "";
+  const r = spawnSync("docker", ["logs", name, "--tail", String(tail)],
+    { encoding: "utf8", timeout: 15_000 });
+  return ((r.stdout || "") + (r.stderr || "")).trim();
 }
 
 export function isWorkloadRunning(target: string, hosts: string[]): boolean {
