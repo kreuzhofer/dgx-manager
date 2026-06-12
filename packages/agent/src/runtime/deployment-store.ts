@@ -9,6 +9,8 @@ export interface TrackedDeployment {
   port: number;
   startedAt: string;
   clusterNodes?: string[];
+  clusterId?: string;
+  tp?: number;
 }
 
 // Default to a user-writable location. The agent runs as a non-root systemd
