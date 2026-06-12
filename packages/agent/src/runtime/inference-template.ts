@@ -150,3 +150,37 @@ export function findInferenceTemplate(
   const candidate = join(recipeDir, filename);
   return existsSync(candidate) ? candidate : null;
 }
+
+/**
+ * Synthesize a sparkrun-compatible recipe YAML for a locally merged fine-tuned
+ * model when no inference template was shipped with the training recipe.
+ *
+ * The returned string is a ready-to-write `.yaml` file — just `writeFileSync`
+ * it to a path and pass that path to `launchSparkrun` as the `recipeRef`.
+ */
+export function renderSparkrunFinetuneRecipe(p: {
+  mergedModelPath: string;
+  servedModelName: string;
+  container: string;
+  maxModelLen?: number;
+  gpuMem?: number;
+}): string {
+  return [
+    `model: ${p.mergedModelPath}`,
+    `runtime: vllm`,
+    `container: ${p.container}`,
+    `defaults:`,
+    `  port: 8000`,
+    `  host: 0.0.0.0`,
+    `  tensor_parallel: 1`,
+    `  gpu_memory_utilization: ${p.gpuMem ?? 0.85}`,
+    `  max_model_len: ${p.maxModelLen ?? 4096}`,
+    `  served_model_name: ${p.servedModelName}`,
+    `command: |`,
+    `  vllm serve ${p.mergedModelPath} --host {host} --port {port} \\`,
+    `    --max-model-len {max_model_len} --gpu-memory-utilization {gpu_memory_utilization} \\`,
+    `    -tp {tensor_parallel} --served-model-name {served_model_name} \\`,
+    `    --enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3 --dtype auto`,
+    ``,
+  ].join("\n");
+}

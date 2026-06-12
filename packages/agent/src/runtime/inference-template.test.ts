@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { applyFinetuneSubstitutions, MERGED_PATH_PLACEHOLDER } from "./inference-template.js";
+import { applyFinetuneSubstitutions, MERGED_PATH_PLACEHOLDER, renderSparkrunFinetuneRecipe } from "./inference-template.js";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -153,6 +153,55 @@ describe("findInferenceTemplate(variant)", () => {
     expect(findInferenceTemplate(dir, "bf16")).toBeNull();
     expect(findInferenceTemplate(dir, "fp8")).toBeNull();
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("renderSparkrunFinetuneRecipe", () => {
+  it("emits a sparkrun recipe pointing at the merged model with runtime vllm", () => {
+    const yaml = renderSparkrunFinetuneRecipe({
+      mergedModelPath: "/workspace/outputs/abc/merged",
+      servedModelName: "My-Model",
+      container: "vllm-node",
+    });
+    expect(yaml).toContain("runtime: vllm");
+    expect(yaml).toContain("/workspace/outputs/abc/merged");
+    expect(yaml).toContain("My-Model");
+  });
+
+  it("uses defaults for gpuMem and maxModelLen when not provided", () => {
+    const yaml = renderSparkrunFinetuneRecipe({
+      mergedModelPath: "/mnt/tank/outputs/xyz/merged",
+      servedModelName: "test-model",
+      container: "vllm-node",
+    });
+    expect(yaml).toContain("gpu_memory_utilization: 0.85");
+    expect(yaml).toContain("max_model_len: 4096");
+  });
+
+  it("uses provided gpuMem and maxModelLen when specified", () => {
+    const yaml = renderSparkrunFinetuneRecipe({
+      mergedModelPath: "/workspace/merged",
+      servedModelName: "custom-model",
+      container: "vllm-custom",
+      gpuMem: 0.95,
+      maxModelLen: 8192,
+    });
+    expect(yaml).toContain("gpu_memory_utilization: 0.95");
+    expect(yaml).toContain("max_model_len: 8192");
+    expect(yaml).toContain("container: vllm-custom");
+  });
+
+  it("includes the vllm serve command with placeholder substitutions", () => {
+    const yaml = renderSparkrunFinetuneRecipe({
+      mergedModelPath: "/workspace/outputs/abc/merged",
+      servedModelName: "My-Model",
+      container: "vllm-node",
+    });
+    expect(yaml).toContain("vllm serve /workspace/outputs/abc/merged");
+    expect(yaml).toContain("{host}");
+    expect(yaml).toContain("{port}");
+    expect(yaml).toContain("{tensor_parallel}");
+    expect(yaml).toContain("{served_model_name}");
   });
 });
 

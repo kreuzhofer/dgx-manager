@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { execSync, spawn } from "child_process";
 import { hostname as osHostname, homedir } from "os";
 import { dirname, join } from "path";
@@ -14,6 +14,7 @@ import { checkSparkrunDeployments } from "./runtime/sparkrun-metrics.js";
 import { loadDeployments } from "./runtime/deployment-store.js";
 import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth } from "./runtime/ollama.js";
 import { discoverTrainingRecipes } from "./training-recipes.js";
+import { findInferenceTemplate, applyFinetuneSubstitutions, renderSparkrunFinetuneRecipe } from "./runtime/inference-template.js";
 import { startFinetuneJob, stopFinetuneJob, mergeLoraAdapter, reattachFinetuneJobs } from "./runtime/finetune.js";
 import { quantizeMergedToFp8 } from "./runtime/finetune-quantize.js";
 import { selfAudit } from "./self-audit.js";
@@ -1009,7 +1010,7 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
     case "cmd:finetune:deploy": {
       const {
         jobId, deploymentId, modelPath, deployContainer, config,
-        clusterNodes, clusterNodeFastIps, modelName, recipeFile, artifactVariant,
+        clusterNodes, modelName, recipeFile, artifactVariant,
       } = msg.payload as {
         jobId: string;
         deploymentId: string;
@@ -1023,89 +1024,115 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         artifactVariant?: "bf16" | "fp8";
       };
 
-      const isCluster = Array.isArray(clusterNodes) && clusterNodes.length > 1;
       const port = (config?.port as number) ?? 8000;
       const gpuMem = (config?.gpuMem as number) ?? 0.85;
       const maxModelLen = (config?.maxModelLen as number) ?? 4096;
       const tensorParallel = config?.tensorParallel as number | undefined;
       const pipelineParallel = config?.pipelineParallel as number | undefined;
+      const servedModelName = modelName || jobId;
 
-      console.log(`[finetune] Deploying merged model from ${modelPath} (container: ${deployContainer || "vllm-node"}, cluster: ${isCluster ? clusterNodes!.length + " nodes" : "solo"}${recipeFile ? `, recipe: ${recipeFile}` : ""})`);
+      console.log(`[finetune] Deploying merged model via sparkrun from ${modelPath} (container: ${deployContainer || "vllm-node"}${recipeFile ? `, recipe: ${recipeFile}` : ""})`);
 
       try {
-        // Resolve the training recipe's directory on the NFS share so
-        // generateLocalModelRecipe can pick up an `inference.yaml` /
-        // `inference.j2` override shipped alongside the recipe. Falls back
-        // to undefined → fully auto-generated recipe when the deploy
-        // payload doesn't carry a recipeFile.
+        // Resolve the recipe YAML to deploy.
+        // PREFER an inference template if the training recipe ships one —
+        // those templates are sparkrun-compatible and carry hand-tuned
+        // launch flags for the specific model family.
+        // Fall back to synthesising a generic sparkrun recipe from params.
+        let recipeYaml: string;
         const recipeDir = recipeFile
           ? join(FINETUNE_RECIPES_REPO, recipeFile)
           : undefined;
+        const variantId = artifactVariant ?? "bf16";
+        const templatePath = recipeDir
+          ? findInferenceTemplate(recipeDir, variantId)
+          : null;
 
-        const generatedRecipeFile = generateLocalModelRecipe({
-          jobId,
-          modelPath,
-          container: deployContainer || "vllm-node",
+        if (templatePath) {
+          console.log(`[finetune] Using inference template: ${templatePath}`);
+          const raw = readFileSync(templatePath, "utf-8");
+          recipeYaml = applyFinetuneSubstitutions(raw, {
+            modelPath,
+            servedModelName,
+          });
+        } else {
+          console.log(`[finetune] No inference template found — synthesising sparkrun recipe`);
+          recipeYaml = renderSparkrunFinetuneRecipe({
+            mergedModelPath: modelPath,
+            servedModelName,
+            container: deployContainer || "vllm-node",
+            maxModelLen,
+            gpuMem,
+          });
+        }
+
+        // Write the resolved YAML to shared storage so sparkrun can locate it.
+        const recipesDir = `${process.env.SHARED_STORAGE || "/mnt/tank"}/recipes`;
+        mkdirSync(recipesDir, { recursive: true });
+        const recipeFilePath = join(recipesDir, `finetune-${jobId.slice(0, 12)}.yaml`);
+        writeFileSync(recipeFilePath, recipeYaml, "utf-8");
+        console.log(`[finetune] Wrote sparkrun recipe to ${recipeFilePath}`);
+
+        // Build hosts: clusterNodes head-first when provided, else local solo.
+        const hosts: string[] = (Array.isArray(clusterNodes) && clusterNodes.length > 0)
+          ? clusterNodes
+          : ["localhost"];
+
+        const opts = {
+          hosts,
+          tp: tensorParallel,
+          pp: pipelineParallel,
           port,
-          gpuMemoryUtilization: gpuMem,
+          gpuMem,
           maxModelLen,
-          // For cluster mode, both the recipe YAML's solo_only marker AND
-          // the actual launch topology need to be set. The YAML drops
-          // solo_only; the command gains `--distributed-executor-backend
-          // ray` + a SPREAD placement env. tensorParallel/pipelineParallel
-          // are embedded as `defaults` AND substituted into the command
-          // template — without this, run-recipe.py silently dropped the
-          // `--tp N` CLI override (no `{tensor_parallel}` placeholder to
-          // substitute into) and vLLM defaulted to TP=1 even though Ray
-          // was correctly spanning the cluster.
-          isCluster,
-          tensorParallel: tensorParallel ?? 1,
-          pipelineParallel: pipelineParallel ?? 1,
-          servedModelName: modelName,
-          recipeDir,
-          artifactVariant: artifactVariant ?? "bf16",
-        });
+          servedModelName,
+          recipeName: servedModelName,
+        };
 
         sendMsg("agent:deployment:status", { deploymentId, status: "starting" });
         let lastPhase = "starting";
-        launchRecipe(
+
+        launchSparkrun(
           deploymentId,
-          generatedRecipeFile,
-          {
-            port,
-            gpuMem,
-            maxModelLen,
-            tensorParallel,
-            pipelineParallel,
-            clusterNodes: isCluster ? clusterNodes : undefined,
-            clusterNodeFastIps: isCluster ? clusterNodeFastIps : undefined,
-            skipSetup: true,
-          },
+          recipeFilePath,
+          opts,
           (line) => {
-            sendMsg("agent:deployment:log", { deploymentId, log: line });
+            const cleaned = collapseCarriageReturns(line);
+            sendMsg("agent:deployment:log", { deploymentId, log: cleaned });
+
+            const progress = parseFetchingProgress(line);
+            if (progress) emitDeploymentProgress(deploymentId, progress);
+
             const phase = detectPhase(line);
             if (phase && phase !== lastPhase) {
               lastPhase = phase;
-              sendMsg("agent:deployment:status", { deploymentId, status: phase });
+              sendMsg("agent:deployment:status", {
+                deploymentId,
+                status: phase,
+                port: phase === "running" ? port : undefined,
+              });
             }
           },
           (code) => {
-            if (code === 0 && isVllmContainerRunning()) {
-              console.log(`[finetune] Deploy run-recipe.sh exited 0, container running`);
-            } else if (!isVllmContainerRunning()) {
+            // sparkrun run exits 0 once the workload is launched (--no-follow).
+            // Non-zero means the launch itself failed.
+            if (code === 0) {
+              console.log(`[finetune] sparkrun launcher exited 0 for ${deploymentId}`);
+              // Workload should now be discoverable via check-job; health-check
+              // loop will confirm and report "running".
+            } else {
               sendMsg("agent:deployment:status", {
-                deploymentId, status: "failed",
-                error: code === 0 ? "Container not running after launch" : `Launch failed with exit code ${code}`,
+                deploymentId,
+                status: "failed",
+                error: `Sparkrun finetune deploy failed with exit code ${code}`,
               });
-              untrackDeployment(deploymentId);
             }
-          }
+          },
         );
       } catch (err) {
         sendMsg("agent:deployment:status", {
           deploymentId, status: "failed", error: String(err),
         });
-        untrackDeployment(deploymentId);
       }
       break;
     }
