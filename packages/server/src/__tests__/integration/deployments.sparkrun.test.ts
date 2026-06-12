@@ -230,3 +230,68 @@ describe("POST /api/deployments — recipePath → recipeRef forwarding", () => 
     expect(msg.payload.inlineRecipeYaml).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Restart fix: POST /:id/restart on a vLLM deployment must send recipeRef
+// so the agent's sparkrun branch is triggered (not the "No recipeRef" error).
+// ---------------------------------------------------------------------------
+
+describe("POST /api/deployments/:id/restart — vLLM deployment sends recipeRef", () => {
+  it("emits cmd:deploy with recipeRef set to the stored recipeFile", async () => {
+    await wipeAll();
+
+    // Seed a node and a vLLM deployment that was created with a registry recipe.
+    await prisma.node.create({
+      data: {
+        id: "node-restart-1",
+        name: "dgx-spark-restart-01",
+        ipAddress: "192.168.44.97",
+        vramTotal: 122_502,
+        status: "online",
+      },
+    });
+
+    const recipeFileRef = "@sparkrun-transitional/qwen3-1.7b-vllm";
+    const savedConfig = {
+      recipeFile: recipeFileRef,
+      port: 8000,
+      gpuMem: 0.85,
+    };
+
+    const model = await prisma.model.create({
+      data: {
+        name: "qwen3-1.7b",
+        runtime: "vllm",
+      },
+    });
+
+    const deployment = await prisma.deployment.create({
+      data: {
+        nodeId: "node-restart-1",
+        modelId: model.id,
+        status: "failed", // typical state before a restart
+        config: JSON.stringify(savedConfig),
+      },
+    });
+
+    const { hub, sent } = makeStubHub();
+    const app = makeApp(hub);
+
+    const res = await request(app)
+      .post(`/api/deployments/${deployment.id}/restart`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("restarting");
+
+    // Exactly one cmd:deploy must have been emitted.
+    expect(sent).toHaveLength(1);
+    const msg = sent[0].message as { type: string; payload: Record<string, unknown> };
+    expect(msg.type).toBe("cmd:deploy");
+
+    // recipeRef must be set (not undefined) so the agent's sparkrun branch fires.
+    expect(msg.payload.recipeRef).toBe(recipeFileRef);
+    // recipeFile is still sent for backwards compatibility.
+    expect(msg.payload.recipeFile).toBe(recipeFileRef);
+  });
+});

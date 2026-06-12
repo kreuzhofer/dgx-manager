@@ -145,4 +145,47 @@ describe("checkSparkrunDeployments", () => {
     const results = await checkSparkrunDeployments();
     expect(results).toHaveLength(0);
   });
+
+  it("does NOT report a deployment as failed when stopping===true and workload is no longer running", async () => {
+    // Invariant: a deployment that cmd:undeploy has marked stopping===true in
+    // the store must be excluded from the returned list when the workload is
+    // gone — the health loop must never see it as a crash.
+    loadDeploymentsMock.mockReturnValue([{
+      deploymentId: "dep-stop-1",
+      recipeFile: "qwen3-1.7b-vllm",
+      recipeName: "qwen3-1.7b",
+      port: 8000,
+      startedAt: "2026-01-01T00:00:00Z",
+      clusterNodes: ["10.0.0.1"],
+      clusterId: "sparkrun_abc456",
+      stopping: true,
+    }]);
+    isWorkloadRunningMock.mockReturnValue(false);
+
+    const results = await checkSparkrunDeployments();
+    // The stopping-and-gone entry must be absent from the results entirely.
+    expect(results).toHaveLength(0);
+  });
+
+  it("still reports a stopping deployment that is still running (workload hasn't stopped yet)", async () => {
+    // If stopping===true but the workload is still alive, include it so the
+    // health loop can continue to report vramActual until it actually stops.
+    loadDeploymentsMock.mockReturnValue([{
+      deploymentId: "dep-stop-2",
+      recipeFile: "qwen3-1.7b-vllm",
+      recipeName: "qwen3-1.7b",
+      port: 8000,
+      startedAt: "2026-01-01T00:00:00Z",
+      clusterNodes: ["10.0.0.1"],
+      clusterId: "sparkrun_abc789",
+      stopping: true,
+    }]);
+    isWorkloadRunningMock.mockReturnValue(true);
+    fetchMock.mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const results = await checkSparkrunDeployments();
+    expect(results).toHaveLength(1);
+    expect(results[0].deploymentId).toBe("dep-stop-2");
+    expect(results[0].containerRunning).toBe(true);
+  });
 });

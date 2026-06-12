@@ -55,8 +55,23 @@ export function parseSparkrunList(raw: string): SparkrunRecipeSummary[] {
     });
 }
 
-/** Extract the `Cluster: sparkrun_<hex>` workload id printed by `sparkrun run`. */
+/**
+ * Extract the `Cluster: sparkrun_<hex>` workload id printed by `sparkrun run`.
+ *
+ * Prefers a `sparkrun_<hex>` token that appears on a line containing the
+ * `Cluster:` label (the canonical output format).  Falls back to the first
+ * `sparkrun_<hex>` token anywhere in the output so that minor format changes
+ * in future sparkrun versions don't break cluster-id extraction.
+ */
 export function parseClusterId(runOutput: string): string | undefined {
+  // Primary: look for a line that contains "Cluster:" and a sparkrun_<hex> token.
+  for (const line of runOutput.split("\n")) {
+    if (/\bCluster\s*:/i.test(line)) {
+      const m = line.match(/\bsparkrun_[0-9a-f]+\b/);
+      if (m) return m[0];
+    }
+  }
+  // Fallback: first sparkrun_<hex> token anywhere in the output.
   const m = runOutput.match(/\bsparkrun_[0-9a-f]+\b/);
   return m ? m[0] : undefined;
 }

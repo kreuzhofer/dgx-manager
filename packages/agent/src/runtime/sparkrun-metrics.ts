@@ -52,6 +52,11 @@ export async function checkSparkrunDeployments(): Promise<VllmStatus[]> {
     const hosts = d.clusterNodes ?? [];
     const running = isWorkloadRunning(target, hosts);
 
+    // An intentional stop (cmd:undeploy marked stopping===true in the store)
+    // that hasn't fully vanished yet must NOT be reported as a crash — exclude
+    // it from the results so the health loop never mis-classifies it as failed.
+    if (d.stopping && !running) continue;
+
     const status: VllmStatus = {
       deploymentId: d.deploymentId,
       recipeName: d.recipeName,

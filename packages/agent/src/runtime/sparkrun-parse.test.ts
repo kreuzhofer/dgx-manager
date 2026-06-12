@@ -57,4 +57,20 @@ describe("parseClusterId", () => {
   it("returns undefined when absent", () => {
     expect(parseClusterId("no cluster line here")).toBeUndefined();
   });
+  it("prefers the Cluster: line over an earlier stray sparkrun_<hex> token", () => {
+    // An earlier line has a stray sparkrun_deadbeef that should NOT be returned;
+    // the real cluster id appears on the canonical "Cluster:" label line.
+    const output = [
+      "Info: warming cache for sparkrun_deadbeef (unrelated)",
+      "",
+      "Cluster:   sparkrun_2cf3f3031766",
+      "",
+      "Serve command:",
+    ].join("\n");
+    expect(parseClusterId(output)).toBe("sparkrun_2cf3f3031766");
+  });
+  it("falls back to the first token when no Cluster: line is present", () => {
+    const output = "some line with sparkrun_aabbccdd in it\nanother line";
+    expect(parseClusterId(output)).toBe("sparkrun_aabbccdd");
+  });
 });

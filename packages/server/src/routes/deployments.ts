@@ -689,6 +689,13 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
         modelName: isOllamaRestart ? config.modelName : undefined,
         modelType: isOllamaRestart ? (config.modelType || "chat") : undefined,
         recipeFile: isOllamaRestart ? undefined : config.recipeFile,
+        // recipeRef is required for the sparkrun branch in the agent
+        // (the `if (inlineRecipeYaml != null || payloadRecipeRef != null)`
+        // guard). Persisted config stores the registry/path ref as
+        // `recipeFile`; mirror that into `recipeRef` so restarts reach the
+        // sparkrun path instead of falling through to the "No recipeRef or
+        // inlineRecipeYaml specified" error.
+        recipeRef: isOllamaRestart ? undefined : config.recipeFile,
         servedModelName: newDisplayName ?? undefined,
         config,
         clusterNodes: clusterNodeIps,

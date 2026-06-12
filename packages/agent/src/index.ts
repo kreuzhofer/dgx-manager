@@ -6,11 +6,11 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
 import { discoverRecipes } from "./recipes.js";
-import { isStopping, untrackDeployment } from "./runtime/vllm.js";
+import { untrackDeployment } from "./runtime/vllm.js";
 import { classifyDeadContainer, reconcileDeployStatus } from "./runtime/deploy-status.js";
 import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe } from "./runtime/sparkrun.js";
 import { checkSparkrunDeployments } from "./runtime/sparkrun-metrics.js";
-import { loadDeployments } from "./runtime/deployment-store.js";
+import { loadDeployments, saveDeployment } from "./runtime/deployment-store.js";
 import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth } from "./runtime/ollama.js";
 import { discoverTrainingRecipes } from "./training-recipes.js";
 import { findInferenceTemplate, applyFinetuneSubstitutions, renderSparkrunFinetuneRecipe } from "./runtime/inference-template.js";
@@ -172,9 +172,9 @@ function connect() {
   /** Setup tasks that run after successful registration (either nodeId or token flow). */
   function postRegistrationSetup() {
     // Reconcile sparkrun deployments from the persistent store.
-    // On a WS-only reconnect the launcher subprocess may still be alive in
-    // this process (isLaunchInProgress is not applicable for sparkrun — we
-    // use the store). Check-job liveness drives the status.
+    // On a WS-only reconnect the sparkrun workload may still be running as a
+    // separate cluster job — we use check-job liveness (isWorkloadRunning) to
+    // determine status rather than tracking a local subprocess.
     const sparkrunDeployments = loadDeployments().filter((d) => d.kind === "sparkrun");
     if (sparkrunDeployments.length > 0) {
       console.log(`Reconciling ${sparkrunDeployments.length} sparkrun deployment(s)`);
@@ -266,13 +266,12 @@ function connect() {
       try {
         const statuses = await checkSparkrunDeployments();
         for (const status of statuses) {
-          // Report if container died or has errors
+          // Report if container died or has errors.
+          // Intentional stops (cmd:undeploy set stopping===true in the store)
+          // are already excluded by checkSparkrunDeployments, so reaching here
+          // means the workload died on its own — treat as a crash.
           if (!status.containerRunning && !status.alive) {
-            // Distinguish an intentional stop (user cmd:undeploy → stopRecipe
-            // marked the instance `stopping`) from a real crash, so the UI
-            // shows "stopped" instead of a misleading "failed".
-            const intentional = isStopping(status.deploymentId);
-            const verdict = classifyDeadContainer(intentional, status.error);
+            const verdict = classifyDeadContainer(false, status.error);
             sendMsg("agent:deployment:status", {
               deploymentId: status.deploymentId,
               status: verdict.status,
@@ -671,6 +670,10 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
               deploymentId,
               log: "\n=== Stop requested by user — stopping sparkrun workload ===\n",
             });
+            // Mark stopping BEFORE calling stopSparkrun so that any health tick
+            // racing between here and the workload vanishing sees stopping===true
+            // and does NOT classify the deployment as failed.
+            saveDeployment({ ...stored, stopping: true });
             const target = stored.clusterId ?? stored.recipeFile;
             const hosts = stored.clusterNodes ?? [];
             try {

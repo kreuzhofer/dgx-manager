@@ -31,9 +31,9 @@ export function isStopping(deploymentId: string): boolean {
 /**
  * Drop a deployment from both the in-memory `running` map and the on-disk
  * tracking store. Use this in failure paths where the deployment died on its
- * own (not via stopRecipe) — clearing only the disk store leaves a stale
- * in-memory entry that checkDeployments keeps re-detecting every health
- * tick, producing an endless "Container stopped unexpectedly" stream.
+ * own (not via an intentional stop) — clearing only the disk store leaves a
+ * stale in-memory entry that the health loop keeps re-detecting every tick,
+ * producing an endless "Container stopped unexpectedly" stream.
  */
 export function untrackDeployment(deploymentId: string): void {
   running.delete(deploymentId);
