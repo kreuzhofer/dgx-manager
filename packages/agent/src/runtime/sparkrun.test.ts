@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 function makeChild() {
   const h: Record<string, ((b: any) => void)[]> = {};
   return {
-    pid: 1,
+    pid: 4242,
     unref: vi.fn(),
     kill: vi.fn(),
     stdout: { on: (e: string, cb: any) => { (h["stdout." + e] ||= []).push(cb); } },
@@ -18,6 +18,8 @@ function makeChild() {
     on: (e: string, cb: any) => { (h[e] ||= []).push(cb); },
     /** Emit a string on stdout.data listeners */
     __emit: (s: string) => (h["stdout.data"] || []).forEach((cb) => cb(Buffer.from(s))),
+    /** Fire the registered exit handler(s) with the given code/signal */
+    __exit: (code: number | null) => (h["exit"] || []).forEach((cb) => cb(code)),
   };
 }
 
@@ -33,7 +35,7 @@ const { spawnMock, execFileSyncMock, spawnSyncMock } = vi.hoisted(() => {
 vi.mock("node:child_process", () => ({ spawn: spawnMock, execFileSync: execFileSyncMock, spawnSync: spawnSyncMock }));
 vi.mock("./deployment-store.js", () => ({ saveDeployment: vi.fn(), removeDeployment: vi.fn() }));
 
-import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe, inspectSparkrunContainer, snapshotContainerLogs, captureCrashedContainerLogs } from "./sparkrun.js";
+import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe, inspectSparkrunContainer, snapshotContainerLogs, captureCrashedContainerLogs, resolveHfHome } from "./sparkrun.js";
 
 beforeEach(() => {
   children.length = 0;
@@ -47,6 +49,13 @@ beforeEach(() => {
   execFileSyncMock.mockReturnValue("");
   spawnSyncMock.mockReset();
   spawnSyncMock.mockReturnValue({ stdout: "", stderr: "" });
+  // Spied so stopSparkrun's process-group kill never signals real processes.
+  // Asserted on via vi.mocked(process.kill) in the launcher-kill tests.
+  vi.spyOn(process, "kill").mockImplementation(() => true);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 // ---------------------------------------------------------------------------
@@ -64,6 +73,32 @@ describe("launchSparkrun", () => {
     expect(argv).toContain("run");
     expect(argv).toContain("qwen3-1.7b-vllm");
     expect(argv).toContain("--no-follow");
+  });
+
+  it("pins HF_HOME onto shared storage when the agent env has none (no local-disk fill)", () => {
+    const prev = process.env.HF_HOME;
+    delete process.env.HF_HOME;
+    try {
+      launchSparkrun("dep-1", "qwen3-1.7b-vllm", { hosts: ["10.0.0.1"], port: 8000 }, () => {}, () => {});
+      const opts = spawnMock.mock.calls[0][2] as { detached?: boolean; env?: Record<string, string> };
+      expect(opts.detached).toBe(true);
+      // SHARED_STORAGE defaults to /mnt/tank → HF cache lands on the NFS mount
+      expect(opts.env?.HF_HOME).toBe("/mnt/tank/models");
+    } finally {
+      if (prev === undefined) delete process.env.HF_HOME; else process.env.HF_HOME = prev;
+    }
+  });
+
+  it("respects an explicit HF_HOME already set in the agent env", () => {
+    const prev = process.env.HF_HOME;
+    process.env.HF_HOME = "/custom/hf";
+    try {
+      launchSparkrun("dep-1", "qwen3-1.7b-vllm", { hosts: ["10.0.0.1"], port: 8000 }, () => {}, () => {});
+      const opts = spawnMock.mock.calls[0][2] as { env?: Record<string, string> };
+      expect(opts.env?.HF_HOME).toBe("/custom/hf");
+    } finally {
+      if (prev === undefined) delete process.env.HF_HOME; else process.env.HF_HOME = prev;
+    }
   });
 
   // -------------------------------------------------------------------------
@@ -141,6 +176,52 @@ describe("stopSparkrun", () => {
   it("does not throw when there is no follower to kill", () => {
     // stopSparkrun called without a prior launch → no follower in map
     expect(() => stopSparkrun("dep-never-launched", "sparkrun_xyz", ["10.0.0.1"])).not.toThrow();
+  });
+
+  it("kills the in-flight launcher process group (negative pid) when stop is called mid-download", () => {
+    // Launch but DO NOT emit a cluster id → still in the download/launch phase,
+    // no container, launcher process group is what holds the running download.
+    launchSparkrun("dep-1", "qwen3-1.7b-vllm", { hosts: ["10.0.0.1"], port: 8000 }, () => {}, () => {});
+    stopSparkrun("dep-1", "qwen3-1.7b-vllm", ["10.0.0.1"], 1);
+    // children[0] is the launcher (pid 4242) → group kill targets -4242
+    expect(vi.mocked(process.kill)).toHaveBeenCalledWith(-4242, "SIGTERM");
+  });
+
+  it("does not call process.kill when no launcher is tracked", () => {
+    stopSparkrun("dep-never-launched", "sparkrun_xyz", ["10.0.0.1"]);
+    expect(vi.mocked(process.kill)).not.toHaveBeenCalled();
+  });
+
+  it("suppresses onExit for an intentionally-stopped launcher (no spurious 'failed')", () => {
+    const onExit = vi.fn();
+    launchSparkrun("dep-1", "qwen3-1.7b-vllm", { hosts: ["10.0.0.1"], port: 8000 }, () => {}, onExit);
+    stopSparkrun("dep-1", "qwen3-1.7b-vllm", ["10.0.0.1"], 1);
+    // The kill makes the launcher exit with a signal (code null) afterwards
+    children[0].__exit(null);
+    expect(onExit).not.toHaveBeenCalled();
+  });
+
+  it("still reports onExit when the launcher dies on its own (genuine launch failure)", () => {
+    const onExit = vi.fn();
+    launchSparkrun("dep-1", "qwen3-1.7b-vllm", { hosts: ["10.0.0.1"], port: 8000 }, () => {}, onExit);
+    // No stop — launcher exits non-zero by itself
+    children[0].__exit(1);
+    expect(onExit).toHaveBeenCalledWith(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveHfHome
+// ---------------------------------------------------------------------------
+
+describe("resolveHfHome", () => {
+  it("returns an explicit HF_HOME from the env unchanged", () => {
+    expect(resolveHfHome({ HF_HOME: "/custom/hf" } as NodeJS.ProcessEnv)).toBe("/custom/hf");
+  });
+
+  it("falls back to ${SHARED_STORAGE}/models when HF_HOME is absent", () => {
+    // SHARED_STORAGE defaults to /mnt/tank in this test env
+    expect(resolveHfHome({} as NodeJS.ProcessEnv)).toBe("/mnt/tank/models");
   });
 });
 

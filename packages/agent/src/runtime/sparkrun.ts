@@ -3,6 +3,7 @@ import type { ChildProcess } from "node:child_process";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { SPARKRUN_PKG } from "../recipes.js";
+import { SHARED_STORAGE } from "../env.js";
 import { buildSparkrunArgs, type SparkrunLaunchOptions } from "./sparkrun-args.js";
 import { parseClusterId } from "./sparkrun-parse.js";
 import { saveDeployment, removeDeployment } from "./deployment-store.js";
@@ -11,12 +12,43 @@ export type Opts = Omit<SparkrunLaunchOptions, "recipeRef"> & { recipeName?: str
 
 const logFollowers = new Map<string, ChildProcess>();
 
+/** In-flight `sparkrun run` launchers, keyed by deploymentId. The launcher is
+ *  the process that pulls the image + downloads the model before the container
+ *  exists, so it must be killable on undeploy — otherwise deleting a deployment
+ *  mid-download leaves the download running (and filling disk). `killed` marks
+ *  an intentional stop so the exit handler does not report it as a launch
+ *  failure. */
+interface Launcher { child: ChildProcess; killed: boolean; }
+const launchers = new Map<string, Launcher>();
+
+/** Resolve the HF cache root for a sparkrun launch. Prefer an explicit HF_HOME
+ *  from the agent's environment; otherwise pin it onto shared storage
+ *  (`${SHARED_STORAGE}/models`). Without this, a node whose systemd unit lacks
+ *  the HF_HOME pin downloads gigabyte-scale models onto its small local disk. */
+export function resolveHfHome(env: NodeJS.ProcessEnv = process.env): string {
+  return env.HF_HOME ?? `${SHARED_STORAGE}/models`;
+}
+
+/** Kill a detached child's whole process group (negative pid), so the launcher
+ *  and its hf-download children all die. No-op if the pid is gone / group
+ *  already reaped. */
+function killProcessGroup(child: ChildProcess): void {
+  const pid = child.pid;
+  if (pid == null) return;
+  try { process.kill(-pid, "SIGTERM"); } catch { /* already gone */ }
+}
+
 export function launchSparkrun(
   deploymentId: string, recipeRef: string, opts: Opts,
   onLog: (line: string) => void, onExit: (code: number | null) => void,
 ): void {
   const argv = ["--from", SPARKRUN_PKG, "sparkrun", ...buildSparkrunArgs({ recipeRef, ...opts })];
-  const child = spawn("uvx", argv, { detached: true });
+  const child = spawn("uvx", argv, {
+    detached: true,
+    env: { ...process.env, HF_HOME: resolveHfHome() },
+  });
+  const launcher: Launcher = { child, killed: false };
+  launchers.set(deploymentId, launcher);
   const hosts = opts.hosts;
   const tp = opts.tp ?? hosts.length;
   let buf = "";
@@ -49,11 +81,24 @@ export function launchSparkrun(
   };
   child.stdout?.on("data", onData);
   child.stderr?.on("data", onData);
-  child.on("exit", (code) => onExit(code));
+  child.on("exit", (code) => {
+    launchers.delete(deploymentId);
+    // An intentional stop (killProcessGroup below) must not be reported as a
+    // launch failure — the undeploy path already drives the status.
+    if (launcher.killed) return;
+    onExit(code);
+  });
   persist();
 }
 
 export function stopSparkrun(deploymentId: string, target: string, hosts: string[], tp?: number): void {
+  // Kill the in-flight launcher process group FIRST. During the image-pull /
+  // model-download phase there is no container yet, so `sparkrun stop` has
+  // nothing to act on — the launcher (and its hf-download children) would keep
+  // running after the deployment is deleted. Killing the group stops the
+  // download immediately.
+  const launcher = launchers.get(deploymentId);
+  if (launcher) { launcher.killed = true; killProcessGroup(launcher.child); launchers.delete(deploymentId); }
   const f = logFollowers.get(deploymentId);
   if (f) { try { f.kill(); } catch { /* already gone */ } logFollowers.delete(deploymentId); }
   const args = ["--from", SPARKRUN_PKG, "sparkrun", "stop", target, "-H", hosts.join(",")];
