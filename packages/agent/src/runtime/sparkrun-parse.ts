@@ -16,15 +16,19 @@ export function parseSparkrunList(raw: string): SparkrunRecipeSummary[] {
   const text = raw.trim();
   if (!text) return [];
   if (text.startsWith("[") || text.startsWith("{")) {
-    const data = JSON.parse(text);
-    const arr: any[] = Array.isArray(data) ? data : (data.recipes ?? []);
-    return arr.map((r) => ({
-      ref: String(r.ref ?? r.id ?? r.name),
-      name: String(r.name ?? r.ref ?? r.id),
-      description: r.description || undefined,
-      runtime: r.runtime,
-      registry: r.registry,
-    }));
+    try {
+      const data = JSON.parse(text);
+      const arr: any[] = Array.isArray(data) ? data : (data.recipes ?? []);
+      return arr.map((r) => ({
+        ref: String(r.ref ?? r.id ?? r.name),
+        name: String(r.name ?? r.ref ?? r.id),
+        description: r.description || undefined,
+        runtime: r.runtime,
+        registry: r.registry,
+      }));
+    } catch {
+      // fall through to text-line parsing below
+    }
   }
   return text
     .split("\n")

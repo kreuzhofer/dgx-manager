@@ -19,6 +19,14 @@ describe("parseSparkrunList", () => {
     expect(recipes.some((r) => r.ref.includes("qwen") || r.registry)).toBe(true);
   });
 
+  it("maps fixture[0] fields to the correct SparkrunRecipeSummary fields", () => {
+    const recipes: SparkrunRecipeSummary[] = parseSparkrunList(fixture);
+    // Pinned against the first entry of sparkrun-list.json
+    expect(recipes[0].ref).toBe("@sparkrun-transitional/qwen3-1.7b-llama-cpp");
+    expect(recipes[0].registry).toBe("sparkrun-transitional");
+    expect(recipes[0].runtime).toBe("llama-cpp");
+  });
+
   it("never throws on empty input", () => {
     expect(parseSparkrunList("")).toEqual([]);
   });
