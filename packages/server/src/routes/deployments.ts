@@ -14,6 +14,23 @@ import { validateInlineRecipe } from "../deployments/recipe-inline.js";
 
 export const deploymentsRouter = Router();
 
+/**
+ * @openapi
+ * /api/deployments:
+ *   get:
+ *     tags: [Deployments]
+ *     summary: List all deployments
+ *     description: >
+ *       Returns every Deployment record ordered by creation date descending, each
+ *       including its linked Node, Model (with finetuneJob.recipeFile for the edit-
+ *       restart form), and ClusterNode membership. Status lifecycle: pending →
+ *       starting/building/downloading/launching/loading → running → (removing →)
+ *       stopped/failed. Use SSE (`deployment:created`, `deployment:status`) for
+ *       real-time updates after the initial load.
+ *     responses:
+ *       '200':
+ *         description: Array of deployment objects with node, model, and clusterNodes included
+ */
 deploymentsRouter.get("/", async (_req, res) => {
   const deployments = await prisma.deployment.findMany({
     orderBy: { createdAt: "desc" },
@@ -30,6 +47,37 @@ deploymentsRouter.get("/", async (_req, res) => {
   res.json(deployments);
 });
 
+/**
+ * @openapi
+ * /api/deployments/{id}/logs:
+ *   get:
+ *     tags: [Deployments]
+ *     summary: Retrieve deployment logs from shared storage
+ *     description: >
+ *       Reads the deployment log file from `$SHARED_STORAGE/logs/deployments/{id}.log`
+ *       and returns it as `text/plain`. Returns an empty 200 body if the log file has
+ *       not been created yet (deployment hasn't started, or logs are not persisted for
+ *       this deployment type). Accepts a `tail` query parameter to return only the
+ *       last N lines — useful for keeping the dashboard log pane up-to-date without
+ *       re-reading the full file.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Deployment ID
+ *       - in: query
+ *         name: tail
+ *         required: false
+ *         schema: { type: integer }
+ *         description: If > 0, return only the last N lines
+ *     responses:
+ *       '200':
+ *         description: Log content as text/plain (empty if not yet available)
+ *         content:
+ *           text/plain:
+ *             schema: { type: string }
+ */
 deploymentsRouter.get("/:id/logs", async (req, res) => {
   const logPath = `${SHARED_STORAGE}/logs/deployments/${req.params.id}.log`;
   if (!existsSync(logPath)) {
@@ -48,6 +96,46 @@ deploymentsRouter.get("/:id/logs", async (req, res) => {
   }
 });
 
+/**
+ * @openapi
+ * /api/deployments:
+ *   post:
+ *     tags: [Deployments]
+ *     summary: Launch an inference deployment via sparkrun
+ *     description: >
+ *       Launches a recipe on one or more DGX Spark nodes. The head-node agent runs `sparkrun run`,
+ *       which distributes the image+model and starts containers. Provide exactly one recipe source:
+ *       `recipeFile` (registry recipe from GET /api/recipes), `recipePath` (a YAML staged under shared
+ *       storage), or `recipeYaml` (inline recipe body — for remote recipe-dev machines that never touch
+ *       the cluster filesystem). VRAM admission runs before launch. Returns the created Deployment.
+ *       For Ollama deployments, provide `runtime: "ollama"` and `modelName` instead of a recipe source.
+ *       Node selection: pass `nodeId: "auto"` for the first available online node, `nodeIds: "auto"`
+ *       to auto-select a cluster sized to the recipe's tensor/pipeline parallelism, or explicit IDs.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               nodeId: { type: string, description: "Single-node target (or 'auto')." }
+ *               nodeIds: { type: array, items: { type: string }, description: "Cluster node ids, head first (or 'auto')." }
+ *               recipeFile: { type: string, description: "Registry recipe ref from GET /api/recipes." }
+ *               recipePath: { type: string, description: "Path under shared storage to a recipe YAML." }
+ *               recipeYaml: { type: string, description: "Inline sparkrun recipe YAML body (remote dev)." }
+ *               config: { type: object, description: "Overrides: port, gpuMem, tensorParallel, maxModelLen, pipelineParallel…" }
+ *               displayName: { type: string, description: "Optional vLLM --served-model-name and dashboard label (must be unique among active deployments)." }
+ *               runtime: { type: string, enum: [vllm, ollama], description: "Inference engine. Defaults to vllm." }
+ *               modelName: { type: string, description: "Required for Ollama: the model pull tag (e.g. llama3.1:8b)." }
+ *               modelType: { type: string, enum: [chat, embedding], description: "Ollama model capability. Defaults to chat." }
+ *     responses:
+ *       '201':
+ *         description: Created deployment record (node + model + clusterNodes included)
+ *       '400':
+ *         description: Invalid request (missing recipe source, bad inline YAML, missing modelName for Ollama)
+ *       '409':
+ *         description: VRAM shortfall, no online nodes, or displayName conflict
+ */
 deploymentsRouter.post("/", async (req, res) => {
   let { nodeId, nodeIds, recipeFile, recipePath, recipeYaml, config, runtime, modelName, modelType, displayName: rawDisplayName } = req.body;
   const isOllama = runtime === "ollama";
@@ -322,6 +410,36 @@ deploymentsRouter.post("/", async (req, res) => {
   res.status(201).json(result);
 });
 
+/**
+ * @openapi
+ * /api/deployments/{id}:
+ *   delete:
+ *     tags: [Deployments]
+ *     summary: Stop (or stop + delete) a deployment
+ *     description: >
+ *       Sends `cmd:undeploy` to the head-node agent to stop the running containers.
+ *       Without `?delete=true` the Deployment row is kept (status moves to `removing`
+ *       then `stopped`), allowing inspection of logs and later restart. With
+ *       `?delete=true` the row (and related LB endpoints) is deleted from the DB —
+ *       fast-path if already in a terminal state (stopped/failed/evicted) so the
+ *       agent is not involved unnecessarily. For cluster deployments, the cluster
+ *       node IPs are passed so the agent can tear down all worker containers.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: delete
+ *         required: false
+ *         schema: { type: string, enum: ['true', 'false'] }
+ *         description: If "true", also delete the deployment record after stopping
+ *     responses:
+ *       '200':
+ *         description: '{ status: "removing" } or { status: "deleted" }'
+ *       '404':
+ *         description: Deployment not found
+ */
 // DELETE /api/deployments/:id — stop deployment
 deploymentsRouter.delete("/:id", async (req, res) => {
   const deployment = await prisma.deployment.findUnique({
@@ -394,6 +512,45 @@ deploymentsRouter.delete("/:id", async (req, res) => {
   res.json({ status: "removing" });
 });
 
+/**
+ * @openapi
+ * /api/deployments/{id}/restart:
+ *   post:
+ *     tags: [Deployments]
+ *     summary: Restart a deployment with optional config overrides
+ *     description: >
+ *       Re-dispatches `cmd:deploy` (or `cmd:finetune:deploy` for fine-tune deployments)
+ *       to the head-node agent. Merges caller-supplied `config` overrides over the saved
+ *       config, allowing fixes like lowering `max_model_len` after an OOM without deleting
+ *       and re-creating the deployment. Reserved fields (`recipeFile`, `runtime`,
+ *       `modelName`, `modelType`) cannot be overridden — they identify the deployment.
+ *       Also accepts a `displayName` override to change the vLLM served-model-name.
+ *       Runs the same VRAM admission check as the initial deploy. Status moves to
+ *       `restarting` while the agent is working.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               config: { type: object, description: "Config overrides (port, gpuMem, maxModelLen, tensorParallel, artifactVariant…). Reserved: recipeFile, runtime, modelName, modelType." }
+ *               displayName: { type: string, nullable: true, description: "New vLLM --served-model-name / dashboard label. Must be unique among active deployments." }
+ *     responses:
+ *       '200':
+ *         description: '{ status: "restarting" }'
+ *       '400':
+ *         description: Invalid artifactVariant or displayName
+ *       '404':
+ *         description: Deployment not found
+ *       '409':
+ *         description: VRAM shortfall or displayName conflict
+ */
 deploymentsRouter.post("/:id/restart", async (req, res) => {
   const deployment = await prisma.deployment.findUnique({
     where: { id: req.params.id },

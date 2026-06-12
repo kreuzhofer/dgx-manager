@@ -1,6 +1,8 @@
 import swaggerJsdoc from "swagger-jsdoc";
 import swaggerUi from "swagger-ui-express";
 import type { Express } from "express";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
 
 const SYSTEM_OVERVIEW = `
 # DGX Manager API
@@ -21,6 +23,17 @@ Typical flow: register a Node -> it provisions (incl. sparkrun) -> pick a Recipe
 Deployment -> route traffic through the Load Balancer -> optionally Benchmark it.
 `;
 
+// Build an absolute glob so swagger-jsdoc resolves correctly both at runtime
+// (CWD = repo root inside Docker) and in vitest (CWD = repo root).
+// Using import.meta.url gives us the directory of *this* compiled file, from
+// which we can reliably reach the routes directory regardless of CWD.
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ROUTES_GLOB = join(__dirname, "routes", "*.ts");
+// In production (compiled to dist/) the source *.ts files are gone; fall back
+// to *.js siblings. swagger-jsdoc reads the raw text for JSDoc parsing, so
+// either extension works as long as the file exists.
+const ROUTES_GLOB_JS = join(__dirname, "routes", "*.js");
+
 export function buildOpenApiSpec() {
   return swaggerJsdoc({
     definition: {
@@ -40,7 +53,7 @@ export function buildOpenApiSpec() {
         { name: "Agent bundle", description: "Per-arch agent tarballs + install script." },
       ],
     },
-    apis: ["packages/server/src/routes/*.ts", "packages/server/src/routes/*.js"],
+    apis: [ROUTES_GLOB, ROUTES_GLOB_JS],
   });
 }
 

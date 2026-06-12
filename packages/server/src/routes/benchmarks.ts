@@ -23,10 +23,47 @@ const SHARED_STORAGE =
 
 export const benchmarksRouter = express.Router();
 
+/**
+ * @openapi
+ * /api/benchmarks/presets:
+ *   get:
+ *     tags: [Benchmarks]
+ *     summary: List available benchmark presets
+ *     description: >
+ *       Returns all built-in benchmark presets with their `id`, `kind`
+ *       (`throughput` or `tool-eval`), and default configuration. Pass a preset's
+ *       `id` as `presetId` in POST /api/benchmarks to run it. Throughput presets
+ *       use llama-benchy; tool-eval presets use tool-eval-bench.
+ *     responses:
+ *       '200':
+ *         description: Array of benchmark preset objects
+ */
 benchmarksRouter.get("/presets", (_req, res) => {
   res.json(BENCHMARK_PRESETS);
 });
 
+/**
+ * @openapi
+ * /api/benchmarks:
+ *   get:
+ *     tags: [Benchmarks]
+ *     summary: List benchmark runs (optionally filtered by deployment)
+ *     description: >
+ *       Returns BenchmarkRun records ordered by creation date descending. Each record
+ *       includes the linked Deployment (with Node and Model). Pass `?deploymentId=X`
+ *       to filter to runs for a specific deployment. Results include both throughput
+ *       metrics (`meanTps`, `meanTtfrMs`) and tool-eval scores (`toolEvalScore`,
+ *       `toolEvalRating`, etc.) depending on the run's `kind`.
+ *     parameters:
+ *       - in: query
+ *         name: deploymentId
+ *         required: false
+ *         schema: { type: string }
+ *         description: Filter runs to a specific deployment ID
+ *     responses:
+ *       '200':
+ *         description: Array of benchmark run objects with deployment included
+ */
 benchmarksRouter.get("/", async (req, res) => {
   const { deploymentId } = req.query as { deploymentId?: string };
   const runs = await prisma.benchmarkRun.findMany({
@@ -37,9 +74,30 @@ benchmarksRouter.get("/", async (req, res) => {
   res.json(runs);
 });
 
-// Returns the full captured stdout/stderr of a run as text/plain. Empty body
-// (with 200) if the log file doesn't exist yet — the dashboard treats that
-// as "no log to show", same as the deployments-log endpoint convention.
+/**
+ * @openapi
+ * /api/benchmarks/{id}/logs:
+ *   get:
+ *     tags: [Benchmarks]
+ *     summary: Return captured stdout/stderr of a benchmark run
+ *     description: >
+ *       Reads the benchmark log file from `$SHARED_STORAGE/logs/benchmarks/{id}.log`
+ *       and returns it as `text/plain`. The server appends every stdout/stderr line
+ *       from the llama-benchy or tool-eval-bench process to this file in real-time.
+ *       Returns an empty 200 body if the file doesn't exist yet. During a live run,
+ *       individual log lines also flow over SSE as `benchmark:log` events.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       '200':
+ *         description: Log content as text/plain
+ *         content:
+ *           text/plain:
+ *             schema: { type: string }
+ */
 benchmarksRouter.get("/:id/logs", (req, res) => {
   const logPath = join(SHARED_STORAGE, "logs", "benchmarks", `${req.params.id}.log`);
   if (!existsSync(logPath)) return res.type("text/plain").send("");
@@ -50,6 +108,28 @@ benchmarksRouter.get("/:id/logs", (req, res) => {
   }
 });
 
+/**
+ * @openapi
+ * /api/benchmarks/{id}:
+ *   get:
+ *     tags: [Benchmarks]
+ *     summary: Get a single benchmark run with full results
+ *     description: >
+ *       Returns the BenchmarkRun record with all nested result data: `results`
+ *       (throughput per-prompt stats), `toolEvalCategories` (tool-eval per-category
+ *       breakdown), and the linked Deployment (with Node and Model). Use this for
+ *       the benchmark detail page.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       '200':
+ *         description: Benchmark run with results and categories included
+ *       '404':
+ *         description: Run not found
+ */
 benchmarksRouter.get("/:id", async (req, res) => {
   const run = await prisma.benchmarkRun.findUnique({
     where: { id: req.params.id },
@@ -63,6 +143,28 @@ benchmarksRouter.get("/:id", async (req, res) => {
   res.json(run);
 });
 
+/**
+ * @openapi
+ * /api/benchmarks/{id}:
+ *   delete:
+ *     tags: [Benchmarks]
+ *     summary: Delete a benchmark run record
+ *     description: >
+ *       Permanently removes the BenchmarkRun row and all nested result rows
+ *       (BenchmarkResult and ToolEvalCategory). Log files on shared storage are
+ *       not deleted. Broadcasts `benchmark:deleted` over SSE. Returns 204 on
+ *       success (no body).
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       '204':
+ *         description: Deleted (no body)
+ *       '404':
+ *         description: Run not found
+ */
 benchmarksRouter.delete("/:id", async (req, res) => {
   const existing = await prisma.benchmarkRun.findUnique({
     where: { id: req.params.id },
@@ -73,6 +175,28 @@ benchmarksRouter.delete("/:id", async (req, res) => {
   res.status(204).end();
 });
 
+/**
+ * @openapi
+ * /api/benchmarks/{id}/cancel:
+ *   post:
+ *     tags: [Benchmarks]
+ *     summary: Cancel a running benchmark
+ *     description: >
+ *       Sends SIGTERM to the llama-benchy or tool-eval-bench child process and
+ *       immediately marks the run as `canceled` in the DB. Broadcasts
+ *       `benchmark:status` over SSE. After cancellation the run is a terminal
+ *       record that can be deleted. Returns the updated BenchmarkRun record.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       '200':
+ *         description: Updated BenchmarkRun with status canceled
+ *       '404':
+ *         description: Run not found
+ */
 benchmarksRouter.post("/:id/cancel", async (req, res) => {
   const run = await prisma.benchmarkRun.findUnique({
     where: { id: req.params.id },
@@ -93,6 +217,45 @@ type StartBody = {
   config?: BenchmarkConfig;
 };
 
+/**
+ * @openapi
+ * /api/benchmarks:
+ *   post:
+ *     tags: [Benchmarks]
+ *     summary: Start a new benchmark run against a running deployment
+ *     description: >
+ *       Creates a BenchmarkRun record and launches the benchmark tool server-side
+ *       (no agent involvement). For `kind: throughput` runs, uses llama-benchy via
+ *       `uvx`; for `kind: tool-eval` runs, uses tool-eval-bench via `uvx`. The
+ *       benchmark process streams output via SSE (`benchmark:log`) and writes
+ *       to `$SHARED_STORAGE/logs/benchmarks/{id}.log`. Results (meanTps,
+ *       meanTtfrMs for throughput; toolEvalScore/toolEvalRating for tool-eval) are
+ *       stored when the process exits. The deployment must be in `running` status;
+ *       only one benchmark can run per deployment at a time. Pass `presetId` from
+ *       GET /api/benchmarks/presets for standard configurations, or supply a custom
+ *       `config` object for throughput-only runs. Broadcasts `benchmark:created`
+ *       and `benchmark:status` over SSE.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [deploymentId]
+ *             properties:
+ *               deploymentId: { type: string, description: "ID of the running Deployment to benchmark." }
+ *               presetId: { type: string, description: "Preset id from GET /api/benchmarks/presets. Mutually exclusive with config." }
+ *               config: { type: object, description: "Custom throughput config object (concurrency, maxTokens, numPrompts, etc.). Use presetId for tool-eval runs." }
+ *     responses:
+ *       '201':
+ *         description: Created BenchmarkRun record (status=pending, then quickly transitions to running)
+ *       '400':
+ *         description: Missing deploymentId, presetId/config, or unknown presetId
+ *       '404':
+ *         description: Deployment not found
+ *       '409':
+ *         description: Deployment not running, or a benchmark is already in progress for this deployment
+ */
 benchmarksRouter.post("/", async (req: Request, res: Response) => {
   const { deploymentId, presetId, config: customConfig } = req.body as StartBody;
 

@@ -47,6 +47,22 @@ export function isValidVariantSlug(v: unknown): v is string {
 
 export const finetuneRouter = Router();
 
+/**
+ * @openapi
+ * /api/finetune:
+ *   get:
+ *     tags: [Fine-tune]
+ *     summary: List all fine-tune jobs
+ *     description: >
+ *       Returns every FineTuneJob record ordered by creation date descending, each
+ *       including its head Node and all ClusterNode members (ordered by role so head
+ *       comes first). Status lifecycle: pending → starting → running → completed →
+ *       (mergeStatus: idle → running → completed) → deployable. Use SSE
+ *       (`finetune:status`, `finetune:created`) for real-time updates.
+ *     responses:
+ *       '200':
+ *         description: Array of fine-tune job objects
+ */
 finetuneRouter.get("/", async (_req, res) => {
   const jobs = await prisma.fineTuneJob.findMany({
     orderBy: { createdAt: "desc" },
@@ -58,6 +74,26 @@ finetuneRouter.get("/", async (_req, res) => {
   res.json(jobs);
 });
 
+/**
+ * @openapi
+ * /api/finetune/{id}:
+ *   get:
+ *     tags: [Fine-tune]
+ *     summary: Get a single fine-tune job
+ *     description: >
+ *       Returns the FineTuneJob record with node and cluster membership included.
+ *       Useful for polling job status after creation or for displaying job details.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       '200':
+ *         description: Fine-tune job object
+ *       '404':
+ *         description: Job not found
+ */
 finetuneRouter.get("/:id", async (req, res) => {
   const job = await prisma.fineTuneJob.findUnique({
     where: { id: req.params.id },
@@ -70,6 +106,38 @@ finetuneRouter.get("/:id", async (req, res) => {
   res.json(job);
 });
 
+/**
+ * @openapi
+ * /api/finetune/{id}/logs:
+ *   get:
+ *     tags: [Fine-tune]
+ *     summary: Get training log for a fine-tune job
+ *     description: >
+ *       Reads `$outputDir/train.log` from shared storage and returns it as
+ *       `text/plain`. For resumed jobs the outputDir points to the original job's
+ *       directory (where the appended log lives). Returns empty body if the log
+ *       file doesn't exist yet. Supports `?tail=N` to return only the last N lines,
+ *       useful for keeping the dashboard log pane current without reading the full file.
+ *       Prefer tailing this file directly from shared storage for high-frequency polling.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: tail
+ *         required: false
+ *         schema: { type: integer }
+ *         description: Return only the last N lines if > 0
+ *     responses:
+ *       '200':
+ *         description: Log content as text/plain
+ *         content:
+ *           text/plain:
+ *             schema: { type: string }
+ *       '404':
+ *         description: Job not found
+ */
 finetuneRouter.get("/:id/logs", async (req, res) => {
   const job = await prisma.fineTuneJob.findUnique({ where: { id: req.params.id } });
   if (!job) return res.status(404).json({ error: "Job not found" });
@@ -95,6 +163,29 @@ finetuneRouter.get("/:id/logs", async (req, res) => {
   }
 });
 
+/**
+ * @openapi
+ * /api/finetune/{id}/checkpoints:
+ *   get:
+ *     tags: [Fine-tune]
+ *     summary: List saved checkpoints for a fine-tune job
+ *     description: >
+ *       Scans the job's outputDir on shared storage for `checkpoint-N` subdirectories
+ *       created by HuggingFace Trainer and returns them sorted by step (newest first).
+ *       Each entry includes `{ step, name, path, createdAt }`. Returns an empty array
+ *       if no outputDir is set or the directory doesn't exist. Used by the resume-
+ *       job flow to let users pick which checkpoint to continue from.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       '200':
+ *         description: Array of checkpoint objects sorted by step descending
+ *       '404':
+ *         description: Job not found
+ */
 finetuneRouter.get("/:id/checkpoints", async (req, res) => {
   const job = await prisma.fineTuneJob.findUnique({ where: { id: req.params.id } });
   if (!job) return res.status(404).json({ error: "Job not found" });
@@ -122,6 +213,25 @@ finetuneRouter.get("/:id/checkpoints", async (req, res) => {
   }
 });
 
+/**
+ * @openapi
+ * /api/finetune/{id}/metrics:
+ *   get:
+ *     tags: [Fine-tune]
+ *     summary: Get training metrics (loss curve) for a fine-tune job
+ *     description: >
+ *       Returns all TrainingMetric rows for the job ordered by step ascending.
+ *       Each row has `{ step, loss, lr, evalLoss }`. The agent appends a row
+ *       whenever a training step completes. Used by the dashboard loss-curve chart.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       '200':
+ *         description: Array of training metric objects
+ */
 finetuneRouter.get("/:id/metrics", async (req, res) => {
   const metrics = await prisma.trainingMetric.findMany({
     where: { jobId: req.params.id },
@@ -131,6 +241,41 @@ finetuneRouter.get("/:id/metrics", async (req, res) => {
   res.json(metrics);
 });
 
+/**
+ * @openapi
+ * /api/finetune/{id}:
+ *   patch:
+ *     tags: [Fine-tune]
+ *     summary: Rename a fine-tune job
+ *     description: >
+ *       Updates `displayName` on the FineTuneJob row and atomically renames the linked
+ *       Model row to match (so the inference catalog stays in sync). Empty or whitespace-
+ *       only values clear the name back to null (dashboard falls back to the id-derived
+ *       label `finetune-<8chars>`). Returns 409 if the requested model name is already
+ *       taken by another model record.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               displayName: { type: string, nullable: true, description: "New display name; null or empty string clears it." }
+ *     responses:
+ *       '200':
+ *         description: Updated fine-tune job object
+ *       '400':
+ *         description: No allowed fields provided or bad displayName type
+ *       '404':
+ *         description: Job not found
+ *       '409':
+ *         description: Model name already taken
+ */
 // PATCH /:id — mutate user-editable fields on the job. Currently scoped to
 // displayName; extend the allowed fields here as future rename-able
 // attributes are added. Trims whitespace; empty/whitespace-only strings
@@ -202,6 +347,42 @@ finetuneRouter.patch("/:id", async (req, res) => {
   res.json(result);
 });
 
+/**
+ * @openapi
+ * /api/finetune:
+ *   post:
+ *     tags: [Fine-tune]
+ *     summary: Start a new fine-tune training job
+ *     description: >
+ *       Creates a FineTuneJob record and sends `cmd:finetune:start` to the head-node agent.
+ *       The agent runs HuggingFace Trainer inside a container, writing checkpoints and
+ *       training metrics to shared storage under `$SHARED_STORAGE/outputs/{jobId}`.
+ *       Supports multi-node training via `nodeIds[]` (ClusterNode rows track participation).
+ *       Resume mode: pass `resumeFromJobId` to inherit the previous job's recipe/dataset/
+ *       outputDir and continue from the latest checkpoint. Logs stream to shared storage
+ *       and can be tailed via GET /api/finetune/{id}/logs.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               nodeId: { type: string, description: "Single head-node ID for solo training." }
+ *               nodeIds: { type: array, items: { type: string }, description: "Multi-node: head first, then workers." }
+ *               recipeFile: { type: string, description: "Training recipe ref from GET /api/training-recipes." }
+ *               dataset: { type: string, description: "Dataset identifier (matches a Dataset.name or HuggingFace repo)." }
+ *               config: { type: object, description: "Training config overrides (epochs, lr, batch_size, etc.)." }
+ *               resumeFromJobId: { type: string, description: "ID of a previous completed job to resume from its latest checkpoint." }
+ *               displayName: { type: string, description: "Optional human-readable label for the job." }
+ *     responses:
+ *       '201':
+ *         description: Created fine-tune job with node and cluster members included
+ *       '400':
+ *         description: Missing required fields or invalid resumeFromJobId
+ *       '404':
+ *         description: resumeFromJobId not found
+ */
 finetuneRouter.post("/", async (req, res) => {
   const { nodeId, nodeIds, recipeFile, dataset, config, resumeFromJobId, displayName } = req.body;
 
@@ -314,6 +495,38 @@ finetuneRouter.post("/", async (req, res) => {
   res.status(201).json(result);
 });
 
+/**
+ * @openapi
+ * /api/finetune/{id}:
+ *   delete:
+ *     tags: [Fine-tune]
+ *     summary: Delete a fine-tune job and optionally its output files
+ *     description: >
+ *       Removes the FineTuneJob record, its linked Model (if no active deployments
+ *       reference it), and the auto-generated vLLM recipe YAML (if present). If
+ *       the job is still running, sends `cmd:finetune:stop` first. Returns 409 if
+ *       active (non-terminal) deployments still reference the linked model — stop
+ *       those first. Pass `?cleanFiles=true` to also recursively delete the
+ *       outputDir on shared storage; files are kept if another resumed job shares
+ *       the same directory.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: cleanFiles
+ *         required: false
+ *         schema: { type: string, enum: ['true', 'false'] }
+ *         description: If "true", also delete the output directory on shared storage
+ *     responses:
+ *       '200':
+ *         description: '{ deleted, filesRemoved, filesKept, filesError, recipeRemoved }'
+ *       '404':
+ *         description: Job not found
+ *       '409':
+ *         description: Active deployments reference the linked model
+ */
 finetuneRouter.delete("/:id", async (req, res) => {
   const job = await prisma.fineTuneJob.findUnique({ where: { id: req.params.id } });
   if (!job) return res.status(404).json({ error: "Job not found" });
@@ -412,6 +625,29 @@ finetuneRouter.delete("/:id", async (req, res) => {
   res.json({ deleted: true, filesRemoved, filesKept, filesError, recipeRemoved });
 });
 
+/**
+ * @openapi
+ * /api/finetune/{id}/disk-usage:
+ *   get:
+ *     tags: [Fine-tune]
+ *     summary: Report disk usage of a fine-tune job's output directory
+ *     description: >
+ *       Recursively walks the job's outputDir on shared storage and returns the total
+ *       byte count, the directory path, and how many other jobs share the same
+ *       directory (resumed jobs share their parent's outputDir). Returns
+ *       `{ bytes: 0, dir: null, sharedWith: 0 }` if no outputDir is set.
+ *       Used by the dashboard to show "delete with files" confirmation dialogs.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       '200':
+ *         description: '{ bytes, dir, sharedWith }'
+ *       '404':
+ *         description: Job not found
+ */
 finetuneRouter.get("/:id/disk-usage", async (req, res) => {
   const job = await prisma.fineTuneJob.findUnique({ where: { id: req.params.id } });
   if (!job) return res.status(404).json({ error: "Job not found" });
@@ -441,6 +677,26 @@ finetuneRouter.get("/:id/disk-usage", async (req, res) => {
   }
 });
 
+/**
+ * @openapi
+ * /api/finetune/cleanup-orphan-models:
+ *   post:
+ *     tags: [Fine-tune]
+ *     summary: Back-link or delete orphaned finetune Model rows
+ *     description: >
+ *       One-shot maintenance operation. Walks every Model row whose name matches
+ *       the legacy `finetune-<8alphanum>` pattern and has no `finetuneJobId` FK.
+ *       For each: if a matching FineTuneJob exists (by 8-char prefix) the FK is
+ *       back-linked; if no job exists and no active Deployment references the model,
+ *       the Model row is deleted. Models with active deployments are kept. Returns
+ *       counts: `{ backlinked, deleted, kept_due_to_deployment }`. Idempotent — safe
+ *       to re-run after fixing issues.
+ *     responses:
+ *       '200':
+ *         description: '{ backlinked, deleted, kept_due_to_deployment }'
+ *       '500':
+ *         description: Partial failure — returns counts accumulated before the error
+ */
 // POST /cleanup-orphan-models — one-shot maintenance op. Walks every Model
 // row whose name matches the legacy "finetune-<8alphanum>" pattern AND has
 // finetuneJobId = NULL, then either:
@@ -521,6 +777,25 @@ finetuneRouter.post("/cleanup-orphan-models", async (_req, res) => {
   res.json({ backlinked, deleted, kept_due_to_deployment });
 });
 
+/**
+ * @openapi
+ * /api/finetune/cleanup-orphan-recipes:
+ *   post:
+ *     tags: [Fine-tune]
+ *     summary: Delete auto-generated vLLM recipe YAMLs for deleted fine-tune jobs
+ *     description: >
+ *       One-shot maintenance operation. Scans the vLLM recipe repository's `recipes/`
+ *       directory for files matching the auto-generated `finetune-<12alphanum>.yaml`
+ *       pattern and removes those whose job-id prefix doesn't correspond to a live
+ *       FineTuneJob. Non-auto-generated (hand-curated) files are left alone. Triggers
+ *       a recipe rescan on all connected agents if any files were deleted. Returns
+ *       `{ scanned, deleted, kept_live, kept_unparseable, removed, agents_refreshed }`.
+ *     responses:
+ *       '200':
+ *         description: Cleanup summary
+ *       '500':
+ *         description: recipes directory unreadable
+ */
 // POST /cleanup-orphan-recipes — one-shot maintenance op. Walks the vLLM
 // deploy repo's recipes dir for files matching the auto-generated
 // `finetune-<12alphanum>.yaml` pattern, and removes any whose id-prefix
@@ -579,6 +854,28 @@ finetuneRouter.post("/cleanup-orphan-recipes", async (req, res) => {
   res.json({ scanned, deleted, kept_live, kept_unparseable, removed, agents_refreshed });
 });
 
+/**
+ * @openapi
+ * /api/finetune/{id}/stop:
+ *   post:
+ *     tags: [Fine-tune]
+ *     summary: Stop a running fine-tune job
+ *     description: >
+ *       Sends `cmd:finetune:stop` to the head-node agent and sets the job status to
+ *       `stopping`. The agent gracefully terminates the training process; the final
+ *       checkpoint on disk is preserved. After stopping, the job can be resumed via
+ *       POST /api/finetune with `resumeFromJobId`.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       '200':
+ *         description: '{ status: "stopping" }'
+ *       '404':
+ *         description: Job not found
+ */
 finetuneRouter.post("/:id/stop", async (req, res) => {
   const job = await prisma.fineTuneJob.findUnique({ where: { id: req.params.id } });
   if (!job) return res.status(404).json({ error: "Job not found" });
@@ -597,6 +894,32 @@ finetuneRouter.post("/:id/stop", async (req, res) => {
   res.json({ status: "stopping" });
 });
 
+/**
+ * @openapi
+ * /api/finetune/{id}/merge:
+ *   post:
+ *     tags: [Fine-tune]
+ *     summary: Merge LoRA adapter weights into the base model
+ *     description: >
+ *       Sends `cmd:finetune:merge` to the head-node agent. The agent runs the recipe's
+ *       `scripts.merge` Python script (or the generic `scripts/merge.py` fallback),
+ *       which merges the LoRA adapter stored at `{outputDir}/lora_adapter` into the
+ *       base model weights and writes the result to `{outputDir}/merged`. The job must
+ *       be in `completed` status. After merging, call POST /api/finetune/{id}/deploy
+ *       to serve the merged model via vLLM.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       '200':
+ *         description: '{ status: "merging", mergedOutputDir }'
+ *       '400':
+ *         description: Job not completed
+ *       '404':
+ *         description: Job not found
+ */
 finetuneRouter.post("/:id/merge", async (req, res) => {
   const job = await prisma.fineTuneJob.findUnique({ where: { id: req.params.id } });
   if (!job) return res.status(404).json({ error: "Job not found" });
@@ -633,6 +956,37 @@ finetuneRouter.post("/:id/merge", async (req, res) => {
   res.json({ status: "merging", mergedOutputDir });
 });
 
+/**
+ * @openapi
+ * /api/finetune/{id}/quantize:
+ *   post:
+ *     tags: [Fine-tune]
+ *     summary: Quantize a merged fine-tune model to FP8
+ *     description: >
+ *       Sends `cmd:finetune:quantize` to the head-node agent. The agent runs the
+ *       recipe's `scripts.quantize_fp8` script to produce an FP8-quantized copy of
+ *       the merged model at `{outputDir}/merged-fp8`. Requires the merge to be
+ *       complete (`mergeStatus: "completed"`) and the recipe to declare
+ *       `scripts.quantize_fp8`. Idempotent if already quantized. Returns 409 if
+ *       quantization is already in progress. Note: on-load FP8 conversion via vLLM's
+ *       `--quantization fp8` is an alternative that avoids this offline step.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       '200':
+ *         description: '{ status: "quantizing", quantizedPath } or { status: "quantized", quantizedPath } if already done'
+ *       '400':
+ *         description: Merge not complete
+ *       '404':
+ *         description: Job not found
+ *       '409':
+ *         description: Quantization already in progress
+ *       '501':
+ *         description: Recipe does not support quantization
+ */
 finetuneRouter.post("/:id/quantize", async (req, res) => {
   const job = await prisma.fineTuneJob.findUnique({ where: { id: req.params.id } });
   if (!job) return res.status(404).json({ error: "Job not found" });
@@ -685,6 +1039,48 @@ finetuneRouter.post("/:id/quantize", async (req, res) => {
   res.json({ status: "quantizing", quantizedPath: quantizedOutputDir });
 });
 
+/**
+ * @openapi
+ * /api/finetune/{id}/deploy:
+ *   post:
+ *     tags: [Fine-tune]
+ *     summary: Deploy a merged fine-tuned model for inference
+ *     description: >
+ *       Creates a Deployment record and sends `cmd:finetune:deploy` to the head-node
+ *       agent. The agent launches a vLLM container serving the merged BF16 or FP8
+ *       weights. The training recipe's `deploy` block provides container and GPU
+ *       defaults; caller overrides win via `config`. Runs VRAM admission. The
+ *       `artifactVariant` field selects which artifact to serve: `"default"` (BF16
+ *       merged path) or `"fp8"` (vLLM on-load FP8 conversion). Multi-node deploy via
+ *       `nodeIds[]`. An optional `displayName` sets vLLM's `--served-model-name`
+ *       for this specific deployment without changing the FT job's catalog identity.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               nodeId: { type: string, description: "Single-node target." }
+ *               nodeIds: { type: array, items: { type: string }, description: "Multi-node: head first." }
+ *               config: { type: object, description: "Inference overrides: gpuMem, maxModelLen, port…" }
+ *               artifactVariant: { type: string, description: "Which artifact to serve: 'default' (BF16) or 'fp8'. Default: 'default'." }
+ *               displayName: { type: string, nullable: true, description: "Per-deploy vLLM served-model-name override. Must be unique." }
+ *     responses:
+ *       '201':
+ *         description: Created deployment record
+ *       '400':
+ *         description: Merge not complete, missing nodeId, or invalid artifactVariant
+ *       '404':
+ *         description: Job not found
+ *       '409':
+ *         description: VRAM shortfall or displayName conflict
+ */
 finetuneRouter.post("/:id/deploy", async (req, res) => {
   const job = await prisma.fineTuneJob.findUnique({
     where: { id: req.params.id },
