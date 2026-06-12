@@ -216,78 +216,78 @@ git add packages/agent/src/runtime/sparkrun-parse.ts packages/agent/src/runtime/
 git commit -m "feat(agent): parse sparkrun list output into recipe summaries"
 ```
 
-### Task 2: `sparkrun show` parser (details + VRAM estimate for admission)
+### Task 2: Carry deploy-relevant defaults on the list summary (REVISED per Phase 0)
+
+**Rationale (controller decision):** The original Task 2 planned a separate `sparkrun show --json`
+parser for defaults + VRAM. Phase 0 showed (a) `show` has no `--json` (text only) and `export
+recipe` is YAML — both fragile/slow to parse per recipe; (b) **`list --json` already carries the
+deploy defaults** (`model`, `min_nodes`, `tp`, `gpu_mem`); and (c) **sparkrun does its own VRAM
+admission at run time** (`DGX Spark fit: YES/NO`). So a separate show/export parser is redundant
+(YAGNI). Instead, extend the list summary with the fields already present in `list --json`.
 
 **Files:**
 - Modify: `packages/agent/src/runtime/sparkrun-parse.ts`
 - Test: `packages/agent/src/runtime/sparkrun-parse.test.ts`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing test** (extend the existing fixture test)
 
 ```ts
-import { parseSparkrunShow, type SparkrunRecipeDetail } from "./sparkrun-parse.js";
-
-const showFixture = readFileSync(
-  join(__dirname, "__fixtures__/sparkrun-show.txt"),
-  "utf8",
-);
-
-describe("parseSparkrunShow", () => {
-  it("extracts defaults, node range, and vram estimate", () => {
-    const d: SparkrunRecipeDetail = parseSparkrunShow(showFixture);
-    expect(d.defaults).toBeTypeOf("object");
-    // tensor_parallel default present and numeric when the recipe declares it
-    if (d.defaults.tensor_parallel !== undefined) {
-      expect(typeof d.defaults.tensor_parallel).toBe("number");
+describe("parseSparkrunList — deploy defaults", () => {
+  it("carries model, minNodes, and tolerates empty tp/gpu_mem", () => {
+    const recipes = parseSparkrunList(fixture);
+    // every recipe has a model string and minNodes >= 1
+    for (const r of recipes) {
+      expect(typeof r.model).toBe("string");
+      expect(r.minNodes).toBeGreaterThanOrEqual(1);
+      // tp/gpuMem are number | undefined (fixture has some "" — must become undefined, never NaN)
+      if (r.tpDefault !== undefined) expect(Number.isFinite(r.tpDefault)).toBe(true);
+      if (r.gpuMemDefault !== undefined) expect(Number.isFinite(r.gpuMemDefault)).toBe(true);
     }
-    expect(d.minNodes).toBeGreaterThanOrEqual(1);
+    // a known multi-node recipe in the fixture reports minNodes > 1
+    expect(recipes.some((r) => r.minNodes >= 2)).toBe(true);
   });
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run packages/agent/src/runtime/sparkrun-parse.test.ts -t parseSparkrunShow`
-Expected: FAIL — `parseSparkrunShow` not defined.
+Run: `npx vitest run packages/agent/src/runtime/sparkrun-parse.test.ts -t "deploy defaults"`
+Expected: FAIL — `model`/`minNodes`/`tpDefault`/`gpuMemDefault` not on the type/result.
 
-- [ ] **Step 3: Write minimal implementation** (append to `sparkrun-parse.ts`)
+- [ ] **Step 3: Extend the interface + mapping** in `sparkrun-parse.ts`
 
 ```ts
-export interface SparkrunRecipeDetail {
-  ref: string;
-  runtime?: string;
-  defaults: Record<string, unknown>;  // port, host, tensor_parallel, gpu_memory_utilization, max_model_len, served_model_name
-  minNodes: number;
-  maxNodes?: number;
-  vramEstimateMb?: number;            // from metadata.model_vram (GB) * 1024, if present
+// add to SparkrunRecipeSummary:
+//   model?: string;       // HF model id / path
+//   minNodes: number;     // from min_nodes (default 1)
+//   tpDefault?: number;   // from tp; "" -> undefined
+//   gpuMemDefault?: number; // from gpu_mem; "" -> undefined
+
+// helper: sparkrun emits "" for unset numeric fields — coerce to undefined, never NaN
+function numOrUndef(v: unknown): number | undefined {
+  if (v === "" || v == null) return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
 }
 
-export function parseSparkrunShow(raw: string): SparkrunRecipeDetail {
-  const text = raw.trim();
-  const json = text.startsWith("{") ? JSON.parse(text) : {};
-  const defaults = (json.defaults ?? {}) as Record<string, unknown>;
-  const vramGb = json.metadata?.model_vram;
-  return {
-    ref: String(json.ref ?? json.name ?? ""),
-    runtime: json.runtime,
-    defaults,
-    minNodes: Number(json.min_nodes ?? 1),
-    maxNodes: json.max_nodes != null ? Number(json.max_nodes) : undefined,
-    vramEstimateMb: typeof vramGb === "number" ? Math.round(vramGb * 1024) : undefined,
-  };
-}
+// in the JSON branch mapping, add:
+//   model: r.model ? String(r.model) : undefined,
+//   minNodes: Number(r.min_nodes ?? 1),
+//   tpDefault: numOrUndef(r.tp),
+//   gpuMemDefault: numOrUndef(r.gpu_mem),
+// in the text-fallback branch, set minNodes: 1 and leave the rest undefined.
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run packages/agent/src/runtime/sparkrun-parse.test.ts -t parseSparkrunShow`
-Expected: PASS. (Reconcile field access against the real `show` fixture if needed.)
+Run: `npx vitest run packages/agent/src/runtime/sparkrun-parse.test.ts`
+Expected: PASS (all parseSparkrunList tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add packages/agent/src/runtime/sparkrun-parse.ts packages/agent/src/runtime/sparkrun-parse.test.ts
-git commit -m "feat(agent): parse sparkrun show into recipe detail + vram estimate"
+git commit -m "feat(agent): carry model/minNodes/tp/gpu_mem defaults on list summary"
 ```
 
 ### Task 3: Replace agent recipe discovery with sparkrun list
