@@ -3,10 +3,9 @@
 **Date:** 2026-06-12
 **Node:** dgx-spark-01 (192.168.44.36), head of the live 4-node cluster
 **sparkrun version:** **0.2.38** (via `uvx --from sparkrun sparkrun`)
-**Status:** V1, V2, V5 resolved from safe commands (help / `--dry-run` / `export`). V3, V4
-**deferred** — a live qwen3-1.7b run was not performed because an active 4-node Nemotron 3 Ultra
-deployment was occupying ~96.5 GB/124 GB and port 8000 on this node (see §Safety). Will complete
-V3/V4 when a node is freed.
+**Status:** ✅ **COMPLETE.** V1/V2/V5 resolved from safe commands; V3/V4 resolved by a live
+qwen3-1.7b run on a freed node (port 8011), then cleanly stopped. Major finding: first run does a
+~15-min from-source image build (see §Major finding).
 
 Captured fixtures (in `packages/agent/src/runtime/__fixtures__/`):
 `sparkrun-list.json`, `sparkrun-show.txt`, `sparkrun-export-recipe.yaml`, `sparkrun-run-dryrun.txt`.
@@ -85,30 +84,65 @@ command: |
 Launching runtime → Post-launch hooks). Emits `Mode: solo`, the resolved `Serve command`, and a
 `Cluster: sparkrun_<hash>` ID. **The cluster ID is the workload handle** for `stop`/`status`.
 
-## V3 — Detached lifecycle / reconnect ❓ DEFERRED
+## V3 — Detached lifecycle / reconnect ✅ RESOLVED (live run)
 
-`run` flags (confirmed via `--help`): `-H/--hosts`, `--hosts-file`, `--cluster`, `--tp`, `--pp`,
-`--gpu-mem`, `--max-model-len`, `--image`, `-o key=value`, `--port`, `--served-model-name`,
-`--dry-run`, `--foreground`, `--ensure`, `--no-follow`, `--no-rm`, `--memory-limit`, `--rootful`,
-`--label`. Default is detached + follow logs; `--no-follow` returns immediately.
+Confirmed on a freed node with `run qwen3-1.7b-vllm -H 192.168.44.36 --port 8011 --no-follow`:
 
-`stop [TARGET]`: TARGET = recipe name **or** cluster ID; `--all` discovers via `docker ps`;
-takes `-H`, `--tp`, `--port`, `--served-model-name` to match the run-time trimming. **`status`
-and `stop` require `-H/--hosts` (or a saved cluster) — there is no default cluster configured
-here.** The DGX Manager agent always knows its own host(s), so it passes them explicitly.
+- **Container naming:** `sparkrun_<hex>_solo` (here `sparkrun_8a0bcc7080b5_solo`). **NOT
+  `vllm_node`** → no collision with eugr's container; the earlier collision worry is unfounded.
+  Cluster mode presumably uses a `_cluster`-style suffix (verify when multi-node is tested).
+- **Detached survival:** after `--no-follow` the launching `sparkrun run` process **exits**, yet
+  the workload keeps running. `sparkrun status -H <host>` re-discovers it via SSH+`docker ps`.
+  So reconnect/reconcile works without a live launcher — exactly what Design B needs.
+- **Stable handle:** the short **cluster ID** `8a0bcc7080b5` (hex of `sparkrun_<hex>`). `status`
+  prints `stop: sparkrun stop 8a0bcc7080b5` / `logs: sparkrun logs 8a0bcc7080b5`.
+- **Liveness probe (clean):** `sparkrun cluster check-job <cluster-id|recipe> -H <hosts>` →
+  **exit 0 = running**, 1 = not; add `--check-health` for a health gate. Prefer this over parsing
+  `status` text for reconciliation.
+- **Stop:** `sparkrun stop <cluster-id> -H <host>` → "Workload stopped on 1 host(s)."; container
+  removed, port released, verified clean.
 
-**Open questions for the live run:**
-1. Exact `status` text format + the stable key (cluster ID vs recipe name) to store for `stop`.
-2. Does a detached workload survive the launching process dying (reconnect via `status`)?
-3. **Container naming — does sparkrun name its container `vllm_node` and `docker rm -f` it?**
-   This is a collision/safety question (see §Safety) and decides whether two deployments can
-   coexist on one node during the eugr→sparkrun migration.
-4. Is `/metrics` reachable on `localhost:{port}` of the head (V4)?
-5. `cluster check-job` output for a cleaner liveness probe than parsing `status`.
+### `status` text format (fixture `sparkrun-status.txt`)
 
-## V4 — vLLM /metrics ❓ DEFERRED
+```
+Job: @sparkrun-transitional/qwen3-1.7b-vllm  (tp=1)  [8a0bcc7080b5]  (1 container(s))
+  solo       192.168.44.36                            Up 3 minutes              sparkrun-eugr-vllm-tf5
+  logs: sparkrun logs 8a0bcc7080b5
+  stop: sparkrun stop 8a0bcc7080b5
+Total: 1 container(s) across 1 host(s)
+```
+Parse the `[<hex>]` cluster ID + `(tp=N)` + per-host line. **But for liveness, use
+`cluster check-job` (exit code) — simpler and less brittle than this text.**
 
-Dry-run confirms serve binds `0.0.0.0:8000`. Actual scrape pending the live run.
+**Agent must capture the cluster ID at launch** — it appears as `Cluster: sparkrun_<hex>` in
+`run` output. Store `{ deploymentId -> clusterId, hosts, tp }` for later `stop`/`check-job`.
+
+### `run` / `stop` flag reference (from `--help`)
+
+`run`: `-H/--hosts`, `--hosts-file`, `--cluster`, `--tp`, `--pp`, `--gpu-mem`, `--max-model-len`,
+`--image`, `-o key=value`, `--port`, `--served-model-name`, `--dry-run`, `--foreground`,
+`--ensure`, `--no-follow`, `--no-rm`, `--memory-limit`, `--rootful`, `--label`. Default is
+detached + follow logs; `--no-follow` returns immediately (what the agent uses).
+
+`stop [TARGET]`: TARGET = recipe name **or** cluster ID; `--all` discovers via `docker ps`; takes
+`-H`, `--tp`, `--port`, `--served-model-name`. **`status`/`stop`/`check-job` require `-H/--hosts`**
+(no default cluster here) — the agent always passes its own host(s).
+
+## V4 — vLLM /metrics ✅ RESOLVED (live run)
+
+`curl http://<host>:8011/metrics` returned standard vLLM Prometheus metrics. **Important: metric
+lines carry Prometheus `{labels}`** — the parser regex MUST account for them:
+
+```
+vllm:num_requests_running{engine="0",model_name="qwen3-1.7b"} 0.0
+vllm:num_requests_waiting{engine="0",model_name="qwen3-1.7b"} 0.0
+vllm:kv_cache_usage_perc{engine="0",model_name="qwen3-1.7b"} 0.0
+```
+
+This vLLM (`0.22.1rc1`) uses **`vllm:kv_cache_usage_perc`** (not `gpu_cache_usage_perc`). Fixture:
+`sparkrun-vllm-metrics.txt`. `GET /v1/models` confirms serving (`id: qwen3-1.7b`,
+`max_model_len: 40960`). **Plan correction (Task 7):** `parseVllmMetrics` must match
+`^vllm:<name>(\{[^}]*\})?\s+<value>` — the brace labels broke the plan's original regex.
 
 ## V5 — Version pin ✅
 
@@ -128,7 +162,36 @@ older 0.0.x line and disagree with the live CLI — trust the live `--help` over
 - `run` has `--image` to override the container and `--ensure` (idempotent launch) — both useful
   for the agent launcher.
 
-## Safety note (why V3/V4 were deferred)
+## ⚠️ Major finding — first run BUILDS the image from source (not a pull)
+
+When `qwen3-1.7b-vllm` was actually launched (`run -H <self> --port 8011 --no-follow`), stage
+**[2/6] Building image** did **not** pull `ghcr.io/spark-arena/dgx-vllm-eugr-nightly-tf5` as the
+dry-run implied. Instead sparkrun ran:
+
+```
+~/.config/sparkrun/cache/eugr-spark-vllm-docker/build-and-copy.sh -t sparkrun-eugr-vllm-tf5 --tf5 --cleanup
+  -> docker build -t sparkrun-eugr-vllm-tf5 \
+       --build-arg TORCH_CUDA_ARCH_LIST=12.1a --build-arg FLASHINFER_CUDA_ARCH_LIST=12.1a ...
+```
+
+i.e. a **full from-source build of the eugr vLLM image** (PyTorch + FlashInfer for Blackwell
+sm121), which takes tens of minutes to hours on a fresh node. The `--tf5` recipe variant maps to
+a locally-built `sparkrun-eugr-vllm-tf5` tag rather than the ghcr image.
+
+**Design implications (fold into spec/plan):**
+1. **Provisioning must pre-warm the sparkrun image** (Task 11) — run a build/`run --dry-run` or an
+   explicit image build during node provisioning, mirroring how DGX Manager already pre-warms the
+   benchmark uvx cache and builds agent bundles. Otherwise the *first* deploy of a recipe family
+   blocks for a very long time.
+2. **Agent deploy phase-detection + timeouts (Task 6/8)** must treat "Building image" as a
+   potentially multi-hour phase — no premature failure/timeout; surface build progress as a
+   distinct status so the dashboard shows "building" rather than appearing hung.
+3. **The eugr image is built locally per node** — so the eugr `build-and-copy.sh` is *not* fully
+   retired; sparkrun vendors its own copy under `~/.config/sparkrun/cache/eugr-spark-vllm-docker`.
+   We retire DGX Manager's *invocation* of `run-recipe.sh`, but the eugr build machinery lives on
+   inside sparkrun.
+
+## Safety note (why V3/V4 were initially deferred)
 
 At spike time, `dgx-spark-01` was the head of a live `running` 4-node deployment
 `nemotron-ultra-nomtp-caching` (Nemotron 3 Ultra NVFP4), holding port 8000 and ~96.5 GB/124 GB

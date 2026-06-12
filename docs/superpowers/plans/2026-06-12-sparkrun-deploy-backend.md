@@ -13,8 +13,9 @@
 
 ## Phase 0 Results & Required Plan Adjustments (apply as you reach each task)
 
-The discovery spike (Task 0) ran on the head node and resolved V1/V2/V5 from safe commands;
-V3/V4 await a freed node. Concrete corrections to the task code below:
+The discovery spike (Task 0) is **complete** — V1/V2/V5 from safe commands, V3/V4 from a live
+qwen3-1.7b run (sparkrun 0.2.38) on a freed node, then cleanly stopped. Concrete corrections to
+the task code below:
 
 - **Version pin (V5):** `SPARKRUN_PKG = "sparkrun==0.2.38"` everywhere (Tasks 3, 6, 11).
 - **`list` fields (Task 1):** real keys are `name` (the `@registry/file` ref), `file`, `model`,
@@ -25,17 +26,28 @@ V3/V4 await a freed node. Concrete corrections to the task code below:
   `show` **text** block only for the VRAM estimate (`Per-GPU total: N GB`, `DGX Spark fit: YES`).
   There is **no `metadata.model_vram`** — get VRAM from `show` text or keep DGX Manager's own
   estimate. Fixtures: `sparkrun-export-recipe.yaml`, `sparkrun-show.txt`.
-- **`status` has NO `--json` (Tasks 5, 6):** parse `status` **text** (keyed by **cluster ID**
-  `sparkrun_<hash>`), or use `cluster check-job` for liveness. `status`/`stop` **require
-  `-H/--hosts`** (no default cluster). **Capture the `Cluster: sparkrun_<hash>` ID from `run`
-  output** and store it for `stop`/`status`. `stop` accepts the recipe name *or* the cluster ID.
-  Final text format pinned after the V3 live run.
+- **Liveness via `cluster check-job` (Tasks 5, 6, 8):** prefer **`sparkrun cluster check-job
+  <clusterId|recipe> -H <hosts>`** (exit 0 = running) over parsing `status` text — simpler and
+  pinned by the live run. Keep a thin `status` text parser only if a richer listing is needed
+  (`status` is keyed by a short cluster ID `[<hex>]`, container `sparkrun_<hex>_solo`).
+  **Capture the cluster ID from `run` output** (`Cluster: sparkrun_<hex>`) and store
+  `{ deploymentId -> clusterId, hosts, tp }`. `stop`/`status`/`check-job` **require `-H/--hosts`**
+  (no default cluster). `stop <clusterId> -H <host>` confirmed clean (container removed, port freed).
+- **Container naming is SAFE (collision risk retired):** sparkrun names containers
+  `sparkrun_<hex>_solo`, **not** `vllm_node` — it coexists with eugr's container, so no
+  force-removal hazard. Multi-deployment-per-node is fine.
+- **vLLM metrics carry `{labels}` (Task 7):** regex must allow an optional `\{[^}]*\}` between
+  metric name and value; this vLLM build uses `vllm:kv_cache_usage_perc`. Fixture:
+  `sparkrun-vllm-metrics.txt`.
 - **`setup` is non-interactive subcommands (Task 11):** use `setup ssh`, `setup earlyoom`,
   `setup docker-group` (and `setup cx7` if CX7 present) with `-H/--hosts` — **not** a
   `--non-interactive` flag. Avoid `setup wizard` (interactive).
-- **New risk flagged for the live run:** sparkrun's image is eugr-based and may name its
-  container `vllm_node` / `docker rm -f` it — a collision/coexistence hazard during migration.
-  Confirm container naming before relying on multi-deployment-per-node.
+- **NEW Task 11b — pre-warm the image during provisioning:** first deploy triggers a **~15-min
+  from-source `docker build`** of `sparkrun-eugr-vllm-tf5` (compiles torch/FlashInfer for sm121).
+  Provisioning must pre-build it (e.g. a warm-up `run --dry-run` won't build; trigger the actual
+  build once, or call sparkrun's build path) so first real deploy isn't blocked for 15+ min.
+  Also: the agent's deploy "building" phase (Tasks 6/8) must tolerate a multi-minute build
+  without timing out and surface a distinct "building" status.
 
 **Conventions reused:**
 - Pure helpers tested next to source as `<name>.test.ts` (model on `packages/server/src/benchmarks/args.test.ts`).
@@ -684,14 +696,15 @@ git commit -m "feat(agent): launchSparkrun/stopSparkrun lifecycle + workload lis
 import { describe, it, expect } from "vitest";
 import { parseVllmMetrics } from "./sparkrun-metrics.js";
 
+// Real Phase 0 shape: metric names carry {labels}; this vLLM uses kv_cache_usage_perc.
 const sample = `
-vllm:num_requests_running 2.0
-vllm:num_requests_waiting 0.0
-vllm:gpu_cache_usage_perc 0.37
+vllm:num_requests_running{engine="0",model_name="qwen3-1.7b"} 2.0
+vllm:num_requests_waiting{engine="0",model_name="qwen3-1.7b"} 0.0
+vllm:kv_cache_usage_perc{engine="0",model_name="qwen3-1.7b"} 0.37
 `;
 
 describe("parseVllmMetrics", () => {
-  it("extracts requests running and kv-cache usage", () => {
+  it("extracts requests running and kv-cache usage from labeled metrics", () => {
     const m = parseVllmMetrics(sample);
     expect(m.numRequestsRunning).toBe(2);
     expect(m.kvCacheUsagePerc).toBeCloseTo(0.37);
@@ -713,8 +726,12 @@ export interface VllmMetrics {
 }
 
 function num(text: string, key: string): number | undefined {
-  const m = text.match(new RegExp(`^${key.replace(/[:]/g, "\\:")}\\s+([0-9.eE+-]+)`, "m"));
-  return m ? Number(m[1]) : undefined;
+  // vLLM metric lines carry Prometheus {labels} (confirmed in Phase 0), e.g.
+  //   vllm:num_requests_running{engine="0",model_name="qwen3-1.7b"} 0.0
+  // so the optional `\{[^}]*\}` between name and value is REQUIRED.
+  const esc = key.replace(/[:]/g, "\\:");
+  const m = text.match(new RegExp(`^${esc}(\\{[^}]*\\})?\\s+([0-9.eE+-]+)`, "m"));
+  return m ? Number(m[2]) : undefined;
 }
 
 export function parseVllmMetrics(text: string): VllmMetrics {

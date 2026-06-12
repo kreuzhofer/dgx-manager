@@ -1,0 +1,7 @@
+vllm:num_requests_running{engine="0",model_name="qwen3-1.7b"} 0.0
+vllm:num_requests_waiting{engine="0",model_name="qwen3-1.7b"} 0.0
+vllm:num_requests_waiting_by_reason{engine="0",model_name="qwen3-1.7b",reason="capacity"} 0.0
+vllm:num_requests_waiting_by_reason{engine="0",model_name="qwen3-1.7b",reason="deferred"} 0.0
+vllm:kv_cache_usage_perc{engine="0",model_name="qwen3-1.7b"} 0.0
+vllm:num_preemptions_total{engine="0",model_name="qwen3-1.7b"} 0.0
+vllm:num_preemptions_created{engine="0",model_name="qwen3-1.7b"} 1.781276629357662e+09
