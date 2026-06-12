@@ -92,6 +92,11 @@ detects the node architecture (`uname -m`); downloads the matching agent bundle
 (`/api/agent/bundle?arch=<arch>`); and registers a systemd service. The node
 appears in the dashboard once the agent connects and completes registration.
 
+The Settings page manages join tokens and shows the current agent bundle version
+and one-click install command:
+
+![Settings — tokens & agent bundle](screenshots/settings.png)
+
 ---
 
 ## 4. HTTP agent updates
