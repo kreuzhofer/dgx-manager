@@ -31,3 +31,16 @@ describe("parseSparkrunList", () => {
     expect(parseSparkrunList("")).toEqual([]);
   });
 });
+
+describe("parseSparkrunList — deploy defaults", () => {
+  it("carries model, minNodes, and tolerates empty tp/gpu_mem", () => {
+    const recipes = parseSparkrunList(fixture);
+    for (const r of recipes) {
+      expect(typeof r.model).toBe("string");
+      expect(r.minNodes).toBeGreaterThanOrEqual(1);
+      if (r.tpDefault !== undefined) expect(Number.isFinite(r.tpDefault)).toBe(true);
+      if (r.gpuMemDefault !== undefined) expect(Number.isFinite(r.gpuMemDefault)).toBe(true);
+    }
+    expect(recipes.some((r) => r.minNodes >= 2)).toBe(true);
+  });
+});

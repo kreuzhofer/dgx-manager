@@ -5,6 +5,17 @@ export interface SparkrunRecipeSummary {
   description?: string;
   runtime?: string;     // declared runtime; opaque
   registry?: string;    // e.g. "official" | "community" | custom name
+  model?: string;       // HF model id (from recipe)
+  minNodes: number;     // minimum node count required; defaults to 1
+  tpDefault?: number;   // tensor-parallelism default; undefined when not set
+  gpuMemDefault?: number; // GPU memory fraction default; undefined when not set
+}
+
+/** Coerce sparkrun's `"" | number | null | undefined` to a finite number or undefined. */
+function numOrUndef(v: unknown): number | undefined {
+  if (v === "" || v == null) return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
 }
 
 /**
@@ -25,6 +36,10 @@ export function parseSparkrunList(raw: string): SparkrunRecipeSummary[] {
         description: r.description || undefined,
         runtime: r.runtime,
         registry: r.registry,
+        model: r.model ? String(r.model) : undefined,
+        minNodes: Number(r.min_nodes ?? 1),
+        tpDefault: numOrUndef(r.tp),
+        gpuMemDefault: numOrUndef(r.gpu_mem),
       }));
     } catch {
       // fall through to text-line parsing below
@@ -36,6 +51,6 @@ export function parseSparkrunList(raw: string): SparkrunRecipeSummary[] {
     .filter((l) => l && !/^name\b/i.test(l) && !/^-+$/.test(l))
     .map((l) => {
       const [ref, ...rest] = l.split(/\s{2,}|\t/);
-      return { ref: ref.trim(), name: ref.trim(), description: rest.join(" ").trim() || undefined };
+      return { ref: ref.trim(), name: ref.trim(), description: rest.join(" ").trim() || undefined, minNodes: 1 };
     });
 }
