@@ -57,15 +57,13 @@ sequenceDiagram
 
 ## Screenshots
 
-> Images live in [`docs/screenshots/`](docs/screenshots/) — see [`missing-screenshots.md`](missing-screenshots.md).
-
-| Cluster overview | Multi-node deployment |
+| Cluster overview — live GPU / VRAM / RDMA per node | Multi-node cluster deployment + per-node controls |
 |---|---|
-| ![Overview](docs/screenshots/overview.png) | ![Deployments](docs/screenshots/deployments.png) |
+| ![Cluster overview](docs/screenshots/overview.png) | ![Deployments](docs/screenshots/deployments.png) |
 
-| Live training loss curve | Benchmarks |
+| Live fine-tuning loss curve (train + eval) | Per-run benchmark throughput & latency |
 |---|---|
-| ![Fine-tune loss curve](docs/screenshots/finetune-loss-curve.png) | ![Benchmarks](docs/screenshots/benchmarks.png) |
+| ![Fine-tuning loss curve](docs/screenshots/finetune-loss-curve.png) | ![Benchmark detail](docs/screenshots/benchmark-detail.png) |
 
 ## Feature tour
 
@@ -77,6 +75,8 @@ RDMA network counters every 5 seconds. The overview page aggregates the live
 feed across every node in the cluster. See the [Self-Hosting Guide](docs/SELF-HOSTING.md)
 for provisioning details.
 
+![Nodes](docs/screenshots/nodes.png)
+
 ### Deployments
 
 Models are deployed from YAML recipes (discovered from
@@ -87,6 +87,8 @@ Deployment logs stream live to the dashboard over SSE. Note: `status: "running"`
 means the container started — actual vLLM readiness depends on model load time
 and is signalled separately once the `/v1` endpoint becomes responsive.
 
+![Deployment log viewer](docs/screenshots/deployment-logs.png)
+
 ### Fine-tuning
 
 Submit LoRA fine-tune jobs directly from the dashboard: pick a training recipe,
@@ -96,6 +98,8 @@ adapters can be merged and promoted to a deployment in one click. See
 [Gemma 4 fine-tuning on DGX Spark](docs/gemma4-fine-tuning-on-dgx-spark.md) for
 a detailed walk-through of a real training run.
 
+![Fine-tune job creation](docs/screenshots/finetune-create.png)
+
 ### Benchmarks & evaluation
 
 Run llama-benchy presets (`quick-smoke`, `chat-short`, `chat-long`, `code-32k`,
@@ -103,6 +107,19 @@ Run llama-benchy presets (`quick-smoke`, `chat-short`, `chat-long`, `code-32k`,
 lets you track regressions across model versions. See the
 [Qwen 3.6 inference benchmark write-up](docs/qwen3.6-inference-benchmark.md) for
 an example of real numbers from the cluster.
+
+| Benchmark runs | Compare runs side-by-side |
+|---|---|
+| ![Benchmarks list](docs/screenshots/benchmarks.png) | ![Benchmark compare](docs/screenshots/benchmarks-compare.png) |
+
+### Datasets
+
+Upload training data through the dashboard, register an existing NFS path, or
+point at a HuggingFace dataset ID. The format (ShareGPT, OpenAI, QA, Instruct) is
+auto-detected from the first row, previewed inline, and the dataset becomes
+selectable in the fine-tune job form.
+
+![Datasets](docs/screenshots/datasets.png)
 
 ### Load balancer
 
