@@ -21,12 +21,13 @@ DGX Manager aims to be the simplest way to operate a personal or team GPU cluste
 
 **Goal:** One-click model deployment with multi-node cluster support and load-balanced inference.
 
-- Two inference runtimes: vLLM (container-based, YAML recipe-driven) and Ollama (native)
+- Deployment via [sparkrun](https://github.com/spark-arena/sparkrun) (the head-node agent runs `sparkrun run`) — vLLM / SGLang / llama.cpp — plus Ollama (native)
+- Three recipe sources on `POST /api/deployments`: a registry recipe (`recipeFile`), an NFS path (`recipePath`), or an inline `recipeYaml` body (remote-dev, no cluster-fs access)
 - Solo and multi-node cluster deployments (tensor parallelism × pipeline parallelism via Ray)
 - VRAM admission control with safety margins and port conflict detection
-- Deployment persistence across agent restarts
-- Real-time deployment log streaming and full status lifecycle
-- Recipe auto-discovery from the spark-vllm-docker repository
+- Deployment persistence + reconnect reconciliation (kind-scoped) across agent restarts
+- Real-time deployment log streaming — incl. live vLLM model-loading output via a `sparkrun logs` follower — and full status lifecycle
+- Recipe catalog auto-discovered from sparkrun registries via `sparkrun list` (`POST /api/recipes/refresh` re-scans)
 - Server-side load balancer: rules + endpoints API (round-robin / first-available strategy implemented); the inference proxy router (`proxy/inference-proxy.ts`) is written but **not yet mounted in the server**
 - Dashboard: Deployment creation (runtime toggle, node/recipe selection), log viewer, stop/restart controls, cluster node visualization
 
@@ -47,7 +48,7 @@ The server APIs for these features are complete, but the dashboard pages are sti
 
 ### Deploy status accuracy
 
-- [ ] Deployment `status: "running"` should mean vLLM is actually serving, not just that the container started. Today the manager flips to `running` when the agent reports container start (often within 60s), but for a 27B model on 2 nodes, vLLM doesn't bind port 8000 until safetensors load + Ray init + cudagraph capture finish (~5–6 min). A scripted "wait for ready" loop hits a connection-refused window even though the dashboard says "running". Options: add a `loading` sub-state until the `/v1/models` probe succeeds; or have the agent stream readiness events back over the WS and update the deployment row when the API is bound. Either way the UI should show "loading" with progress, not "running".
+- [ ] Deployment `status: "running"` should mean vLLM is actually serving, not just that the container started. Today the manager flips to `running` when the agent reports container start (often within 60s), but for a 27B model on 2 nodes, vLLM doesn't bind port 8000 until safetensors load + Ray init + cudagraph capture finish (~5–6 min). A scripted "wait for ready" loop hits a connection-refused window even though the dashboard says "running". Options: add a `loading` sub-state until the `/v1/models` probe succeeds; or have the agent stream readiness events back over the WS and update the deployment row when the API is bound. Either way the UI should show "loading" with progress, not "running". *(June 2026 update: live vLLM model-loading logs now stream via a `sparkrun logs` follower, but `running` still fires at serve-command launch, not at `/v1/models` readiness. Also found: a crash-looping failed deploy keeps re-downloading on each docker restart while the follower narrates progress — so a failed deploy can look alive, and status can stay stale after it stops. Tracked as a status-accuracy follow-up.)*
 
 ## Phase 3: Fine-Tuning Pipeline ✅
 
@@ -165,7 +166,7 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 
 ### Remaining
 
-- [ ] **Consumer-GPU recipe repo** — a second vLLM recipe repo (working title `consumer-gpu-vllm-docker`) with curated recipes targeting 32 GB single-GPU amd64 hosts (Nemotron-3-Nano-NVFP4, Qwen3-Coder-Next int4, GLM-4.7-Flash-AWQ, merged finetunes). Slim `Dockerfile` without fastsafetensors/cubin patches, single-node-only `run-recipe.sh`, no cluster plumbing. `VLLM_REPO_PATH` baked per-arch into the agent's systemd unit at install time so each node points at the appropriate repo.
+- [ ] **Consumer-GPU recipes** — a sparkrun registry of curated single-GPU recipes targeting 32 GB amd64 hosts (Nemotron-3-Nano-NVFP4, Qwen3-Coder-Next int4, GLM-4.7-Flash-AWQ, merged finetunes), each pinning a slim single-node container. Registered via `sparkrun registry add` so it appears in the catalog alongside `@official`; no separate recipe-repo plumbing needed now that deployment goes through sparkrun.
 - [ ] **VRAM admission guard** — compare `recipe.vram_required` against `node.vramTotal` at deploy time and reject with a clear error, to prevent wasting a build cycle on models that can't fit.
 - [ ] **Heterogeneous cluster guard** — scheduler refuses to form multi-node training/vLLM clusters that mix arches or GPU classes.
 
@@ -237,6 +238,7 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 
 ## Recent work (May–June 2026)
 
+- **Sparkrun deploy backend** — replaced the eugr `run-recipe.sh` path with [sparkrun](https://github.com/spark-arena/sparkrun) (agent-side; head-node runs `sparkrun run`). Recipe catalog from `sparkrun list` registries; inline-`recipeYaml` deploy API (remote-dev, no cluster-fs access); OpenAPI 3 spec + Swagger UI (`/api/openapi.json`, `/api/docs`); live vLLM model-loading logs via a `sparkrun logs` follower; provisioner installs + sets up sparkrun
 - **Nemotron-3-Ultra NVFP4 TP=4** — 550B-A55B served across 4 DGX Spark nodes (Ray, engine-isolated vLLM container); MTP speculative decoding enabled via per-MoE-type backend selection
 - **Metrics retention** — MetricSnapshot pruning (`METRIC_RETENTION_DAYS`, default 7d) + `(nodeId, timestamp DESC)` index
 - **Inference-variant selector** — choose an inference template per recipe on deploy/restart
@@ -275,4 +277,4 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 
 ---
 
-*Last updated: June 11, 2026*
+*Last updated: June 12, 2026*

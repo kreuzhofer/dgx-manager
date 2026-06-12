@@ -49,6 +49,7 @@ docker compose logs dashboard -f
 ```
 
 - Server listens on port **4000**, dashboard on port **3000**
+- The full REST API is self-documenting: machine-readable spec at `GET /api/openapi.json`, interactive Swagger UI at `GET /api/docs`
 - SQLite database persists in the `dgx-data` Docker volume
 - Host `~/.ssh` is mounted read-only for SSH-based node management
 - `NEXT_PUBLIC_*` variables are baked into the dashboard image at build time
@@ -64,8 +65,10 @@ There are three provisioning tiers, in decreasing order of automation:
 
 Add a node via the dashboard or `POST /api/nodes` with an SSH address. The server
 audits prerequisites, then auto-installs Docker, nvidia-container-toolkit, Node.js,
-and Ollama. It deploys the agent as a systemd service (`dgx-agent`) and registers
-the node. Requires SSH access and ideally the NFS share already mounted on the node.
+Ollama, and sets up **sparkrun** (via `uvx`, plus its non-interactive `setup ssh` /
+`earlyoom` / `docker-group` steps so cluster deploys work). It deploys the agent as a
+systemd service (`dgx-agent`) and registers the node. Requires SSH access and ideally
+the NFS share already mounted on the node.
 
 ### (b) SSH provisioning only
 
@@ -87,7 +90,7 @@ curl -s -X POST -H 'Content-Type: application/json' http://<manager>:4000/api/to
 curl -fsSL "http://<manager>:4000/api/agent/install.sh" | sudo bash -s -- --token <TOKEN>
 ```
 
-The installer installs Docker, nvidia-container-toolkit, Node.js 22.x (skipped if Node ≥20 is already present), Ollama, and `uv`/`uvx` (used for first-time HuggingFace model downloads);
+The installer installs Docker, nvidia-container-toolkit, Node.js 22.x (skipped if Node ≥20 is already present), Ollama, and `uv`/`uvx` (used to run sparkrun and for first-time HuggingFace model downloads);
 detects the node architecture (`uname -m`); downloads the matching agent bundle
 (`/api/agent/bundle?arch=<arch>`); and registers a systemd service. The node
 appears in the dashboard once the agent connects and completes registration.
@@ -160,29 +163,54 @@ Edit `.env` to point at your server if running against a real cluster. The
 | `NODE_ID` | agent | — | Node ID for manual / SSH onboarding (token onboarding sets this automatically) |
 | `MANAGER_URL` | agent | `ws://localhost:4000/ws/agent` | Server WebSocket URL |
 | `NODE_ADVERTISE_IP` | agent | — | Override the management IP reported to the server |
-| `VLLM_REPO_PATH` | agent | `$SHARED_STORAGE_PATH/src/github/spark-vllm-docker` | Path to the spark-vllm-docker recipe repo |
+
+The inference deploy backend is [sparkrun](https://github.com/spark-arena/sparkrun)
+(pinned `sparkrun==0.2.38`), invoked by the agent via `uvx` — there is no recipe-repo
+path to configure. The recipe catalog comes from sparkrun's configured registries
+(see §8).
 
 ---
 
-## 8. vLLM recipes and engine isolation
+## 8. Recipes, registries, and engine isolation
 
-The agent reads deployment recipes from `VLLM_REPO_PATH` (default:
-`/mnt/tank/src/github/spark-vllm-docker`). Recipes are YAML files that describe
-the model, container image, quantization settings, and vLLM launch defaults.
+Inference is deployed through [sparkrun](https://github.com/spark-arena/sparkrun):
+the head-node agent runs `sparkrun run`, which resolves the recipe, distributes the
+container image + model across the target hosts, and starts the runtime.
 
-After adding or updating recipes, trigger a rescan:
+**Recipe catalog.** The dropdown is populated from `sparkrun list`, which enumerates
+recipes from sparkrun's configured registries (e.g. `@official`,
+`@sparkrun-transitional`). To add more recipes (community or your own fork), register
+the git registry on the nodes:
 
 ```
-POST /api/recipes/refresh
+sparkrun registry add <git-url>     # then they appear in `sparkrun list`
 ```
 
-`POST /api/recipes/refresh` (server-side; it tells connected agents to reload their recipe repo).
+After adding or updating registries/recipes, refresh the catalog:
 
-Different recipes can pin different container images, which enables **engine
-isolation** — for example, running a newer vLLM version for specific models without
-affecting others. This is how the DGX Spark cluster runs a patched fork (`eugr`
-nightly wheels) for models that require it, while keeping the stable image for
-everything else.
+```
+POST /api/recipes/refresh           # tells agents to re-run `sparkrun list`
+```
+
+**Three ways to deploy a recipe** (`POST /api/deployments`, exactly one of):
+
+- `recipeFile` — a registry recipe ref from the catalog (e.g. `@official/<id>`).
+- `recipePath` — a path to a recipe YAML staged under `SHARED_STORAGE_PATH`.
+- `recipeYaml` — an **inline recipe body** posted directly in the request. The agent
+  writes it to a transient file and runs it; nothing lands on the cluster filesystem.
+  Ideal for a remote machine iterating on new recipes. (Validated: ≤512 KB, must look
+  like a recipe; the `command:` it declares runs in a container, so treat it as a
+  privileged endpoint.)
+
+**Engine isolation.** Each recipe declares its own `runtime` (vLLM / SGLang /
+llama.cpp) and `container` image, so different models can run different engine
+versions side by side without affecting each other. sparkrun's default DGX Spark
+image is eugr-based (`dgx-vllm-eugr-nightly`); the **first** deploy of a new image
+family does a one-time from-source build (~15 min) and is cached thereafter — so the
+first launch of a given recipe family is slow even though the workload is small.
+
+**Live logs.** vLLM's detailed model-loading output streams to the deployment log via
+a `sparkrun logs` follower the agent attaches after launch.
 
 ---
 

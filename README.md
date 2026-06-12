@@ -9,7 +9,7 @@ benchmark them — with a real-time web dashboard and zero cloud dependencies.
 ## What it does
 
 - **Real-time GPU telemetry** — utilization, VRAM, temperature, network/RDMA across every node at 5-second resolution
-- **One-click model deployment** — vLLM (container, YAML-recipe-driven) and Ollama (native)
+- **One-click model deployment** — [sparkrun](https://github.com/spark-arena/sparkrun)-driven inference (vLLM / SGLang / llama.cpp) and Ollama (native). Deploy a recipe from a registry, an NFS path, or an **inline YAML body posted over the API** (no cluster-filesystem access needed)
 - **Multi-node inference clusters** — tensor/pipeline parallelism over Ray; serves models up to **Nemotron-3-Ultra 550B-A55B NVFP4 across 4 nodes**
 - **Load balancer** — rules + endpoints API, plus a round-robin / first-available inference proxy *(proxy and dashboard UI not yet wired up)*
 - **End-to-end fine-tuning** — LoRA via DeepSpeed ZeRO-2/3, TRL+PEFT, or Unsloth; multi-node training; resume-from-checkpoint; merge → deploy in one loop
@@ -21,35 +21,38 @@ benchmark them — with a real-time web dashboard and zero cloud dependencies.
 ## Architecture
 
 A three-package TypeScript monorepo. The dashboard talks to the server over
-WebSocket; the server talks to an agent on each node; agents run the runtimes
-and report metrics.
+WebSocket; the server talks to an agent on each node; agents drive
+[sparkrun](https://github.com/spark-arena/sparkrun) to run the inference
+runtimes and report metrics.
 
 ```mermaid
 flowchart LR
     D["Dashboard<br/>Next.js :3000"] <-->|"WS /ws/dashboard"| S["Server<br/>Express :4000"]
-    S <-->|"WS /ws/agent"| A1["Agent (node)<br/>vLLM · Ollama · nvidia-smi"]
+    S <-->|"WS /ws/agent"| A1["Agent (node)<br/>sparkrun · Ollama · nvidia-smi"]
     S <-->|"WS /ws/agent"| A2["Agent (node)"]
     S --> DB[("SQLite · Prisma")]
     NFS[("NFS shared storage")] --- A1
     NFS --- A2
-    NFS -.->|"recipe repo (cloned to NFS)"| R["spark-vllm-docker"]
+    A1 -.->|"sparkrun list / run"| REG["sparkrun registries<br/>(@official, community)"]
 ```
 
-A deployment flows from the dashboard to a node and streams back live:
+A deployment flows from the dashboard to a node and streams back live. The
+head-node agent runs `sparkrun run`, which distributes the container image +
+model and starts the runtime (Ray for multi-node):
 
 ```mermaid
 sequenceDiagram
     participant U as User
     participant D as Dashboard
     participant S as Server
-    participant A as Agent
+    participant A as Agent (head)
     participant C as vLLM container
-    U->>D: Deploy recipe (solo or cluster)
+    U->>D: Deploy recipe (registry / path / inline YAML)
     D->>S: POST /api/deployments
     S->>S: VRAM admission + port check
     S->>A: cmd:deploy (WS)
-    A->>C: launch recipe (Ray if multi-node)
-    C-->>A: startup logs
+    A->>C: sparkrun run (image+model sync, Ray if multi-node)
+    C-->>A: container logs (via `sparkrun logs` follower)
     A-->>S: status + logs (WS)
     S-->>D: live updates (WS / SSE)
     Note over C: serving on :8000 (/v1)
@@ -79,13 +82,19 @@ for provisioning details.
 
 ### Deployments
 
-Models are deployed from YAML recipes (discovered from
-[spark-vllm-docker](https://github.com/kreuzhofer/spark-vllm-docker)) or via
-Ollama. Single-node and multi-node Ray clusters are both supported, with VRAM
+Models are deployed via [sparkrun](https://github.com/spark-arena/sparkrun): the
+head-node agent runs `sparkrun run`, which resolves the recipe, distributes the
+container image + model over the cluster, and starts the runtime. A recipe can
+come from three sources — a **registry recipe** (the catalog is discovered via
+`sparkrun list`), an **NFS path** under shared storage, or an **inline YAML body**
+posted directly in the deploy request (handy for a remote machine iterating on
+recipes without touching the cluster filesystem). Ollama deployments are also
+supported natively. Single-node and multi-node Ray clusters both work, with VRAM
 admission control that blocks deploys that would over-subscribe available memory.
-Deployment logs stream live to the dashboard over SSE. Note: `status: "running"`
-means the container started — actual vLLM readiness depends on model load time
-and is signalled separately once the `/v1` endpoint becomes responsive.
+Deployment logs — including the live vLLM model-loading output (streamed via a
+`sparkrun logs` follower) — stream to the dashboard. Note: `status: "running"`
+means the serve command launched; actual readiness depends on model load time, so
+poll `/v1/models` on the endpoint to confirm the model is serving.
 
 ![Deployment log viewer](docs/screenshots/deployment-logs.png)
 
@@ -142,7 +151,8 @@ For full feature status see [docs/ROADMAP.md](docs/ROADMAP.md).
 
 TypeScript monorepo (npm workspaces) · Express 5 + `ws` · Next.js 15 / React 19 /
 Tailwind 4 · Prisma 7 + SQLite · Docker / Docker Compose · Ray · DeepSpeed / PEFT /
-TRL / Unsloth · vLLM · Ollama · llama-benchy
+TRL / Unsloth · [sparkrun](https://github.com/spark-arena/sparkrun) (vLLM / SGLang /
+llama.cpp) · Ollama · llama-benchy · OpenAPI 3 / Swagger UI
 
 ## Repository layout
 
@@ -152,8 +162,9 @@ TRL / Unsloth · vLLM · Ollama · llama-benchy
 - `docs/` — guides, deep-dive write-ups, ROADMAP, specs/plans
 
 **Related repositories:**
-[spark-vllm-docker](https://github.com/kreuzhofer/spark-vllm-docker) ·
-[dgx-manager-fine-tune-recipes](https://github.com/kreuzhofer/dgx-manager-fine-tune-recipes)
+[sparkrun](https://github.com/spark-arena/sparkrun) (deploy backend) ·
+[spark-arena/recipe-registry](https://github.com/spark-arena/recipe-registry) (inference recipes) ·
+[dgx-manager-fine-tune-recipes](https://github.com/kreuzhofer/dgx-manager-fine-tune-recipes) (training recipes)
 
 ## API
 
@@ -163,10 +174,10 @@ REST under `/api`, plus WebSocket hubs at `/ws/dashboard` and `/ws/agent`.
 |-------------|---------|
 | `/api/nodes` | Node lifecycle, provisioning, agent updates |
 | `/api/models` | Model registry |
-| `/api/deployments` | Solo & cluster deployments, logs, restart |
+| `/api/deployments` | Solo & cluster deployments (registry recipe, NFS path, or inline `recipeYaml`), logs, restart |
 | `/api/finetune` | Fine-tune jobs, resume, merge, deploy |
 | `/api/lb` | Load-balancer rules & endpoints |
-| `/api/recipes` | vLLM recipes (discovered from agents) |
+| `/api/recipes` | Inference recipe catalog (from `sparkrun list` registries, via agents) |
 | `/api/training-recipes` | Training recipes + inference variants |
 | `/api/tokens` | Single-use agent join tokens |
 | `/api/settings` | Server settings |
@@ -174,6 +185,8 @@ REST under `/api`, plus WebSocket hubs at `/ws/dashboard` and `/ws/agent`.
 | `/api/agent` | Agent bundle + install script |
 | `/api/datasets` | Dataset upload/registration/preview |
 | `/api/benchmarks` | llama-benchy benchmark runs |
+| `/api/openapi.json` | Machine-readable OpenAPI 3 spec for the whole API |
+| `/api/docs` | Swagger UI (interactive API explorer) |
 | `/api/events` | Server-Sent Events stream for real-time dashboard updates |
 | `/api/health` | Health check |
 

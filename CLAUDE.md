@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-DGX Manager is a full-stack system for managing a DGX Spark cluster. It handles node provisioning via SSH, real-time GPU metrics collection, model deployment, inference load balancing, and fine-tuning job orchestration.
+DGX Manager is a full-stack system for managing a DGX Spark cluster. It handles node provisioning via SSH, real-time GPU metrics collection, model deployment (via [sparkrun](https://github.com/spark-arena/sparkrun) — the head-node agent runs `sparkrun run`), inference load balancing, and fine-tuning job orchestration.
 
 ## Architecture
 
@@ -72,12 +72,14 @@ npm run db:studio        # Open Prisma Studio GUI
 
 ### Server (`packages/server/src/`)
 - `index.ts` — Express setup, WebSocket hub init, route mounting
-- `routes/` — REST handlers: nodes, models, deployments, finetune, loadbalancer
+- `routes/` — REST handlers: nodes, models, deployments (recipeFile | recipePath | inline recipeYaml), finetune, loadbalancer, recipes
+- `deployments/recipe-path.ts`, `deployments/recipe-inline.ts` — validate the path / inline-YAML deploy sources (security boundary)
 - `ws/agent-hub.ts` — Manages agent WebSocket connections, processes metrics
 - `ws/dashboard-hub.ts` — Broadcasts updates to connected dashboards
-- `ssh/provisioner.ts` — Audits prerequisites, auto-installs packages on nodes
+- `ssh/provisioner.ts` — Audits prerequisites, auto-installs packages on nodes (incl. sparkrun install + non-interactive setup)
 - `routes/agent-bundle.ts` — Serves per-arch agent tarballs + generates the token install script
 - `proxy/inference-proxy.ts` — Round-robin request routing to deployments
+- `openapi.ts` — builds the OpenAPI 3 spec (served at `/api/openapi.json`, Swagger UI at `/api/docs`)
 
 ### Dashboard (`packages/dashboard/`)
 - `app/` — Next.js App Router pages (overview, nodes, models, deployments, finetune, loadbalancer)
@@ -85,9 +87,12 @@ npm run db:studio        # Open Prisma Studio GUI
 - `lib/api.ts` — Fetch wrapper; `lib/ws.ts` — useWebSocket hook
 
 ### Agent (`packages/agent/src/`)
-- `index.ts` — WebSocket client, reconnection logic, 5-second metrics loop
+- `index.ts` — WebSocket client, reconnection logic, 5-second metrics loop; `cmd:deploy`/`cmd:undeploy` handlers + reconnect reconciliation
 - `metrics.ts` — nvidia-smi wrapper for GPU metrics
-- `runtime/` — vLLM/Ollama integrations (Phase 2)
+- `recipes.ts` — recipe catalog from `sparkrun list`, mapped to the wire `Recipe` shape
+- `runtime/sparkrun.ts` — deploy lifecycle: `sparkrun run`/`stop`, `cluster check-job` liveness, and the `sparkrun logs` follower that streams container logs
+- `runtime/sparkrun-args.ts` · `sparkrun-parse.ts` · `sparkrun-metrics.ts` — pure argv builder, CLI output parsers, vLLM `/metrics` scrape
+- `runtime/ollama.ts`, `runtime/finetune.ts` — Ollama deploys; fine-tune training/merge (fine-tune deploy also goes through sparkrun)
 
 ## Database
 
