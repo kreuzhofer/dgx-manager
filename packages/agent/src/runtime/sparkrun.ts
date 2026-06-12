@@ -85,6 +85,18 @@ export function inspectSparkrunContainer(clusterId?: string): SparkrunContainerS
   return { name, state, restartCount: Number(rc) || 0 };
 }
 
+/** Stop the restart loop, then capture the FULL accumulated container log (run #0 included).
+ *  `docker stop` cancels the unless-stopped revival and exits the container, so the subsequent
+ *  `docker logs` returns the full history (run #0 first) — not "Container is restarting" or just
+ *  the latest restart's mangled output. */
+export function captureCrashedContainerLogs(clusterId?: string): string {
+  if (!clusterId) return "";
+  const name = containerNameFor(clusterId);
+  if (!name) return "";
+  spawnSync("docker", ["stop", "-t", "3", name], { timeout: 15_000 });
+  return snapshotContainerLogs(clusterId);
+}
+
 /** Read-only: snapshot a sparkrun container's FULL stdout+stderr (all restarts). */
 export function snapshotContainerLogs(clusterId?: string): string {
   if (!clusterId) return "";

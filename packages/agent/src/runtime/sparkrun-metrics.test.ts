@@ -72,11 +72,11 @@ describe("firstErrorLine", () => {
 
 // ── checkSparkrunDeployments tests ──────────────────────────────────────────
 
-const { loadDeploymentsMock, isWorkloadRunningMock, inspectSparkrunContainerMock, snapshotContainerLogsMock, fetchMock } = vi.hoisted(() => ({
+const { loadDeploymentsMock, isWorkloadRunningMock, inspectSparkrunContainerMock, captureCrashedContainerLogsMock, fetchMock } = vi.hoisted(() => ({
   loadDeploymentsMock: vi.fn(),
   isWorkloadRunningMock: vi.fn(),
   inspectSparkrunContainerMock: vi.fn(),
-  snapshotContainerLogsMock: vi.fn(),
+  captureCrashedContainerLogsMock: vi.fn(),
   fetchMock: vi.fn(),
 }));
 
@@ -84,7 +84,7 @@ vi.mock("./deployment-store.js", () => ({ loadDeployments: loadDeploymentsMock }
 vi.mock("./sparkrun.js", () => ({
   isWorkloadRunning: isWorkloadRunningMock,
   inspectSparkrunContainer: inspectSparkrunContainerMock,
-  snapshotContainerLogs: snapshotContainerLogsMock,
+  captureCrashedContainerLogs: captureCrashedContainerLogsMock,
 }));
 
 // Override global fetch
@@ -101,11 +101,11 @@ beforeEach(() => {
   loadDeploymentsMock.mockReset();
   isWorkloadRunningMock.mockReset();
   inspectSparkrunContainerMock.mockReset();
-  snapshotContainerLogsMock.mockReset();
+  captureCrashedContainerLogsMock.mockReset();
   fetchMock.mockReset();
   // Default: no container found (healthy path — inspect returns null)
   inspectSparkrunContainerMock.mockReturnValue(null);
-  snapshotContainerLogsMock.mockReturnValue("");
+  captureCrashedContainerLogsMock.mockReturnValue("");
 });
 
 describe("checkSparkrunDeployments", () => {
@@ -145,6 +145,7 @@ describe("checkSparkrunDeployments", () => {
       port: 8000,
       startedAt: "2026-01-01T00:00:00Z",
       clusterNodes: ["10.0.0.1"],
+      clusterId: "sparkrun_dep2abc",
     }]);
     isWorkloadRunningMock.mockReturnValue(false);
 
@@ -229,10 +230,32 @@ describe("checkSparkrunDeployments", () => {
     expect(results[0].containerRunning).toBe(true);
   });
 
+  it("skips a deployment that has no clusterId yet (still launching / downloading)", async () => {
+    // Invariant: a deployment without a clusterId has not yet launched a container
+    // (the model may still be downloading). The health loop must NOT treat it as a
+    // dead container — doing so would call stopSparkrun and kill the download.
+    loadDeploymentsMock.mockReturnValue([{
+      deploymentId: "d1",
+      recipeFile: "fp8-model-vllm",
+      recipeName: "fp8-model",
+      port: 8000,
+      /* no clusterId */
+    }]);
+
+    const results = await checkSparkrunDeployments();
+    expect(results).toHaveLength(0);
+    // isWorkloadRunning and inspectSparkrunContainer must NOT have been called —
+    // the guard continues before they are reached.
+    expect(isWorkloadRunningMock).not.toHaveBeenCalled();
+    expect(inspectSparkrunContainerMock).not.toHaveBeenCalled();
+  });
+
   it("returns crashed status with capturedLog when container is crash-looping", async () => {
     // Invariant: when a sparkrun container has restarted >= CRASH_LOOP_THRESHOLD
-    // times, checkSparkrunDeployments must surface the real error from container
-    // logs (not just "not running") so the deployment logstream shows the cause.
+    // times, checkSparkrunDeployments must surface the real root error from container
+    // logs (not just "not running"). captureCrashedContainerLogs (which stops the
+    // restart loop before reading) is used instead of snapshotContainerLogs so that
+    // the full accumulated log (run #0 included) is returned reliably.
     const crashLog = [
       "INFO: Starting vllm server...",
       "vllm serve: error: argument --compilation-config: Invalid JSON",
@@ -250,7 +273,7 @@ describe("checkSparkrunDeployments", () => {
     }]);
     isWorkloadRunningMock.mockReturnValue(false);
     inspectSparkrunContainerMock.mockReturnValue({ name: "sparkrun_crash01_solo", state: "restarting", restartCount: 5 });
-    snapshotContainerLogsMock.mockReturnValue(crashLog);
+    captureCrashedContainerLogsMock.mockReturnValue(crashLog);
 
     const results = await checkSparkrunDeployments();
     expect(results).toHaveLength(1);

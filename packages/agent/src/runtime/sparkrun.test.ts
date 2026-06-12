@@ -33,7 +33,7 @@ const { spawnMock, execFileSyncMock, spawnSyncMock } = vi.hoisted(() => {
 vi.mock("node:child_process", () => ({ spawn: spawnMock, execFileSync: execFileSyncMock, spawnSync: spawnSyncMock }));
 vi.mock("./deployment-store.js", () => ({ saveDeployment: vi.fn(), removeDeployment: vi.fn() }));
 
-import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe, inspectSparkrunContainer, snapshotContainerLogs } from "./sparkrun.js";
+import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe, inspectSparkrunContainer, snapshotContainerLogs, captureCrashedContainerLogs } from "./sparkrun.js";
 
 beforeEach(() => {
   children.length = 0;
@@ -243,6 +243,64 @@ describe("snapshotContainerLogs", () => {
       .mockReturnValueOnce({ stdout: "  log line  \n  ", stderr: "\n  " });
     const result = snapshotContainerLogs("sparkrun_abc123");
     expect(result).toBe("log line");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// captureCrashedContainerLogs
+// ---------------------------------------------------------------------------
+
+describe("captureCrashedContainerLogs", () => {
+  it("returns empty string when clusterId is undefined", () => {
+    expect(captureCrashedContainerLogs(undefined)).toBe("");
+    // spawnSync must not have been called at all
+    expect(spawnSyncMock).not.toHaveBeenCalled();
+  });
+
+  it("returns empty string when no container is found for the clusterId", () => {
+    // docker ps returns nothing → containerNameFor returns null → early return
+    spawnSyncMock.mockReturnValue({ stdout: "", stderr: "" });
+    expect(captureCrashedContainerLogs("sparkrun_abc123")).toBe("");
+  });
+
+  it("calls docker stop before reading logs (stops the restart loop first)", () => {
+    // Three spawnSync calls in order: ps (find name), stop, ps again (inside snapshotContainerLogs), logs
+    spawnSyncMock
+      .mockReturnValueOnce({ stdout: "sparkrun_abc123_solo\n", stderr: "" })  // ps for containerNameFor (stop phase)
+      .mockReturnValueOnce({ stdout: "", stderr: "" })                         // docker stop
+      .mockReturnValueOnce({ stdout: "sparkrun_abc123_solo\n", stderr: "" })  // ps for containerNameFor (logs phase)
+      .mockReturnValueOnce({ stdout: "startup output\n", stderr: "root crash error\n" }); // docker logs
+
+    const result = captureCrashedContainerLogs("sparkrun_abc123");
+
+    // Verify docker stop was called with the right arguments
+    const stopCall = spawnSyncMock.mock.calls.find(
+      (c: any) => Array.isArray(c[1]) && c[1].includes("stop"),
+    ) as any[] | undefined;
+    expect(stopCall).toBeDefined();
+    expect(stopCall?.[1]).toContain("-t");
+    expect(stopCall?.[1]).toContain("3");
+    expect(stopCall?.[1]).toContain("sparkrun_abc123_solo");
+
+    // The returned log must include content from the subsequent docker logs call
+    expect(result).toContain("root crash error");
+  });
+
+  it("docker stop is called BEFORE docker logs (stop precedes log read)", () => {
+    spawnSyncMock
+      .mockReturnValueOnce({ stdout: "sparkrun_abc123_solo\n", stderr: "" })  // ps (stop phase)
+      .mockReturnValueOnce({ stdout: "", stderr: "" })                         // stop
+      .mockReturnValueOnce({ stdout: "sparkrun_abc123_solo\n", stderr: "" })  // ps (logs phase)
+      .mockReturnValueOnce({ stdout: "output\n", stderr: "err\n" });           // logs
+
+    captureCrashedContainerLogs("sparkrun_abc123");
+
+    const calls = spawnSyncMock.mock.calls as any[][];
+    const stopIdx = calls.findIndex((c) => c[1]?.includes("stop"));
+    const logsIdx = calls.findIndex((c) => c[1]?.includes("logs"));
+    expect(stopIdx).toBeGreaterThanOrEqual(0);
+    expect(logsIdx).toBeGreaterThanOrEqual(0);
+    expect(stopIdx).toBeLessThan(logsIdx);
   });
 });
 

@@ -1,5 +1,5 @@
 import { loadDeployments } from "./deployment-store.js";
-import { isWorkloadRunning, inspectSparkrunContainer, snapshotContainerLogs } from "./sparkrun.js";
+import { isWorkloadRunning, inspectSparkrunContainer, captureCrashedContainerLogs } from "./sparkrun.js";
 import type { VllmStatus } from "./vllm.js";
 
 const CRASH_LOOP_THRESHOLD = 2;
@@ -59,6 +59,12 @@ export async function checkSparkrunDeployments(): Promise<VllmStatus[]> {
   const results: VllmStatus[] = [];
 
   for (const d of deployments) {
+    // Still launching: `sparkrun run` hasn't reported a Cluster id yet, so no
+    // container exists (the model may still be downloading). The cmd:deploy
+    // onLog/onExit path owns status during launch — do NOT treat this as a dead
+    // container, or we'd kill the in-progress deploy.
+    if (!d.clusterId) continue;
+
     const target = d.clusterId ?? d.recipeFile;
     const hosts = d.clusterNodes ?? [];
     const running = isWorkloadRunning(target, hosts);
@@ -75,7 +81,7 @@ export async function checkSparkrunDeployments(): Promise<VllmStatus[]> {
     const c = inspectSparkrunContainer(d.clusterId);
     const failing = c != null && (c.restartCount >= CRASH_LOOP_THRESHOLD || (c.state !== "running" && c.state !== "created"));
     if (failing && !d.stopping) {
-      const snap = snapshotContainerLogs(d.clusterId);
+      const snap = captureCrashedContainerLogs(d.clusterId);
       results.push({
         deploymentId: d.deploymentId,
         recipeName: d.recipeName,
