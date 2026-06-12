@@ -9,6 +9,33 @@
 **Tech Stack:** TypeScript (ESM, strict), Node child_process, Vitest + @fast-check/vitest + supertest, Prisma/SQLite, WebSocket hubs.
 
 **Spec:** `docs/superpowers/specs/2026-06-12-sparkrun-deploy-backend-design.md` (decisions D1–D6, verification items V1–V5).
+**Discovery findings:** `docs/superpowers/specs/2026-06-12-sparkrun-discovery-findings.md` (sparkrun **0.2.38**; fixtures captured).
+
+## Phase 0 Results & Required Plan Adjustments (apply as you reach each task)
+
+The discovery spike (Task 0) ran on the head node and resolved V1/V2/V5 from safe commands;
+V3/V4 await a freed node. Concrete corrections to the task code below:
+
+- **Version pin (V5):** `SPARKRUN_PKG = "sparkrun==0.2.38"` everywhere (Tasks 3, 6, 11).
+- **`list` fields (Task 1):** real keys are `name` (the `@registry/file` ref), `file`, `model`,
+  `description`, `runtime`, `min_nodes`, `tp`, `gpu_mem`, `registry`. `tp`/`gpu_mem` may be `""`
+  — tolerate `"" | number`. Map `ref = name`. Test loads `__fixtures__/sparkrun-list.json`.
+- **`show` has NO `--json` (Task 2):** replace the `show --json` approach with **`export recipe
+  <name>`** (YAML) for `defaults`/`metadata`/`runtime`/`container`/`command`, and parse the
+  `show` **text** block only for the VRAM estimate (`Per-GPU total: N GB`, `DGX Spark fit: YES`).
+  There is **no `metadata.model_vram`** — get VRAM from `show` text or keep DGX Manager's own
+  estimate. Fixtures: `sparkrun-export-recipe.yaml`, `sparkrun-show.txt`.
+- **`status` has NO `--json` (Tasks 5, 6):** parse `status` **text** (keyed by **cluster ID**
+  `sparkrun_<hash>`), or use `cluster check-job` for liveness. `status`/`stop` **require
+  `-H/--hosts`** (no default cluster). **Capture the `Cluster: sparkrun_<hash>` ID from `run`
+  output** and store it for `stop`/`status`. `stop` accepts the recipe name *or* the cluster ID.
+  Final text format pinned after the V3 live run.
+- **`setup` is non-interactive subcommands (Task 11):** use `setup ssh`, `setup earlyoom`,
+  `setup docker-group` (and `setup cx7` if CX7 present) with `-H/--hosts` — **not** a
+  `--non-interactive` flag. Avoid `setup wizard` (interactive).
+- **New risk flagged for the live run:** sparkrun's image is eugr-based and may name its
+  container `vllm_node` / `docker rm -f` it — a collision/coexistence hazard during migration.
+  Confirm container naming before relying on multi-deployment-per-node.
 
 **Conventions reused:**
 - Pure helpers tested next to source as `<name>.test.ts` (model on `packages/server/src/benchmarks/args.test.ts`).
@@ -94,7 +121,7 @@ import { join } from "node:path";
 import { parseSparkrunList, type SparkrunRecipeSummary } from "./sparkrun-parse.js";
 
 const fixture = readFileSync(
-  join(__dirname, "__fixtures__/sparkrun-list.txt"),
+  join(__dirname, "__fixtures__/sparkrun-list.json"),  // captured in Phase 0 (48 recipes)
   "utf8",
 );
 
@@ -288,7 +315,7 @@ import { execFileSync } from "node:child_process";
 import { parseSparkrunList, type SparkrunRecipeSummary } from "./runtime/sparkrun-parse.js";
 
 /** Pinned in Phase 0 findings; keep agent + provisioner in sync. */
-export const SPARKRUN_PKG = "sparkrun"; // e.g. "sparkrun==0.0.16" once pinned
+export const SPARKRUN_PKG = "sparkrun==0.2.38";
 
 export type Recipe = SparkrunRecipeSummary;
 
