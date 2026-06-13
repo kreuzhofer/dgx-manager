@@ -135,17 +135,20 @@ describe("deleteCachedRepo", () => {
     (badId) => {
       const hfHome = makeFakeCache(["models--org--alpha"]);
       writeFileSync(join(hfHome, "sentinel.txt"), "intact");
-      expect(() => deleteCachedRepo(hfHome, "model", badId)).toThrow(/invalid repoId/i);
-      expect(existsSync(join(hfHome, "sentinel.txt"))).toBe(true);
-      expect(existsSync(join(hfHome, "hub", "models--org--alpha"))).toBe(true);
-      rmSync(hfHome, { recursive: true, force: true });
+      try {
+        expect(() => deleteCachedRepo(hfHome, "model", badId)).toThrow(/invalid repoId/i);
+        expect(existsSync(join(hfHome, "sentinel.txt"))).toBe(true);
+        expect(existsSync(join(hfHome, "hub", "models--org--alpha"))).toBe(true);
+      } finally {
+        rmSync(hfHome, { recursive: true, force: true });
+      }
     },
   );
 
   it("rejects classic traversal attempts", () => {
     const hfHome = makeFakeCache(["models--org--alpha"]);
     for (const evil of ["../..", "a/..", "../hub", "/etc", "..\\..", "org/../alpha"]) {
-      expect(() => deleteCachedRepo(hfHome, "model", evil)).toThrow();
+      expect(() => deleteCachedRepo(hfHome, "model", evil)).toThrow(/invalid repoId/i);
     }
     rmSync(hfHome, { recursive: true, force: true });
   });

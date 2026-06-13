@@ -68,5 +68,7 @@ export function deleteCachedRepo(hfHome: string, kind: RepoKind, repoId: string)
     throw new Error(`refusing to delete outside hub/: ${JSON.stringify(repoId)}`);
   }
   if (!existsSync(target)) throw new Error(`not in cache: ${repoId} (${kind})`);
-  rmSync(target, { recursive: true });
+  // force: true so a concurrent HF download mutating the tree can't turn a
+  // valid delete into a spurious ENOENT on a live node.
+  rmSync(target, { recursive: true, force: true });
 }
