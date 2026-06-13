@@ -72,3 +72,88 @@ export function deleteCachedRepo(hfHome: string, kind: RepoKind, repoId: string)
   // valid delete into a spurious ENOENT on a live node.
   rmSync(target, { recursive: true, force: true });
 }
+
+interface WalkStats { sizeBytes: number; nFiles: number; lastModifiedMs: number }
+
+/** Recursive size walk using lstat: snapshot symlinks count as their own
+ *  ~0-byte entries, so blob bytes are never counted twice. */
+function walk(dir: string): WalkStats {
+  const acc: WalkStats = { sizeBytes: 0, nFiles: 0, lastModifiedMs: 0 };
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const sub = walk(p);
+      acc.sizeBytes += sub.sizeBytes;
+      acc.nFiles += sub.nFiles;
+      acc.lastModifiedMs = Math.max(acc.lastModifiedMs, sub.lastModifiedMs);
+    } else {
+      const st = lstatSync(p);
+      acc.sizeBytes += st.size;
+      acc.nFiles += 1;
+      acc.lastModifiedMs = Math.max(acc.lastModifiedMs, st.mtimeMs);
+    }
+  }
+  return acc;
+}
+
+export function scanHfCache(hfHome: string): CachedRepo[] {
+  if (!existsSync(hfHome)) throw new Error(`HF_HOME does not exist: ${hfHome}`);
+  const hub = join(hfHome, "hub");
+  if (!existsSync(hub)) return []; // fresh cache — nothing downloaded yet
+  const repos: CachedRepo[] = [];
+  for (const entry of readdirSync(hub, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const parsed = parseRepoDirName(entry.name);
+    if (!parsed) continue; // .locks and other sidecars
+    const repoDir = join(hub, entry.name);
+    const stats = walk(repoDir);
+    const snapshotsDir = join(repoDir, "snapshots");
+    const revisions = existsSync(snapshotsDir)
+      ? readdirSync(snapshotsDir, { withFileTypes: true }).filter((e) => e.isDirectory()).length
+      : 0;
+    const lastModifiedMs = stats.lastModifiedMs || lstatSync(repoDir).mtimeMs;
+    repos.push({
+      ...parsed,
+      sizeBytes: stats.sizeBytes,
+      nFiles: stats.nFiles,
+      revisions,
+      lastModified: new Date(lastModifiedMs).toISOString(),
+    });
+  }
+  return repos;
+}
+
+/** Cache identity marker. Nodes sharing the cache over NFS read the same
+ *  UUID, so the server can group their inventories into one cache group.
+ *  `wx` write loses the create race gracefully on shared storage. */
+export function readOrCreateCacheId(hfHome: string): string {
+  if (!existsSync(hfHome)) throw new Error(`HF_HOME does not exist: ${hfHome}`);
+  const marker = join(hfHome, ".dgx-cache-id");
+  if (existsSync(marker)) {
+    const existing = readFileSync(marker, "utf8").trim();
+    if (existing) return existing;
+  }
+  const id = randomUUID();
+  try {
+    writeFileSync(marker, `${id}\n`, { flag: "wx" });
+    return id;
+  } catch {
+    const existing = readFileSync(marker, "utf8").trim();
+    if (existing) return existing;
+    throw new Error(`cache-id marker exists but is unreadable/empty: ${marker}`);
+  }
+}
+
+export function buildInventory(hfHome: string): HfCacheInventoryPayload {
+  const cacheId = readOrCreateCacheId(hfHome);
+  const repos = scanHfCache(hfHome);
+  const fsStat = statfsSync(hfHome);
+  return {
+    cacheId,
+    hfHome,
+    scannedAt: new Date().toISOString(),
+    totalBytes: repos.reduce((sum, r) => sum + r.sizeBytes, 0),
+    diskFreeBytes: fsStat.bavail * fsStat.bsize,
+    repos,
+  };
+}
