@@ -4,6 +4,7 @@ import { prisma } from "../prisma.js";
 import { SHARED_STORAGE } from "../env.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import { metricsBuffer } from "../metrics-buffer.js";
+import type { HfCacheNodeInventory } from "../hf-cache/grouping.js";
 import { resolveNodeIp, isValidIpv4 } from "./node-ip.js";
 
 export interface OllamaModelInfo {
@@ -93,6 +94,9 @@ export class AgentHub {
   private recipes: VllmRecipe[] = [];
   private trainingRecipes: TrainingRecipe[] = [];
   private ollamaModels: OllamaModelInfo[] = [];
+  /** Latest HF-cache inventory per node, pushed by agents on cmd:hf-cache:scan
+   *  or after a delete. In-memory only — the filesystem is the source of truth. */
+  private hfCacheInventories = new Map<string, HfCacheNodeInventory>();
   private onMetrics?: (nodeId: string, metrics: Record<string, unknown>) => void;
   private onRecipes?: (recipes: VllmRecipe[]) => void;
   private onTrainingRecipes?: (recipes: TrainingRecipe[]) => void;
@@ -130,6 +134,10 @@ export class AgentHub {
 
   getOllamaModels(): OllamaModelInfo[] {
     return this.ollamaModels;
+  }
+
+  getHfCacheInventories(): HfCacheNodeInventory[] {
+    return [...this.hfCacheInventories.values()];
   }
 
   private handleConnection(ws: WebSocket) {
@@ -324,6 +332,21 @@ export class AgentHub {
           case "agent:ollama-models": {
             this.ollamaModels = msg.payload.models as OllamaModelInfo[];
             console.log(`Received ${this.ollamaModels.length} Ollama models from agent ${nodeId}`);
+            break;
+          }
+
+          case "agent:hf-cache": {
+            if (!nodeId) break;
+            const inventory: HfCacheNodeInventory = {
+              ...(msg.payload as Omit<HfCacheNodeInventory, "nodeId">),
+              nodeId,
+            };
+            this.hfCacheInventories.set(nodeId, inventory);
+            console.log(
+              `[hf-cache] inventory from ${nodeId}: ${inventory.repos?.length ?? 0} repos` +
+                (inventory.error ? ` (error: ${inventory.error})` : ""),
+            );
+            sseBroadcast({ type: "hf-cache:inventory", payload: inventory });
             break;
           }
 
