@@ -51,6 +51,7 @@ export function buildOpenApiSpec() {
         { name: "Settings", description: "Server settings." },
         { name: "Tokens", description: "HF / API tokens." },
         { name: "Agent bundle", description: "Per-arch agent tarballs + install script." },
+        { name: "HF Cache", description: "Hugging Face cache inventory, scan, and guarded delete." },
       ],
     },
     apis: [ROUTES_GLOB, ROUTES_GLOB_JS],

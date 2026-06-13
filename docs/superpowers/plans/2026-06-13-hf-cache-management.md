@@ -1236,21 +1236,44 @@ import {
 
 export const hfCacheRouter = Router();
 
+// NOTE (as-built): this sketch was insufficient. `Model.name` is the recipe
+// SLUG for registry-ref vLLM deploys, not the HF repo id, so name-only matching
+// would let a running deployment's weights show as deletable (a false-negative
+// on the safety guard). The shipped loadDeploymentUsage takes `agentHub` and
+// enriches candidates with the recipe catalog's HF id (resolved from
+// config.recipeFile via getRecipes()) and FineTuneJob.baseModel. See the
+// authoritative design in docs/superpowers/specs/2026-06-12-hf-cache-management-design.md
+// ("Matching (the soundness-critical part)") and routes/hf-cache.ts.
 /** Map every deployment row (any status) to the shape repoUsage consumes.
  *  All statuses are loaded on purpose: terminal ones contribute
  *  lastDeployedAt, active ones drive the in-use guard. */
-async function loadDeploymentUsage(): Promise<DeploymentUsage[]> {
+async function loadDeploymentUsage(agentHub: AgentHub): Promise<DeploymentUsage[]> {
   const deployments = await prisma.deployment.findMany({
-    include: { model: true, clusterNodes: true },
+    include: {
+      model: { include: { finetuneJob: { select: { baseModel: true } } } },
+      clusterNodes: true,
+    },
   });
-  return deployments.map((d) => ({
-    status: d.status,
-    nodeId: d.nodeId,
-    createdAt: d.createdAt.toISOString(),
-    label: d.displayName ?? d.model.name,
-    candidates: deploymentModelCandidates(d.model.name, d.config),
-    clusterNodeIds: d.clusterNodes.map((cn) => cn.nodeId),
-  }));
+  const recipeHfId = new Map<string, string>();
+  for (const r of agentHub.getRecipes()) if (r.model) recipeHfId.set(r.file, r.model);
+  return deployments.map((d) => {
+    const candidates = deploymentModelCandidates(d.model.name, d.config);
+    let recipeFile: string | undefined;
+    if (d.config) {
+      try { recipeFile = (JSON.parse(d.config) as { recipeFile?: string }).recipeFile; }
+      catch { /* malformed config — skip recipe resolution */ }
+    }
+    if (recipeFile) { const hf = recipeHfId.get(recipeFile); if (hf) candidates.push(hf); }
+    if (d.model.finetuneJob?.baseModel) candidates.push(d.model.finetuneJob.baseModel);
+    return {
+      status: d.status,
+      nodeId: d.nodeId,
+      createdAt: d.createdAt.toISOString(),
+      label: d.displayName ?? d.model.name,
+      candidates,
+      clusterNodeIds: d.clusterNodes.map((cn) => cn.nodeId),
+    };
+  });
 }
 
 /**

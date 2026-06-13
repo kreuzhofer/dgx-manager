@@ -29,7 +29,7 @@ filesystem is the source of truth — no Prisma schema changes.
 ```
 Dashboard ──GET /api/hf-cache──> Server (enrich + group)
 Dashboard ──POST /api/hf-cache/scan──> Server ──cmd:hf-cache:scan──> ALL agents
-Dashboard ──DELETE /api/hf-cache/:cacheId/:repoId──> Server ──cmd:hf-cache:delete──> one agent in group
+Dashboard ──DELETE /api/hf-cache/:cacheId?repoId=…──> Server ──cmd:hf-cache:delete──> one agent in group
 Agent ──agent:hf-cache (inventory)──> Server hub (store per nodeId) ──SSE hf-cache:inventory──> Dashboard
 ```
 
@@ -90,11 +90,14 @@ New module `packages/agent/src/runtime/hf-cache.ts`:
 - `readOrCreateCacheId(hfHome)` → UUID string from `.dgx-cache-id`, creating it
   (with `crypto.randomUUID()`) if absent.
 - `deleteCachedRepo(hfHome, kind, repoId)` — **security boundary.** `repoId`
-  must match `^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$` with neither segment equal to
-  `.` or `..` (note `.` and `-` are otherwise legal inside HF names), and the
-  resolved target path must be a strict descendant of `hfHome/hub`. Deletes the
-  `models--…` or `datasets--…` dir per `kind`. Unknown repo → throws (surfaces
-  as inventory `error`).
+  must be **1 or 2** segments of `[A-Za-z0-9._-]+` (org-less legacy repos like
+  `gpt2` are valid 1-segment ids), with no segment equal to `.` or `..` (note
+  `.` and `-` are otherwise legal inside HF names), and the resolved target
+  path must be a strict descendant of `hfHome/hub`. `rmSync` uses
+  `{ recursive: true, force: true }` so a concurrent download mutating the tree
+  can't turn a valid delete into a spurious ENOENT. Deletes the `models--…` or
+  `datasets--…` dir per `kind`. Unknown repo → throws (surfaces as inventory
+  `error`).
 
 `index.ts` gets the two `cmd:hf-cache:*` handlers; both end by pushing a fresh
 `agent:hf-cache`. Agent version bump per CLAUDE.md is mandatory.
@@ -119,18 +122,45 @@ New module `packages/agent/src/runtime/hf-cache.ts`:
   Enrichment per repo: `lastDeployedAt` (latest matching Deployment.createdAt,
   any status) and `inUse` (any matching deployment with status not in
   `stopped`/`failed` whose head node or cluster nodes intersect the group's
-  nodes). Matching is a pure helper `matchRepoToModels(repoId, candidates)`:
-  case-insensitive equality between `repoId` and each candidate string, where
-  candidates are `Model.name` plus the `modelName` field of the deployment's
-  stored config JSON when present. Fine-tune models (local paths) simply never
-  match — correct, since their weights are not in the HF cache.
+  nodes). All non-terminal states — running, `evicted` (restorable onto the
+  GPU), and the transient lifecycle states (pending/launching/deploying/
+  stopping/removing) — count as in-use; the bias is deliberate, since a false
+  "in use" only annoys whereas a false "deletable" can `rm` weights out from
+  under a live container.
+
+  **Matching (the soundness-critical part).** `matchRepoToModels(repoId,
+  candidates)` is case-insensitive exact string equality. The guard is only as
+  sound as the candidate set, which the route (`loadDeploymentUsage`) assembles
+  per deployment from THREE sources, because no single field holds the HF repo
+  id for every deploy kind:
+  1. `Model.name` + config `modelName` — covers Ollama (name is the pull tag)
+     and inline-YAML vLLM (name is the HF id).
+  2. The recipe catalog's `model:` resolved from config `recipeFile` via
+     `agentHub.getRecipes()` — **required** for registry-ref vLLM deploys,
+     where `Model.name` is only the recipe *slug*, not the HF repo id.
+  3. `FineTuneJob.baseModel` — a fine-tune deploy still loads its base weights
+     from the HF cache, so the base repo must register as in-use.
+
+  **Known matching gaps — residual UNSAFE-direction risk, accepted for now.**
+  Two cases can't resolve the HF id and so produce a *missed* match (repo shows
+  deletable even if actually loaded): a `recipePath` deploy doesn't persist its
+  recipe ref, and a recipe absent from the live catalog can't be resolved.
+  Mitigations that already narrow the blast radius: registry-ref (the common
+  path), inline-YAML, Ollama, and fine-tune deploys are all covered; deletion
+  is a deliberate two-step user action with a confirm dialog; and a deleted
+  repo is simply re-downloaded on next deploy (data loss, not corruption).
+  Closing these fully would mean persisting the resolved HF id on the
+  Deployment row at create time — tracked as follow-up, out of scope here.
 - `POST /api/hf-cache/scan` → send `cmd:hf-cache:scan` to **all** connected
   agents (like `/api/recipes/refresh`), `202 { requested: n }`; `503` if none.
-- `DELETE /api/hf-cache/:cacheId/:repoId?kind=model|dataset` (repoId
-  URL-encoded `org/name`; `kind` defaults to `model`) → `409` with blocking
-  deployment names if `inUse`; `404` if cacheId or repoId unknown; otherwise
-  send `cmd:hf-cache:delete` to any *connected* agent in the group, `202`.
-  `503` if no agent in the group is connected.
+- `DELETE /api/hf-cache/:cacheId?repoId=<url-encoded>&kind=model|dataset`
+  (`kind` defaults to `model`; repoId travels as a **query parameter** because
+  URL-encoded slashes in path segments are unreliable across HTTP stacks) →
+  `400` if repoId missing; `409` with blocking deployment names if `inUse`
+  (sends nothing to any agent); `404` if cacheId unknown or no repo of that
+  `repoId`+`kind` is in the cache; `503` if no agent in the group is connected;
+  otherwise send `cmd:hf-cache:delete` `{ repoId, kind }` to any *connected*
+  agent in the group, `202`.
 - OpenAPI spec (`openapi.ts`) updated for all three.
 
 ## Dashboard
