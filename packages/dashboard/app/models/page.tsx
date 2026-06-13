@@ -6,18 +6,66 @@ import { apiFetch } from "@/lib/api";
 import { useSSE, type SseEvent } from "@/lib/sse";
 import {
   formatBytes, sortRepos,
-  type CacheGroup, type CacheRepo, type SortKey,
+  type CacheGroup, type CacheRepo, type SortColumn, type SortDir,
 } from "@/lib/hf-cache";
 
 function fmtDate(iso: string | null): string {
   return iso ? new Date(iso).toLocaleString() : "—";
 }
 
+/** A clickable, sortable column header. Shows ▲/▼ on the active column and
+ *  marks it with aria-sort for assistive tech. */
+function Th({ label, col, align, sortCol, sortDir, onSort }: {
+  label: string;
+  col: SortColumn;
+  align?: "right";
+  sortCol: SortColumn;
+  sortDir: SortDir;
+  onSort: (col: SortColumn) => void;
+}) {
+  const active = sortCol === col;
+  return (
+    <th
+      className={`px-2 py-1 font-medium ${align === "right" ? "text-right" : ""}`}
+      aria-sort={active ? (sortDir === "asc" ? "ascending" : "descending") : "none"}
+    >
+      <button
+        type="button"
+        onClick={() => onSort(col)}
+        className={`inline-flex items-center gap-1 font-medium hover:text-gray-200 ${active ? "text-gray-200" : "text-gray-400"}`}
+      >
+        {label}
+        <span className="text-xs w-2">{active ? (sortDir === "asc" ? "▲" : "▼") : ""}</span>
+      </button>
+    </th>
+  );
+}
+
+// Direction a column gets the first time it's selected: text reads naturally
+// ascending; numeric/date columns lead with the "most" (biggest, newest).
+const DEFAULT_DIR: Record<SortColumn, SortDir> = {
+  repoId: "asc", kind: "asc", size: "desc", revisions: "desc",
+  downloaded: "desc", lastDeployed: "desc",
+};
+
 export default function ModelsPage() {
   const [caches, setCaches] = useState<CacheGroup[] | null>(null);
-  const [sortKey, setSortKey] = useState<SortKey>("size");
+  // Default view: most recently downloaded first.
+  const [sortCol, setSortCol] = useState<SortColumn>("downloaded");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [scanning, setScanning] = useState(false);
   const autoScanned = useRef(false);
+
+  // Click a header: toggle direction if it's the active column, else switch to
+  // it at that column's natural default direction.
+  function toggleSort(col: SortColumn) {
+    if (col === sortCol) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortCol(col);
+      setSortDir(DEFAULT_DIR[col]);
+    }
+  }
 
   const load = useCallback(async (): Promise<CacheGroup[] | null> => {
     try {
@@ -91,26 +139,13 @@ export default function ModelsPage() {
             Hugging Face download cache (HF_HOME) — inspect and clean up cached model weights.
           </p>
         </div>
-        <div className="flex items-center gap-3">
-          <label className="text-sm text-gray-400">
-            Sort{" "}
-            <select
-              value={sortKey}
-              onChange={(e) => setSortKey(e.target.value as SortKey)}
-              className="ml-1 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200"
-            >
-              <option value="size">Largest first</option>
-              <option value="lastDeployed">Stalest first</option>
-            </select>
-          </label>
-          <button
-            onClick={() => rescan()}
-            disabled={scanning}
-            className="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-sm font-medium"
-          >
-            {scanning ? "Scanning…" : "Rescan"}
-          </button>
-        </div>
+        <button
+          onClick={() => rescan()}
+          disabled={scanning}
+          className="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-sm font-medium"
+        >
+          {scanning ? "Scanning…" : "Rescan"}
+        </button>
       </div>
 
       {caches === null && <p className="text-gray-400">Loading…</p>}
@@ -152,17 +187,17 @@ export default function ModelsPage() {
               <table className="min-w-full text-sm">
                 <thead className="text-left text-gray-400 border-b border-gray-800">
                   <tr>
-                    <th className="px-2 py-1 font-medium">Repo</th>
-                    <th className="px-2 py-1 font-medium">Kind</th>
-                    <th className="px-2 py-1 font-medium text-right">Size</th>
-                    <th className="px-2 py-1 font-medium text-right">Revisions</th>
-                    <th className="px-2 py-1 font-medium">Downloaded</th>
-                    <th className="px-2 py-1 font-medium">Last deployed</th>
+                    <Th label="Repo" col="repoId" sortCol={sortCol} sortDir={sortDir} onSort={toggleSort} />
+                    <Th label="Kind" col="kind" sortCol={sortCol} sortDir={sortDir} onSort={toggleSort} />
+                    <Th label="Size" col="size" align="right" sortCol={sortCol} sortDir={sortDir} onSort={toggleSort} />
+                    <Th label="Revisions" col="revisions" align="right" sortCol={sortCol} sortDir={sortDir} onSort={toggleSort} />
+                    <Th label="Downloaded" col="downloaded" sortCol={sortCol} sortDir={sortDir} onSort={toggleSort} />
+                    <Th label="Last deployed" col="lastDeployed" sortCol={sortCol} sortDir={sortDir} onSort={toggleSort} />
                     <th className="px-2 py-1 font-medium" />
                   </tr>
                 </thead>
                 <tbody>
-                  {sortRepos(cache.repos, sortKey).map((repo) => (
+                  {sortRepos(cache.repos, sortCol, sortDir).map((repo) => (
                     <tr key={`${repo.kind}:${repo.repoId}`} className="border-b border-gray-900">
                       <td className="px-2 py-1.5 font-mono">{repo.repoId}</td>
                       <td className="px-2 py-1.5 text-gray-400">{repo.kind}</td>

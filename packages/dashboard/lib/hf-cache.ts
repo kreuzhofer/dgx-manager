@@ -1,4 +1,5 @@
-export type SortKey = "size" | "lastDeployed";
+export type SortColumn = "repoId" | "kind" | "size" | "revisions" | "downloaded" | "lastDeployed";
+export type SortDir = "asc" | "desc";
 
 export interface CacheRepo {
   repoId: string;
@@ -34,16 +35,32 @@ export function formatBytes(n: number): string {
   return `${v >= 100 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
 }
 
-/** size: biggest first (what's eating the disk). lastDeployed: most stale
- *  first — never-deployed repos lead, then oldest lastDeployedAt; ties break
- *  by size so the biggest reclaim is always on top. */
-export function sortRepos(repos: CacheRepo[], key: SortKey): CacheRepo[] {
-  const copy = [...repos];
-  if (key === "size") return copy.sort((a, b) => b.sizeBytes - a.sizeBytes);
-  return copy.sort((a, b) => {
-    if (a.lastDeployedAt === b.lastDeployedAt) return b.sizeBytes - a.sizeBytes;
+/** Ascending comparators per column. A null `lastDeployedAt` (never deployed)
+ *  sorts as the smallest value, so ascending puts never-deployed first (the
+ *  stalest-first cleanup view) and descending puts them last. ISO-8601 date
+ *  strings compare correctly lexicographically. */
+const ASC: Record<SortColumn, (a: CacheRepo, b: CacheRepo) => number> = {
+  repoId: (a, b) => a.repoId.localeCompare(b.repoId),
+  kind: (a, b) => a.kind.localeCompare(b.kind),
+  size: (a, b) => a.sizeBytes - b.sizeBytes,
+  revisions: (a, b) => a.revisions - b.revisions,
+  downloaded: (a, b) => (a.lastModified < b.lastModified ? -1 : a.lastModified > b.lastModified ? 1 : 0),
+  lastDeployed: (a, b) => {
+    if (a.lastDeployedAt === b.lastDeployedAt) return 0;
     if (a.lastDeployedAt === null) return -1;
     if (b.lastDeployedAt === null) return 1;
     return a.lastDeployedAt < b.lastDeployedAt ? -1 : 1;
+  },
+};
+
+/** Non-mutating sort of cache repos by a column and direction. Ties always
+ *  break by repoId ascending so the order is deterministic regardless of input
+ *  order or sort direction (a stable result the user can rely on). */
+export function sortRepos(repos: CacheRepo[], column: SortColumn, dir: SortDir): CacheRepo[] {
+  const cmp = ASC[column];
+  const sign = dir === "asc" ? 1 : -1;
+  return [...repos].sort((a, b) => {
+    const primary = cmp(a, b);
+    return primary !== 0 ? sign * primary : a.repoId.localeCompare(b.repoId);
   });
 }
