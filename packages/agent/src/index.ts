@@ -8,7 +8,8 @@ import { collectMetrics } from "./metrics.js";
 import { discoverRecipes } from "./recipes.js";
 import { untrackDeployment } from "./runtime/vllm.js";
 import { classifyDeadContainer, reconcileDeployStatus } from "./runtime/deploy-status.js";
-import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe } from "./runtime/sparkrun.js";
+import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe, resolveHfHome } from "./runtime/sparkrun.js";
+import { buildInventory, deleteCachedRepo, type RepoKind } from "./runtime/hf-cache.js";
 import { checkSparkrunDeployments } from "./runtime/sparkrun-metrics.js";
 import { loadDeployments, saveDeployment } from "./runtime/deployment-store.js";
 import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth } from "./runtime/ollama.js";
@@ -431,6 +432,29 @@ function detectPhase(line: string): string | null {
 function sendMsg(type: string, payload: Record<string, unknown>) {
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type, payload }));
+  }
+}
+
+/** Scan HF_HOME and push the inventory. `error` carries a preceding command
+ *  failure (e.g. a failed delete) so it surfaces in the dashboard instead of
+ *  vanishing. A scan failure itself (unmounted HF_HOME) is also reported as
+ *  an inventory with `error` — never silently dropped. */
+function sendHfCacheInventory(error?: string) {
+  const hfHome = resolveHfHome();
+  try {
+    const inventory = buildInventory(hfHome);
+    sendMsg("agent:hf-cache", { ...inventory, ...(error ? { error } : {}) });
+  } catch (err) {
+    // cacheId "" → the server falls back to a per-node group for error rows
+    sendMsg("agent:hf-cache", {
+      cacheId: "",
+      hfHome,
+      scannedAt: new Date().toISOString(),
+      totalBytes: 0,
+      diskFreeBytes: 0,
+      repos: [],
+      error: error ? `${error}; scan also failed: ${err}` : `scan failed: ${err}`,
+    });
   }
 }
 
@@ -961,6 +985,25 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         console.log(`[rescan] vllm=${recipes.length} training=${trainingRecipes.length}`);
       } catch (err) {
         console.error(`[rescan] failed: ${err}`);
+      }
+      break;
+    }
+
+    case "cmd:hf-cache:scan": {
+      console.log("[hf-cache] scan requested");
+      sendHfCacheInventory();
+      break;
+    }
+
+    case "cmd:hf-cache:delete": {
+      const { repoId, kind } = msg.payload as { repoId: string; kind?: RepoKind };
+      try {
+        deleteCachedRepo(resolveHfHome(), kind ?? "model", repoId);
+        console.log(`[hf-cache] deleted ${kind ?? "model"} ${repoId}`);
+        sendHfCacheInventory();
+      } catch (err) {
+        console.error(`[hf-cache] delete failed: ${err}`);
+        sendHfCacheInventory(`delete ${repoId} failed: ${err}`);
       }
       break;
     }
