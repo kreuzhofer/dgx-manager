@@ -76,21 +76,28 @@ export function deleteCachedRepo(hfHome: string, kind: RepoKind, repoId: string)
 interface WalkStats { sizeBytes: number; nFiles: number; lastModifiedMs: number }
 
 /** Recursive size walk using lstat: snapshot symlinks count as their own
- *  ~0-byte entries, so blob bytes are never counted twice. */
+ *  ~0-byte entries, so blob bytes are never counted twice. Best-effort:
+ *  ENOENT is swallowed per-entry to tolerate concurrent HF download renames. */
 function walk(dir: string): WalkStats {
   const acc: WalkStats = { sizeBytes: 0, nFiles: 0, lastModifiedMs: 0 };
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const p = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      const sub = walk(p);
-      acc.sizeBytes += sub.sizeBytes;
-      acc.nFiles += sub.nFiles;
-      acc.lastModifiedMs = Math.max(acc.lastModifiedMs, sub.lastModifiedMs);
-    } else {
-      const st = lstatSync(p);
-      acc.sizeBytes += st.size;
-      acc.nFiles += 1;
-      acc.lastModifiedMs = Math.max(acc.lastModifiedMs, st.mtimeMs);
+    try {
+      if (entry.isDirectory()) {
+        const sub = walk(p);
+        acc.sizeBytes += sub.sizeBytes;
+        acc.nFiles += sub.nFiles;
+        acc.lastModifiedMs = Math.max(acc.lastModifiedMs, sub.lastModifiedMs);
+      } else {
+        const st = lstatSync(p);
+        acc.sizeBytes += st.size;
+        if (st.isFile()) acc.nFiles += 1;
+        acc.lastModifiedMs = Math.max(acc.lastModifiedMs, st.mtimeMs);
+      }
+    } catch (err) {
+      // Best-effort: a temp blob/revision dir renamed away by a concurrent
+      // HF download is not a scan failure. Re-throw anything that isn't a race.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
   }
   return acc;
@@ -105,20 +112,25 @@ export function scanHfCache(hfHome: string): CachedRepo[] {
     if (!entry.isDirectory()) continue;
     const parsed = parseRepoDirName(entry.name);
     if (!parsed) continue; // .locks and other sidecars
-    const repoDir = join(hub, entry.name);
-    const stats = walk(repoDir);
-    const snapshotsDir = join(repoDir, "snapshots");
-    const revisions = existsSync(snapshotsDir)
-      ? readdirSync(snapshotsDir, { withFileTypes: true }).filter((e) => e.isDirectory()).length
-      : 0;
-    const lastModifiedMs = stats.lastModifiedMs || lstatSync(repoDir).mtimeMs;
-    repos.push({
-      ...parsed,
-      sizeBytes: stats.sizeBytes,
-      nFiles: stats.nFiles,
-      revisions,
-      lastModified: new Date(lastModifiedMs).toISOString(),
-    });
+    try {
+      const repoDir = join(hub, entry.name);
+      const stats = walk(repoDir);
+      const snapshotsDir = join(repoDir, "snapshots");
+      const revisions = existsSync(snapshotsDir)
+        ? readdirSync(snapshotsDir, { withFileTypes: true }).filter((e) => e.isDirectory()).length
+        : 0;
+      const lastModifiedMs = stats.lastModifiedMs || lstatSync(repoDir).mtimeMs;
+      repos.push({
+        ...parsed,
+        sizeBytes: stats.sizeBytes,
+        nFiles: stats.nFiles,
+        revisions,
+        lastModified: new Date(lastModifiedMs).toISOString(),
+      });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      // repo dir removed mid-scan (concurrent download/delete) — skip it
+    }
   }
   return repos;
 }
@@ -147,7 +159,8 @@ export function readOrCreateCacheId(hfHome: string): string {
 export function buildInventory(hfHome: string): HfCacheInventoryPayload {
   const cacheId = readOrCreateCacheId(hfHome);
   const repos = scanHfCache(hfHome);
-  const fsStat = statfsSync(hfHome);
+  const hub = join(hfHome, "hub");
+  const fsStat = statfsSync(existsSync(hub) ? hub : hfHome);
   return {
     cacheId,
     hfHome,

@@ -195,6 +195,24 @@ describe("scanHfCache", () => {
   it("throws when hfHome itself is missing (unmounted NFS must be loud)", () => {
     expect(() => scanHfCache("/nonexistent/hf-home-xyz")).toThrow(/does not exist/i);
   });
+
+  it("does not crash when a blob symlink dangles (concurrent-download race)", () => {
+    const hfHome = mkdtempSync(join(tmpdir(), "hf-scan-race-"));
+    try {
+      const repoDir = join(hfHome, "hub", "models--org--alpha");
+      mkdirSync(join(repoDir, "blobs"), { recursive: true });
+      writeFileSync(join(repoDir, "blobs", "blob1"), "x".repeat(1000));
+      mkdirSync(join(repoDir, "snapshots", "rev1"), { recursive: true });
+      // dangling symlink → lstat succeeds (counts the link itself), so the
+      // scan must not throw. (lstat does not follow the link.)
+      symlinkSync(join("..", "..", "blobs", "gone"), join(repoDir, "snapshots", "rev1", "model.safetensors"));
+      const repos = scanHfCache(hfHome);
+      expect(repos).toHaveLength(1);
+      expect(repos[0].sizeBytes).toBeGreaterThanOrEqual(1000);
+    } finally {
+      rmSync(hfHome, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("readOrCreateCacheId", () => {
@@ -222,17 +240,28 @@ describe("readOrCreateCacheId", () => {
 describe("buildInventory", () => {
   it("assembles cacheId, totals, free space and repos", () => {
     const hfHome = mkdtempSync(join(tmpdir(), "hf-inv-test-"));
-    const blobs = join(hfHome, "hub", "models--org--alpha", "blobs");
-    mkdirSync(blobs, { recursive: true });
-    writeFileSync(join(blobs, "blob1"), "x".repeat(2000));
+    try {
+      const a = join(hfHome, "hub", "models--org--alpha", "blobs");
+      mkdirSync(a, { recursive: true });
+      writeFileSync(join(a, "blob1"), "x".repeat(2000));
+      mkdirSync(join(hfHome, "hub", "models--org--alpha", "snapshots", "rev1"), { recursive: true });
+      const b = join(hfHome, "hub", "models--org--beta", "blobs");
+      mkdirSync(b, { recursive: true });
+      writeFileSync(join(b, "blob1"), "y".repeat(3000));
 
-    const inv = buildInventory(hfHome);
-    expect(inv.hfHome).toBe(hfHome);
-    expect(inv.cacheId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(inv.repos).toHaveLength(1);
-    expect(inv.totalBytes).toBe(inv.repos[0].sizeBytes);
-    expect(inv.diskFreeBytes).toBeGreaterThan(0);
-    expect(new Date(inv.scannedAt).getTime()).toBeGreaterThan(0);
-    rmSync(hfHome, { recursive: true, force: true });
+      const inv = buildInventory(hfHome);
+      expect(inv.hfHome).toBe(hfHome);
+      expect(inv.cacheId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(inv.repos).toHaveLength(2);
+      const total = inv.repos.reduce((s, r) => s + r.sizeBytes, 0);
+      expect(inv.totalBytes).toBe(total);
+      expect(inv.totalBytes).toBeGreaterThanOrEqual(5000);
+      const alpha = inv.repos.find((r) => r.repoId === "org/alpha")!;
+      expect(alpha.revisions).toBe(1);
+      expect(inv.diskFreeBytes).toBeGreaterThan(0);
+      expect(new Date(inv.scannedAt).getTime()).toBeGreaterThan(0);
+    } finally {
+      rmSync(hfHome, { recursive: true, force: true });
+    }
   });
 });
