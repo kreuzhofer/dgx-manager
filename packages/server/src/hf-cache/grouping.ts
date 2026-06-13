@@ -38,9 +38,9 @@ export function groupInventories(inventories: HfCacheNodeInventory[]): CacheGrou
   const byKey = new Map<string, HfCacheNodeInventory[]>();
   for (const inv of inventories) {
     const key = cacheGroupKey(inv);
-    const members = byKey.get(key) ?? [];
-    members.push(inv);
-    byKey.set(key, members);
+    const members = byKey.get(key);
+    if (members) members.push(inv);
+    else byKey.set(key, [inv]);
   }
   return [...byKey.entries()].map(([cacheId, members]) => ({
     cacheId,
@@ -58,10 +58,16 @@ export function matchRepoToModels(
   return candidates.some((c) => typeof c === "string" && c.toLowerCase() === target);
 }
 
-/** The strings a deployment might know its model by: the Model row's name and
- *  the modelName recorded in the deployment's config JSON. Fine-tune models
- *  (local output paths) never equal an HF repoId — correctly so, their weights
- *  are not in the HF cache. */
+/** SOME of the strings a deployment might know its model by: the Model row's
+ *  name and the `modelName` in its config JSON. This covers Ollama (Model.name
+ *  is the pull tag) and inline-YAML vLLM deploys (Model.name is the HF id). It
+ *  does NOT cover registry-ref vLLM deploys (Model.name is the recipe slug, not
+ *  the HF repo id) or fine-tune deploys (the base weights' HF id lives on the
+ *  FineTuneJob). The route layer supplements this list with the recipe
+ *  catalog's `model:` (resolved from config.recipeFile) and the fine-tune base
+ *  model — see loadDeploymentUsage in routes/hf-cache.ts. Matching is exact
+ *  (case-insensitive) string equality; getting the candidate set complete is
+ *  what makes the in-use guard sound, so the route MUST feed all known names. */
 export function deploymentModelCandidates(
   modelName: string | null | undefined,
   configJson: string | null | undefined,
@@ -84,12 +90,15 @@ export interface DeploymentUsage {
   nodeId: string;
   createdAt: string;          // ISO
   label: string;              // displayName ?? model name — shown in 409 errors
-  candidates: string[];       // from deploymentModelCandidates
-  clusterNodeIds: string[];
+  candidates: string[];       // deploymentModelCandidates + recipe/finetune HF ids
+  clusterNodeIds: string[];   // MUST be populated from Prisma clusterNodes
 }
 
-// "evicted" is deliberately NOT terminal here: an evicted deployment can be
-// restored onto the GPU and would re-read its weights from this cache.
+// Only fully-terminal states release a cache hold. Everything else — running,
+// evicted (restorable onto the GPU), and the transient lifecycle states
+// (pending/launching/deploying/stopping/removing) — is treated as in-use. This
+// is the safe bias for a delete guard: a false "in use" merely annoys; a false
+// "deletable" can rm the weights out from under a live container.
 const TERMINAL_STATUSES = new Set(["stopped", "failed"]);
 
 export function repoUsage(
@@ -103,8 +112,9 @@ export function repoUsage(
       matchRepoToModels(repoId, d.candidates),
   );
   const active = touching.filter((d) => !TERMINAL_STATUSES.has(d.status));
+  // newest createdAt wins; ISO-8601 strings compare correctly (same as groupInventories)
   const lastDeployedAt = touching.length
-    ? touching.map((d) => d.createdAt).sort().at(-1)!
+    ? touching.reduce((a, b) => (a.createdAt >= b.createdAt ? a : b)).createdAt
     : null;
   return { inUse: active.length > 0, inUseBy: active.map((d) => d.label), lastDeployedAt };
 }
