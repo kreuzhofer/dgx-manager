@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { fc, it as fcIt } from "@fast-check/vitest";
-import { parseRepoDirName, repoDirName, isSafeRepoId } from "./hf-cache.js";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { parseRepoDirName, repoDirName, isSafeRepoId, deleteCachedRepo } from "./hf-cache.js";
 
 describe("parseRepoDirName", () => {
   it("decodes a model repo dir", () => {
@@ -88,5 +91,62 @@ describe("isSafeRepoId", () => {
   /** Invariant: every id our generator considers valid is accepted. */
   fcIt.prop([repoIdArb])("accepts all generator-valid ids", (repoId) => {
     expect(isSafeRepoId(repoId)).toBe(true);
+  });
+});
+
+/** Build a minimal fake cache: hfHome/hub/<repoDir>/blobs/weights */
+function makeFakeCache(repoDirs: string[]): string {
+  const hfHome = mkdtempSync(join(tmpdir(), "hf-cache-test-"));
+  for (const dir of repoDirs) {
+    const blobs = join(hfHome, "hub", dir, "blobs");
+    mkdirSync(blobs, { recursive: true });
+    writeFileSync(join(blobs, "weights"), "x".repeat(1000));
+  }
+  return hfHome;
+}
+
+describe("deleteCachedRepo", () => {
+  it("deletes the targeted repo dir and leaves siblings alone", () => {
+    const hfHome = makeFakeCache(["models--org--alpha", "models--org--beta"]);
+    deleteCachedRepo(hfHome, "model", "org/alpha");
+    expect(existsSync(join(hfHome, "hub", "models--org--alpha"))).toBe(false);
+    expect(existsSync(join(hfHome, "hub", "models--org--beta"))).toBe(true);
+    rmSync(hfHome, { recursive: true, force: true });
+  });
+
+  it("deletes dataset repos via kind", () => {
+    const hfHome = makeFakeCache(["datasets--squad"]);
+    deleteCachedRepo(hfHome, "dataset", "squad");
+    expect(existsSync(join(hfHome, "hub", "datasets--squad"))).toBe(false);
+    rmSync(hfHome, { recursive: true, force: true });
+  });
+
+  it("throws for a repo that is not in the cache", () => {
+    const hfHome = makeFakeCache([]);
+    expect(() => deleteCachedRepo(hfHome, "model", "org/ghost")).toThrow(/not in cache/i);
+    rmSync(hfHome, { recursive: true, force: true });
+  });
+
+  /** Invariant: any unsafe repoId is rejected BEFORE any filesystem access,
+   *  and nothing outside hub/ is ever touched. We plant a sentinel file
+   *  outside hub/ and assert it survives every attempt. */
+  fcIt.prop([fc.string({ minLength: 1, maxLength: 64 }).filter((s) => !isSafeRepoId(s))])(
+    "rejects every unsafe repoId without touching the filesystem",
+    (badId) => {
+      const hfHome = makeFakeCache(["models--org--alpha"]);
+      writeFileSync(join(hfHome, "sentinel.txt"), "intact");
+      expect(() => deleteCachedRepo(hfHome, "model", badId)).toThrow(/invalid repoId/i);
+      expect(existsSync(join(hfHome, "sentinel.txt"))).toBe(true);
+      expect(existsSync(join(hfHome, "hub", "models--org--alpha"))).toBe(true);
+      rmSync(hfHome, { recursive: true, force: true });
+    },
+  );
+
+  it("rejects classic traversal attempts", () => {
+    const hfHome = makeFakeCache(["models--org--alpha"]);
+    for (const evil of ["../..", "a/..", "../hub", "/etc", "..\\..", "org/../alpha"]) {
+      expect(() => deleteCachedRepo(hfHome, "model", evil)).toThrow();
+    }
+    rmSync(hfHome, { recursive: true, force: true });
   });
 });

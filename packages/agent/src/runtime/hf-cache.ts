@@ -41,6 +41,7 @@ export function parseRepoDirName(dirName: string): { kind: RepoKind; repoId: str
   return { kind, repoId: segments.join("/") };
 }
 
+/** Encode a repoId into an HF cache dir name: org/name → {kind}s--org--name. Inverse of parseRepoDirName. */
 export function repoDirName(kind: RepoKind, repoId: string): string {
   return `${kind}s--${repoId.split("/").join("--")}`;
 }
@@ -52,6 +53,20 @@ const REPO_SEGMENT_RE = /^[A-Za-z0-9._-]+$/;
  *  alone would admit them). Org-less legacy ids ("gpt2") are 1 segment. */
 export function isSafeRepoId(repoId: string): boolean {
   const segments = repoId.split("/");
-  if (segments.length < 1 || segments.length > 2) return false;
+  if (segments.length > 2) return false;
   return segments.every((s) => REPO_SEGMENT_RE.test(s) && s !== "." && s !== "..");
+}
+
+/** SECURITY BOUNDARY: the only code that turns a wire-supplied repoId into a
+ *  filesystem path. Validates the id, then verifies the resolved target is a
+ *  strict descendant of hfHome/hub before rm -rf. */
+export function deleteCachedRepo(hfHome: string, kind: RepoKind, repoId: string): void {
+  if (!isSafeRepoId(repoId)) throw new Error(`invalid repoId: ${JSON.stringify(repoId)}`);
+  const hub = resolve(hfHome, "hub");
+  const target = resolve(hub, repoDirName(kind, repoId));
+  if (!target.startsWith(hub + sep)) {
+    throw new Error(`refusing to delete outside hub/: ${JSON.stringify(repoId)}`);
+  }
+  if (!existsSync(target)) throw new Error(`not in cache: ${repoId} (${kind})`);
+  rmSync(target, { recursive: true });
 }
