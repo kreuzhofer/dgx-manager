@@ -182,6 +182,27 @@ describe("GET /api/hf-cache", () => {
     expect(res.status).toBe(200);
     expect(res.body.caches).toEqual([]);
   });
+
+  it("flags in-use when a multi-node deploy's WORKER node holds the cache (clusterNodes seam)", async () => {
+    // Head node is elsewhere; the cache lives on a worker node in the group.
+    const head = await prisma.node.create({ data: { name: "head-1" } });
+    const worker = await prisma.node.create({ data: { name: "worker-1" } });
+    const model = await prisma.model.create({ data: { name: "org/alpha", runtime: "vllm" } });
+    const dep = await prisma.deployment.create({
+      data: { nodeId: head.id, modelId: model.id, status: "running", displayName: "tp-prod", clusterMode: true },
+    });
+    await prisma.clusterNode.create({ data: { deploymentId: dep.id, nodeId: worker.id, role: "worker" } });
+
+    const hub = makeHub();
+    // The cache group is the worker node only (its own local cache id).
+    hub.inventories = [inv(worker.id, "worker-cache", [repo("org/alpha")])];
+
+    const res = await request(makeApp(hub)).get("/api/hf-cache");
+    const cache = res.body.caches.find((c: { cacheId: string }) => c.cacheId === "worker-cache");
+    const r = cache.repos.find((x: { repoId: string }) => x.repoId === "org/alpha");
+    expect(r.inUse).toBe(true);
+    expect(r.inUseBy).toEqual(["tp-prod"]);
+  });
 });
 
 describe("POST /api/hf-cache/scan", () => {
@@ -254,5 +275,29 @@ describe("DELETE /api/hf-cache/:cacheId", () => {
       type: "cmd:hf-cache:delete",
       payload: { repoId: "org/alpha", kind: "model" },
     });
+  });
+
+  it("deletes a dataset-kind repo and passes kind through to the agent", async () => {
+    const node = await prisma.node.create({ data: { name: "spark-1" } });
+    const hub = makeHub();
+    hub.inventories = [inv(node.id, "shared", [
+      { repoId: "squad", kind: "dataset", sizeBytes: 500, nFiles: 2, revisions: 1, lastModified: "2026-06-01T00:00:00.000Z" },
+    ])];
+    hub.online.add(node.id);
+
+    const res = await request(makeApp(hub)).delete("/api/hf-cache/shared?repoId=squad&kind=dataset");
+    expect(res.status).toBe(202);
+    expect(hub.sent[0].message).toEqual({ type: "cmd:hf-cache:delete", payload: { repoId: "squad", kind: "dataset" } });
+  });
+
+  it("404s when repoId exists but the kind does not match", async () => {
+    const node = await prisma.node.create({ data: { name: "spark-1" } });
+    const hub = makeHub();
+    hub.inventories = [inv(node.id, "shared", [repo("org/alpha")])]; // kind "model"
+    hub.online.add(node.id);
+    // ask to delete it as a dataset → no matching repo of that kind
+    const res = await request(makeApp(hub)).delete("/api/hf-cache/shared?repoId=org%2Falpha&kind=dataset");
+    expect(res.status).toBe(404);
+    expect(hub.sent).toHaveLength(0);
   });
 });
