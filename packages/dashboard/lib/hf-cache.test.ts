@@ -25,26 +25,92 @@ function r(over: Partial<CacheRepo>): CacheRepo {
 }
 
 describe("sortRepos", () => {
-  it("size: biggest first", () => {
-    const sorted = sortRepos([r({ repoId: "a", sizeBytes: 1 }), r({ repoId: "b", sizeBytes: 9 })], "size");
-    expect(sorted.map((x) => x.repoId)).toEqual(["b", "a"]);
+  it("downloaded desc: newest download first (the default view)", () => {
+    const sorted = sortRepos(
+      [
+        r({ repoId: "old", lastModified: "2026-01-01T00:00:00.000Z" }),
+        r({ repoId: "new", lastModified: "2026-06-10T00:00:00.000Z" }),
+        r({ repoId: "mid", lastModified: "2026-03-01T00:00:00.000Z" }),
+      ],
+      "downloaded", "desc",
+    );
+    expect(sorted.map((x) => x.repoId)).toEqual(["new", "mid", "old"]);
   });
 
-  it("lastDeployed: never-deployed first, then oldest deployment first", () => {
+  it("downloaded asc: oldest download first", () => {
+    const sorted = sortRepos(
+      [
+        r({ repoId: "new", lastModified: "2026-06-10T00:00:00.000Z" }),
+        r({ repoId: "old", lastModified: "2026-01-01T00:00:00.000Z" }),
+      ],
+      "downloaded", "asc",
+    );
+    expect(sorted.map((x) => x.repoId)).toEqual(["old", "new"]);
+  });
+
+  it("size desc / asc", () => {
+    const data = [r({ repoId: "a", sizeBytes: 1 }), r({ repoId: "b", sizeBytes: 9 })];
+    expect(sortRepos(data, "size", "desc").map((x) => x.repoId)).toEqual(["b", "a"]);
+    expect(sortRepos(data, "size", "asc").map((x) => x.repoId)).toEqual(["a", "b"]);
+  });
+
+  it("revisions desc", () => {
+    const sorted = sortRepos(
+      [r({ repoId: "one", revisions: 1 }), r({ repoId: "three", revisions: 3 })],
+      "revisions", "desc",
+    );
+    expect(sorted.map((x) => x.repoId)).toEqual(["three", "one"]);
+  });
+
+  it("repoId asc / desc (alphabetical)", () => {
+    const data = [r({ repoId: "zeta/m" }), r({ repoId: "alpha/m" })];
+    expect(sortRepos(data, "repoId", "asc").map((x) => x.repoId)).toEqual(["alpha/m", "zeta/m"]);
+    expect(sortRepos(data, "repoId", "desc").map((x) => x.repoId)).toEqual(["zeta/m", "alpha/m"]);
+  });
+
+  it("kind asc groups datasets before models", () => {
+    const sorted = sortRepos(
+      [r({ repoId: "m", kind: "model" }), r({ repoId: "d", kind: "dataset" })],
+      "kind", "asc",
+    );
+    expect(sorted.map((x) => x.kind)).toEqual(["dataset", "model"]);
+  });
+
+  it("lastDeployed asc: never-deployed first, then oldest (stalest-first cleanup view)", () => {
     const sorted = sortRepos(
       [
         r({ repoId: "recent", lastDeployedAt: "2026-06-10T00:00:00.000Z" }),
         r({ repoId: "never", lastDeployedAt: null }),
         r({ repoId: "old", lastDeployedAt: "2026-01-01T00:00:00.000Z" }),
       ],
-      "lastDeployed",
+      "lastDeployed", "asc",
     );
     expect(sorted.map((x) => x.repoId)).toEqual(["never", "old", "recent"]);
   });
 
+  it("lastDeployed desc: most-recently deployed first, never-deployed last", () => {
+    const sorted = sortRepos(
+      [
+        r({ repoId: "recent", lastDeployedAt: "2026-06-10T00:00:00.000Z" }),
+        r({ repoId: "never", lastDeployedAt: null }),
+        r({ repoId: "old", lastDeployedAt: "2026-01-01T00:00:00.000Z" }),
+      ],
+      "lastDeployed", "desc",
+    );
+    expect(sorted.map((x) => x.repoId)).toEqual(["recent", "old", "never"]);
+  });
+
+  it("breaks ties deterministically by repoId regardless of input order or direction", () => {
+    const a = r({ repoId: "aaa/m", sizeBytes: 5 });
+    const b = r({ repoId: "bbb/m", sizeBytes: 5 });
+    expect(sortRepos([b, a], "size", "desc").map((x) => x.repoId)).toEqual(["aaa/m", "bbb/m"]);
+    expect(sortRepos([a, b], "size", "desc").map((x) => x.repoId)).toEqual(["aaa/m", "bbb/m"]);
+    expect(sortRepos([a, b], "size", "asc").map((x) => x.repoId)).toEqual(["aaa/m", "bbb/m"]);
+  });
+
   it("does not mutate its input", () => {
     const input = [r({ sizeBytes: 1 }), r({ sizeBytes: 2 })];
-    sortRepos(input, "size");
+    sortRepos(input, "size", "desc");
     expect(input[0].sizeBytes).toBe(1);
   });
 });
