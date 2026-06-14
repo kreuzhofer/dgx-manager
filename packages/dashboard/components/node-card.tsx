@@ -114,6 +114,11 @@ export function NodeCard({
   }, [onMetrics, appendSample]);
 
   const isOff = node.powerState === "off" || node.powerState === "asleep";
+  // "waking" = a WOL packet was sent but the agent has not reconnected yet.
+  // Treat off/asleep/waking all as "inactive" so the card dims and keeps showing
+  // the Wake button — a node stuck in "waking" (WOL packet missed) can be retried.
+  const isWaking = node.powerState === "waking";
+  const isInactive = isOff || isWaking;
 
   async function power(action: "reboot" | "shutdown") {
     const verb = action === "reboot" ? "Reboot" : "Shut down";
@@ -216,7 +221,7 @@ export function NodeCard({
   }));
 
   return (
-    <div className={`bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors ${isOff ? "opacity-60" : ""}`}>
+    <div className={`bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors ${isInactive ? "opacity-60" : ""}`}>
       {/* Header */}
       <div className="flex items-center justify-between mb-3">
         <div>
@@ -248,7 +253,7 @@ export function NodeCard({
         </div>
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-1">
-            {isOff ? (
+            {isInactive ? (
               <button
                 onClick={wake}
                 className="text-[10px] px-2 py-0.5 rounded bg-blue-900/60 text-blue-300 hover:bg-blue-800"
@@ -395,7 +400,11 @@ export function NodeCard({
         </div>
       ) : (
         <p className="text-xs text-gray-500 italic">
-          {isOff ? "Powered off — Wake to bring it back" : "No metrics yet"}
+          {isWaking
+            ? "Waking… — click Wake to retry if it doesn't come back"
+            : isOff
+            ? "Powered off — Wake to bring it back"
+            : "No metrics yet"}
         </p>
       )}
     </div>
