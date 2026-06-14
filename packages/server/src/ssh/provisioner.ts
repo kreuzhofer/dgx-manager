@@ -1,6 +1,8 @@
 import { sshExec, SshResult } from "./executor.js";
 import { SHARED_STORAGE } from "../env.js";
 import { broadcast as sseBroadcast } from "../sse.js";
+import { macCaptureCmd, normalizeMac } from "../nodes/power.js";
+import { prisma } from "../prisma.js";
 
 // ---------------------------------------------------------------------------
 // sparkrun command-string builders (pure, exported for callers + tests)
@@ -192,6 +194,16 @@ export async function auditNode(host: string, nodeId?: string): Promise<Provisio
     const prereq = item.eval(result);
     checks.push(prereq);
     emit(item.name, prereq.status, prereq.detail);
+  }
+
+  if (nodeId) {
+    try {
+      const r = await sshExec(host, macCaptureCmd(host), { timeout: 10_000 });
+      const mac = normalizeMac(r.stdout);
+      if (mac) await prisma.node.update({ where: { id: nodeId }, data: { macAddress: mac } });
+    } catch {
+      // non-fatal — audit should not fail because MAC capture failed
+    }
   }
 
   return {
