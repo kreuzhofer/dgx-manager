@@ -63,7 +63,7 @@ describe("POST /api/nodes/:id/power", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.powerState).toBe("rebooting");
-    const lastCall = sshExec.mock.calls.at(-1);
+    const lastCall = sshExec.mock.calls.at(-1)!;
     expect(lastCall[0]).toBe("192.168.44.41");
     expect(lastCall[1]).toBe("sudo systemctl --no-block reboot");
     const after = await prisma.node.findUnique({ where: { id: node.id } });
