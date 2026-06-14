@@ -176,6 +176,8 @@ export class AgentHub {
               where: { id: nodeId! },
               data: {
                 status: "online",
+                // a reconnecting agent means the box is back up — clear any off/rebooting/waking intent
+                powerState: "on",
                 gpuModel: msg.payload.gpuModel,
                 vramTotal: msg.payload.vramTotal,
                 agentVersion,
@@ -243,6 +245,8 @@ export class AgentHub {
                 ipAddress: resolveNodeIp(advertiseIp, remoteIp),
                 fastIpAddress: typeof fastIpAddress === "string" ? fastIpAddress : null,
                 status: "online",
+                // a reconnecting agent means the box is back up — clear any off/rebooting/waking intent
+                powerState: "on",
                 provisionStatus: "agent-deployed",
                 bootstrapMethod: "token",
                 gpuModel: gpuModel || null,
