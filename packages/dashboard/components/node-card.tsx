@@ -55,6 +55,7 @@ interface Node {
   name: string;
   ipAddress: string;
   status: string;
+  powerState?: string;
   gpuModel: string | null;
   vramTotal: number | null;
   agentVersion?: string | null;
@@ -111,6 +112,31 @@ export function NodeCard({
   useEffect(() => {
     onMetrics?.(appendSample);
   }, [onMetrics, appendSample]);
+
+  const isOff = node.powerState === "off" || node.powerState === "asleep";
+
+  async function power(action: "reboot" | "shutdown") {
+    const verb = action === "reboot" ? "Reboot" : "Shut down";
+    if (!window.confirm(`${verb} node "${node.name}"? This runs sudo on the machine and will drop its agent.`)) {
+      return;
+    }
+    try {
+      await apiFetch<unknown>(`/api/nodes/${node.id}/power`, {
+        method: "POST",
+        body: JSON.stringify({ action }),
+      });
+    } catch (e) {
+      window.alert(`Power action failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  async function wake() {
+    try {
+      await apiFetch<unknown>(`/api/nodes/${node.id}/wake`, { method: "POST" });
+    } catch (e) {
+      window.alert(`Wake failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 
   // Display window: last 30 minutes only
   const displayHistory = history.slice(-DISPLAY_WINDOW);
@@ -190,7 +216,7 @@ export function NodeCard({
   }));
 
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors">
+    <div className={`bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors ${isOff ? "opacity-60" : ""}`}>
       {/* Header */}
       <div className="flex items-center justify-between mb-3">
         <div>
@@ -221,6 +247,32 @@ export function NodeCard({
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1">
+            {isOff ? (
+              <button
+                onClick={wake}
+                className="text-[10px] px-2 py-0.5 rounded bg-blue-900/60 text-blue-300 hover:bg-blue-800"
+                title="Wake-on-LAN"
+              >
+                Wake
+              </button>
+            ) : (
+              <>
+                <button
+                  onClick={() => power("reboot")}
+                  className="text-[10px] px-2 py-0.5 rounded bg-gray-800 text-gray-300 hover:bg-gray-700"
+                >
+                  Reboot
+                </button>
+                <button
+                  onClick={() => power("shutdown")}
+                  className="text-[10px] px-2 py-0.5 rounded bg-red-900/60 text-red-300 hover:bg-red-800"
+                >
+                  Shutdown
+                </button>
+              </>
+            )}
+          </div>
           <div className={`w-2 h-2 rounded-full ${statusColor}`} />
           <span className="text-xs text-gray-400 capitalize">{node.status}</span>
         </div>
@@ -342,7 +394,9 @@ export function NodeCard({
           })}
         </div>
       ) : (
-        <p className="text-xs text-gray-500 italic">No metrics yet</p>
+        <p className="text-xs text-gray-500 italic">
+          {isOff ? "Powered off — Wake to bring it back" : "No metrics yet"}
+        </p>
       )}
     </div>
   );

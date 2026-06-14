@@ -41,6 +41,7 @@ interface Node {
   name: string;
   ipAddress: string;
   status: string;
+  powerState?: string;
   gpuModel: string | null;
   vramTotal: number | null;
   agentVersion?: string | null;
@@ -117,8 +118,18 @@ export default function OverviewPage() {
       );
     }
     if (event.type === "node:status") {
-      const { nodeId, status } = event.payload as { nodeId: string; status: string };
-      setNodes((prev) => prev.map((n) => (n.id === nodeId ? { ...n, status } : n)));
+      const { nodeId, status, powerState } = event.payload as {
+        nodeId: string;
+        status?: string;
+        powerState?: string;
+      };
+      setNodes((prev) =>
+        prev.map((n) =>
+          n.id === nodeId
+            ? { ...n, ...(status ? { status } : {}), ...(powerState ? { powerState } : {}) }
+            : n
+        )
+      );
     }
   }, []);
 
