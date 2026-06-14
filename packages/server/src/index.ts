@@ -22,6 +22,7 @@ import { mountOpenApi } from "./openapi.js";
 import { prisma } from "./prisma.js";
 import { sseHandler } from "./sse.js";
 import { startMetricRetention } from "./metric-retention.js";
+import { sshExec } from "./ssh/executor.js";
 
 const app = express();
 const server = createServer(app);
@@ -47,6 +48,7 @@ server.on("upgrade", (request, socket, head) => {
 // Make hubs available to routes
 app.set("agentHub", agentHub);
 app.set("dashboardHub", dashboardHub);
+app.set("sshExec", sshExec);
 
 // REST API routes
 app.use("/api/nodes", nodesRouter);

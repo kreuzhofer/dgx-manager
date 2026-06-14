@@ -7,6 +7,8 @@ import { auditNode, provisionNode } from "../ssh/provisioner.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import { metricsBuffer } from "../metrics-buffer.js";
 import type { AgentHub } from "../ws/agent-hub.js";
+import { powerCommand, macCaptureCmd, normalizeMac, type PowerAction } from "../nodes/power.js";
+import { sshExec as defaultSshExec } from "../ssh/executor.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -432,6 +434,50 @@ nodesRouter.post("/:id/update-agent", async (req, res) => {
   });
 
   res.json({ status: "updating", version, bundleUrl });
+});
+
+// POST /api/nodes/:id/power — reboot / shutdown / sleep a node over SSH.
+// powerState transitions: reboot -> "rebooting", shutdown -> "off", sleep -> "asleep".
+// MAC is captured (best-effort) before a shutdown/sleep so the node can be woken later.
+nodesRouter.post("/:id/power", async (req, res) => {
+  const action = req.body?.action as PowerAction;
+  if (action !== "reboot" && action !== "shutdown" && action !== "sleep") {
+    return res.status(400).json({ error: `Invalid action: ${action}` });
+  }
+  const node = await prisma.node.findUnique({ where: { id: req.params.id } });
+  if (!node) return res.status(404).json({ error: "Node not found" });
+  if (!node.ipAddress) return res.status(400).json({ error: "Node has no ipAddress" });
+
+  // Injected so tests can stub it; defaults to the real ssh2-backed exec.
+  const sshExec = (req.app.get("sshExec") || defaultSshExec) as typeof defaultSshExec;
+
+  // Best-effort MAC capture while the node is still reachable (skip for reboot —
+  // it comes right back; capture for shutdown/sleep where we may need WOL).
+  let macAddress = node.macAddress;
+  if (action !== "reboot") {
+    try {
+      const r = await sshExec(node.ipAddress, macCaptureCmd(node.ipAddress), { timeout: 10_000 });
+      const mac = normalizeMac(r.stdout);
+      if (mac) macAddress = mac;
+    } catch {
+      // non-fatal: WOL just won't be available if we never captured a MAC
+    }
+  }
+
+  try {
+    await sshExec(node.ipAddress, powerCommand(action), { timeout: 15_000 });
+  } catch (err) {
+    return res.status(502).json({ error: `Power command failed: ${String(err)}` });
+  }
+
+  const powerState = action === "reboot" ? "rebooting" : action === "sleep" ? "asleep" : "off";
+  await prisma.node.update({
+    where: { id: node.id },
+    data: { powerState, ...(macAddress ? { macAddress } : {}) },
+  });
+  sseBroadcast({ type: "node:status", payload: { nodeId: node.id, powerState } });
+
+  res.json({ status: "ok", powerState });
 });
 
 /**
