@@ -3,6 +3,7 @@ import {
 } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 
 export type RepoKind = "model" | "dataset";
 
@@ -70,7 +71,18 @@ export function deleteCachedRepo(hfHome: string, kind: RepoKind, repoId: string)
   if (!existsSync(target)) throw new Error(`not in cache: ${repoId} (${kind})`);
   // force: true so a concurrent HF download mutating the tree can't turn a
   // valid delete into a spurious ENOENT on a live node.
-  rmSync(target, { recursive: true, force: true });
+  try {
+    rmSync(target, { recursive: true, force: true });
+  } catch (e) {
+    // Repos pulled by a root-running sparkrun container are written to the
+    // (NFS) cache as root, so the agent's unprivileged user can't remove the
+    // root-owned dirs (EACCES/EPERM on rmdir of the repo dir's children).
+    // `target` has already been validated as a strict descendant of hub/ above,
+    // so escalating with sudo here does not widen the security boundary.
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code !== "EACCES" && code !== "EPERM") throw e;
+    execFileSync("sudo", ["rm", "-rf", "--", target], { timeout: 120_000 });
+  }
 }
 
 interface WalkStats { sizeBytes: number; nFiles: number; lastModifiedMs: number }
