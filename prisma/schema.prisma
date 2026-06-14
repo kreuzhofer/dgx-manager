@@ -24,6 +24,12 @@ model Node {
   ollamaInstalled Boolean          @default(false)
   agentVersion    String?
   arch            String?
+  // Deliberate power intent, distinct from agent-connection `status`.
+  // Values: "on" | "rebooting" | "off" | "waking" | "asleep".
+  powerState      String           @default("on")
+  // MAC of the interface bound to ipAddress, captured over SSH while the node
+  // is reachable. Required for Wake-on-LAN. Null until first captured.
+  macAddress      String?
   bootstrapMethod String           @default("ssh")
   lastSeen        DateTime?
   createdAt       DateTime         @default(now())
