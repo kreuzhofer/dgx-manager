@@ -1,3 +1,5 @@
+import { isValidIpv4 } from "../ws/node-ip.js";
+
 export type PowerAction = "reboot" | "shutdown" | "sleep";
 
 const COMMANDS: Record<PowerAction, string> = {
@@ -19,8 +21,15 @@ export function powerCommand(action: PowerAction): string {
  * Shell command (run over SSH) that resolves the network interface whose IPv4
  * address matches `ip`, then prints that interface's MAC. Output is a single
  * MAC line (or empty if not found).
+ *
+ * `ip` is interpolated into a remote shell command, so it is validated as a
+ * strict IPv4 literal first — this is the only place a node-supplied address
+ * reaches an executed command, and a non-IPv4 value could carry shell
+ * metacharacters. Callers run this inside try/catch (MAC capture is
+ * best-effort), so a throw here simply skips capture rather than failing.
  */
 export function macCaptureCmd(ip: string): string {
+  if (!isValidIpv4(ip)) throw new Error(`Invalid IPv4 for MAC capture: ${ip}`);
   return (
     `ifc=$(ip -o -4 addr show | awk -v ip="${ip}" '$4 ~ "^"ip"/" {print $2; exit}'); ` +
     `cat /sys/class/net/"$ifc"/address 2>/dev/null`

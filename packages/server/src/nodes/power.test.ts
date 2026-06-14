@@ -25,6 +25,14 @@ describe("macCaptureCmd", () => {
     expect(cmd).toContain("192.168.44.41");
     expect(cmd).toContain("/sys/class/net/");
   });
+  // The ip is interpolated into a remote shell command, so it must be a strict
+  // IPv4 literal — reject anything that could carry shell metacharacters.
+  it("throws on a non-IPv4 / injection-bearing ip", () => {
+    expect(() => macCaptureCmd('1.2.3.4"; reboot; "')).toThrow();
+    expect(() => macCaptureCmd("not-an-ip")).toThrow();
+    expect(() => macCaptureCmd("1.2.3.4 && rm -rf /")).toThrow();
+    expect(() => macCaptureCmd("999.999.999.999")).toThrow();
+  });
 });
 
 describe("normalizeMac", () => {
