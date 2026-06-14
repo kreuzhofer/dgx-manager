@@ -23,6 +23,7 @@ import { prisma } from "./prisma.js";
 import { sseHandler } from "./sse.js";
 import { startMetricRetention } from "./metric-retention.js";
 import { sshExec } from "./ssh/executor.js";
+import { sendMagicPacket } from "./nodes/wol.js";
 
 const app = express();
 const server = createServer(app);
@@ -49,6 +50,7 @@ server.on("upgrade", (request, socket, head) => {
 app.set("agentHub", agentHub);
 app.set("dashboardHub", dashboardHub);
 app.set("sshExec", sshExec);
+app.set("wolSend", sendMagicPacket);
 
 // REST API routes
 app.use("/api/nodes", nodesRouter);

@@ -9,6 +9,7 @@ import { metricsBuffer } from "../metrics-buffer.js";
 import type { AgentHub } from "../ws/agent-hub.js";
 import { powerCommand, macCaptureCmd, normalizeMac, type PowerAction } from "../nodes/power.js";
 import { sshExec as defaultSshExec } from "../ssh/executor.js";
+import { broadcastFor, sendMagicPacket as defaultWolSend } from "../nodes/wol.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -478,6 +479,29 @@ nodesRouter.post("/:id/power", async (req, res) => {
   sseBroadcast({ type: "node:status", payload: { nodeId: node.id, powerState } });
 
   res.json({ status: "ok", powerState });
+});
+
+// POST /api/nodes/:id/wake — send a Wake-on-LAN magic packet to a powered-off node.
+nodesRouter.post("/:id/wake", async (req, res) => {
+  const node = await prisma.node.findUnique({ where: { id: req.params.id } });
+  if (!node) return res.status(404).json({ error: "Node not found" });
+  if (!node.macAddress) {
+    return res.status(409).json({
+      error: "No MAC captured for this node yet — it must have been audited or shut down via the manager at least once.",
+    });
+  }
+  if (!node.ipAddress) return res.status(400).json({ error: "Node has no ipAddress" });
+
+  const wolSend = (req.app.get("wolSend") || defaultWolSend) as typeof defaultWolSend;
+  try {
+    await wolSend(node.macAddress, broadcastFor(node.ipAddress));
+  } catch (err) {
+    return res.status(502).json({ error: `WOL send failed: ${String(err)}` });
+  }
+
+  await prisma.node.update({ where: { id: node.id }, data: { powerState: "waking" } });
+  sseBroadcast({ type: "node:status", payload: { nodeId: node.id, powerState: "waking" } });
+  res.json({ status: "ok", powerState: "waking" });
 });
 
 /**
