@@ -41,6 +41,7 @@ export function buildOpenApiSpec() {
       info: { title: "DGX Manager API", version: "1.0.0", description: SYSTEM_OVERVIEW },
       tags: [
         { name: "Nodes", description: "Register, audit, and provision DGX Spark nodes." },
+        { name: "Cluster", description: "Cluster-wide operations (e.g. reseed cross-node SSH known_hosts trust)." },
         { name: "Recipes", description: "Inference recipe catalog from sparkrun registries." },
         { name: "Deployments", description: "Launch/stop inference workloads via sparkrun (registry ref, NFS path, or inline YAML)." },
         { name: "Load Balancer", description: "Round-robin inference proxy over running deployments." },

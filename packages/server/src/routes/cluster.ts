@@ -6,6 +6,30 @@ import { loadOnlineSeedNodes } from "../ssh/known-hosts-trigger.js";
 
 export const clusterRouter = Router();
 
+/**
+ * @openapi
+ * /api/cluster/reseed-known-hosts:
+ *   post:
+ *     tags: [Cluster]
+ *     summary: Reseed the cross-node SSH known_hosts trust mesh
+ *     description: >
+ *       SSHes every online node to discover its live IPs (`ip -o -4 addr`), unions
+ *       and filters them to the cluster subnets, then re-scans them into each node's
+ *       system-wide `/etc/ssh/ssh_known_hosts`. This is what lets the head node SSH
+ *       into workers during multi-node (tensor-parallel) deploys without hitting
+ *       `rc=255 Host key verification failed`. Bypasses the automatic-trigger throttle
+ *       (operator intent is explicit). Also fired automatically on node provision and
+ *       on agent (re)connect.
+ *     responses:
+ *       '200':
+ *         description: >
+ *           At least one node was seeded. Body is the per-node report:
+ *           `{ trustedIps: string[], perNode: [{ nodeId, host, ipsSeeded, ok, error? }] }`.
+ *       '502':
+ *         description: No node could be seeded (all unreachable). Same report shape.
+ *       '500':
+ *         description: Unexpected server error.
+ */
 // Manually reseed the cross-node known_hosts mesh. Bypasses the throttle
 // (operator intent is explicit). 200 if any node seeded, 502 if none.
 clusterRouter.post("/reseed-known-hosts", async (req, res) => {
