@@ -16,6 +16,29 @@ export async function apiFetch<T>(path: string, options?: RequestInit): Promise<
   return res.json();
 }
 
+export interface ReseedKnownHostsResult {
+  trustedIps: string[];
+  perNode: Array<{ nodeId: string; host: string; ipsSeeded: number; ok: boolean; error?: string }>;
+}
+
+/**
+ * POST /api/cluster/reseed-known-hosts — re-seeds the cross-node SSH known_hosts
+ * trust mesh. HTTP 502 (no nodes seeded) is treated as a valid report body, not
+ * an error. Only throws on other non-OK statuses.
+ */
+export async function reseedKnownHosts(): Promise<ReseedKnownHostsResult> {
+  const res = await fetch(`${API_BASE}/api/cluster/reseed-known-hosts`, {
+    method: "POST",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!res.ok && res.status !== 502) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Reseed failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 export async function apiUpload<T>(path: string, formData: FormData): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",

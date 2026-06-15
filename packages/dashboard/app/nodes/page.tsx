@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, reseedKnownHosts } from "@/lib/api";
 import { useSSE, type SseEvent } from "@/lib/sse";
 import OnboardingCommand, { getServerHost } from "@/components/onboarding-command";
 
@@ -68,6 +68,7 @@ export default function NodesPage() {
   const [renameDraft, setRenameDraft] = useState("");
   const [renameError, setRenameError] = useState<string | null>(null);
   const [savingRename, setSavingRename] = useState(false);
+  const [reseeding, setReseeding] = useState(false);
   const serverHost = getServerHost();
 
   const startRename = (node: Node) => {
@@ -145,6 +146,19 @@ export default function NodesPage() {
       alert(String(err));
     } finally {
       setUpgrading((prev) => ({ ...prev, [nodeId]: false }));
+    }
+  };
+
+  const handleReseed = async () => {
+    setReseeding(true);
+    try {
+      const report = await reseedKnownHosts();
+      const okCount = report.perNode.filter((p) => p.ok).length;
+      alert(`SSH trust reseeded: ${okCount}/${report.perNode.length} nodes, ${report.trustedIps.length} IPs.`);
+    } catch (err) {
+      alert(`Reseed failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setReseeding(false);
     }
   };
 
@@ -272,12 +286,21 @@ export default function NodesPage() {
             {connected ? "Live" : "Disconnected"}
           </span>
         </div>
-        <button
-          onClick={() => setShowOnboarding(true)}
-          className="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded text-sm font-medium transition-colors"
-        >
-          Add Node
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={handleReseed}
+            disabled={reseeding}
+            className="bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:cursor-not-allowed text-gray-300 px-4 py-2 rounded text-sm font-medium transition-colors"
+          >
+            {reseeding ? "Reseeding…" : "Reseed SSH trust"}
+          </button>
+          <button
+            onClick={() => setShowOnboarding(true)}
+            className="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded text-sm font-medium transition-colors"
+          >
+            Add Node
+          </button>
+        </div>
       </div>
 
       {showOnboarding && (
