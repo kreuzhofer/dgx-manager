@@ -18,6 +18,7 @@ import { agentBundleRouter } from "./routes/agent-bundle.js";
 import { datasetsRouter } from "./routes/datasets.js";
 import { benchmarksRouter } from "./routes/benchmarks.js";
 import { hfCacheRouter } from "./routes/hf-cache.js";
+import { clusterRouter } from "./routes/cluster.js";
 import { mountOpenApi } from "./openapi.js";
 import { prisma } from "./prisma.js";
 import { sseHandler } from "./sse.js";
@@ -67,6 +68,7 @@ app.use("/api/agent", agentBundleRouter);
 app.use("/api/datasets", datasetsRouter);
 app.use("/api/benchmarks", benchmarksRouter);
 app.use("/api/hf-cache", hfCacheRouter);
+app.use("/api/cluster", clusterRouter);
 
 // OpenAPI spec + Swagger UI
 mountOpenApi(app);
