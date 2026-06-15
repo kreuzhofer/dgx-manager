@@ -123,9 +123,13 @@ A module-level guard wraps the orchestrator:
 
 - **Single-flight:** if a reseed is in progress, concurrent triggers return/await the
   same in-flight promise rather than launching a second run.
-- **Throttle:** if a reseed **completed successfully** within the last 5 minutes, a new
-  *automatic* trigger is skipped (logged as skipped). The **manual** endpoint bypasses
-  the throttle (operator intent is explicit).
+- **Throttle (rate-limiter):** if *any* reseed run completed within the last 5
+  minutes, a new **automatic** trigger is skipped (logged as skipped). It is a pure
+  rate-limiter on the automatic (agent-reconnect) path — it arms after any completed
+  run regardless of per-node outcome, so a persistently-failed/unreachable node can
+  never keep it from arming (which would let a flapping node trigger a reseed storm).
+  **Deliberate** triggers — the manual endpoint **and provision-complete** — pass
+  `force: true` and bypass the throttle entirely.
 - Each run reseeds the whole mesh; runs are idempotent (`-R` + scan + `sort -u`), so a
   redundant run is harmless beyond the SSH cost the throttle caps.
 

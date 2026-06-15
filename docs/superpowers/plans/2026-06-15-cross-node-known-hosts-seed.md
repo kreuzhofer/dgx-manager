@@ -746,7 +746,8 @@ In the `provisionNode(...).then(async (log) => { ... })` block (around line 350)
 ```ts
     // A newly provisioned node must trust (and be trusted by) the rest of the
     // cluster, else node→node SSH for multi-node deploys fails with rc=255.
-    triggerClusterReseed().catch((e) => console.error(`known-hosts reseed after provision failed: ${(e as Error).message}`));
+    // force:true — onboarding is deliberate and must not be suppressed by the throttle.
+    triggerClusterReseed({ force: true }).catch((e) => console.error(`known-hosts reseed after provision failed: ${(e as Error).message}`));
 ```
 
 - [ ] **Step 3: Typecheck + run the existing nodes tests**
