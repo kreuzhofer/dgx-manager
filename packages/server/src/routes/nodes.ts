@@ -10,6 +10,7 @@ import type { AgentHub } from "../ws/agent-hub.js";
 import { powerCommand, macCaptureCmd, normalizeMac, type PowerAction } from "../nodes/power.js";
 import { sshExec as defaultSshExec } from "../ssh/executor.js";
 import { broadcastFor, sendMagicPacket as defaultWolSend } from "../nodes/wol.js";
+import { triggerClusterReseed } from "../ssh/known-hosts-trigger.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -369,6 +370,10 @@ nodesRouter.post("/:id/provision", async (req, res) => {
         report: newReport,
       },
     });
+    // A newly provisioned node must trust (and be trusted by) the rest of the
+    // cluster, else node→node SSH for multi-node deploys fails with rc=255.
+    // force:true — onboarding is deliberate and must not be suppressed by the throttle.
+    triggerClusterReseed({ force: true }).catch((e) => console.error(`known-hosts reseed after provision failed: ${(e as Error).message}`));
   }).catch(async (err) => {
     await prisma.node.update({
       where: { id: node.id },

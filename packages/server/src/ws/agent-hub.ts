@@ -6,6 +6,7 @@ import { broadcast as sseBroadcast } from "../sse.js";
 import { metricsBuffer } from "../metrics-buffer.js";
 import type { HfCacheNodeInventory } from "../hf-cache/grouping.js";
 import { resolveNodeIp, isValidIpv4 } from "./node-ip.js";
+import { scheduleDebouncedReseed } from "../ssh/known-hosts-trigger.js";
 
 export interface OllamaModelInfo {
   name: string;
@@ -189,6 +190,9 @@ export class AgentHub {
             });
             console.log(`Agent registered: ${nodeId} (v${agentVersion || "unknown"})`);
             sseBroadcast({ type: "node:status", payload: { nodeId, status: "online", agentVersion } });
+            // A (re)connected agent may be a re-imaged node whose host key
+            // changed — refresh the cluster known_hosts mesh (debounced + throttled).
+            scheduleDebouncedReseed();
             break;
           }
 
@@ -277,6 +281,9 @@ export class AgentHub {
             // online status update.
             sseBroadcast({ type: "node:created", payload: node });
             sseBroadcast({ type: "node:status", payload: { nodeId, status: "online", agentVersion: tokenAgentVersion } });
+            // A (re)connected agent may be a re-imaged node whose host key
+            // changed — refresh the cluster known_hosts mesh (debounced + throttled).
+            scheduleDebouncedReseed();
             break;
           }
 
