@@ -94,16 +94,17 @@ export function buildKeyscanSeedScript(ips: string[]): string {
 }
 
 const THROTTLE_MS = 5 * 60 * 1000;
+// Covers SSH setup overhead + a fast local `ip addr` command.
 const GATHER_TIMEOUT_MS = 10_000;
 const SEED_TIMEOUT_MS = 30_000;
 
 let inFlight: Promise<ReseedReport> | null = null;
-let lastSuccessAt: number | null = null;
+let lastRunAt: number | null = null;
 
 /** Reset module-level guard state. For tests only. */
 export function resetKnownHostsGuard(): void {
   inFlight = null;
-  lastSuccessAt = null;
+  lastRunAt = null;
 }
 
 async function doReseed(nodes: NodeForSeed[], deps: ReseedDeps): Promise<ReseedReport> {
@@ -145,8 +146,10 @@ async function doReseed(nodes: NodeForSeed[], deps: ReseedDeps): Promise<ReseedR
 
 /**
  * Reseed the whole cluster's known_hosts mesh. Single-flight (concurrent calls
- * share one run) and throttled (a successful automatic run suppresses further
- * automatic runs for 5 minutes). `force: true` bypasses the throttle (manual op).
+ * share one run) and rate-limited (any completed run arms the throttle for 5
+ * minutes; `force: true` bypasses it). The throttle fires regardless of per-node
+ * success so a persistently-unreachable node cannot cause a reseed storm on every
+ * agent reconnect.
  */
 export async function reseedClusterKnownHosts(
   nodes: NodeForSeed[],
@@ -155,13 +158,15 @@ export async function reseedClusterKnownHosts(
 ): Promise<ReseedReport> {
   const now = deps.now ?? Date.now;
   if (inFlight) return inFlight;
-  if (!opts.force && lastSuccessAt !== null && now() - lastSuccessAt < THROTTLE_MS) {
+  if (!opts.force && lastRunAt !== null && now() - lastRunAt < THROTTLE_MS) {
     return { trustedIps: [], perNode: [], skipped: "throttled" };
   }
   inFlight = doReseed(nodes, deps);
   try {
     const report = await inFlight;
-    if (report.perNode.some((p) => p.ok)) lastSuccessAt = now();
+    // Arm the throttle after ANY completed run, win or lose — a failed node must
+    // not bypass the rate-limit and trigger a reseed storm on every reconnect.
+    lastRunAt = now();
     return report;
   } finally {
     inFlight = null;

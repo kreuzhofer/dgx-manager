@@ -47,10 +47,24 @@ describe("filterToClusterSubnets", () => {
   });
 
   // Invariant: output is a subset of input, and every output IP shares a /24 with some node.
+  // The generator mixes cluster-subnet IPs with random ones so the keep-path is actually exercised.
   propTest.prop([
-    fc.array(fc.tuple(fc.integer({ min: 0, max: 255 }), fc.integer({ min: 0, max: 255 }), fc.integer({ min: 0, max: 255 }), fc.integer({ min: 0, max: 255 }))),
-  ])("output ⊆ input ∧ all in a node /24", (quads) => {
-    const ips = quads.map(([a, b, c, d]) => `${a}.${b}.${c}.${d}`);
+    fc.array(
+      fc.oneof(
+        fc
+          .tuple(fc.constantFrom("192.168.44", "192.168.100"), fc.integer({ min: 0, max: 255 }))
+          .map(([p, d]) => `${p}.${d}`),
+        fc
+          .tuple(
+            fc.integer({ min: 0, max: 255 }),
+            fc.integer({ min: 0, max: 255 }),
+            fc.integer({ min: 0, max: 255 }),
+            fc.integer({ min: 0, max: 255 }),
+          )
+          .map((q) => q.join(".")),
+      ),
+    ),
+  ])("output ⊆ input ∧ all in a node /24", (ips) => {
     const result = filterToClusterSubnets(ips, NODES);
     const clusterPrefixes = new Set(["192.168.44", "192.168.100"]);
     for (const ip of result) {
@@ -75,6 +89,7 @@ describe("buildKeyscanSeedScript", () => {
 
   it("throws on a non-IPv4 element (shell-injection guard)", () => {
     expect(() => buildKeyscanSeedScript(["192.168.44.36", "1.2.3.4; rm -rf /"])).toThrow();
+    expect(() => buildKeyscanSeedScript(["1.2.3.4\n5.6.7.8"])).toThrow();
   });
 
   it("throws on empty input", () => {
@@ -126,8 +141,9 @@ describe("reseedClusterKnownHosts", () => {
       reseedClusterKnownHosts(NODES, { sshExec }),
       reseedClusterKnownHosts(NODES, { sshExec }),
     ]);
+    // Referential equality proves both callers received the same Promise result.
     expect(r1).toBe(r2);
-    // 2 nodes × (1 gather + 1 seed) = 4 sshExec calls for exactly one run
+    // 4 sshExec calls == 2 nodes × (1 gather + 1 seed) = exactly one underlying run (single-flight proof).
     expect(sshExec).toHaveBeenCalledTimes(4);
   });
 
@@ -142,5 +158,15 @@ describe("reseedClusterKnownHosts", () => {
     const forced = await reseedClusterKnownHosts(NODES, deps, { force: true });
     expect(forced.skipped).toBeUndefined();
     expect(forced.perNode.every((p) => p.ok)).toBe(true);
+  });
+
+  it("returns trustedIps:[] and perNode:[] when every node's gather returns empty stdout", async () => {
+    // All nodes respond with code 0 but no IP lines — trustedIps stays empty, seed phase is skipped.
+    const sshExec = vi.fn(async (_host: string, _command: string) => ({ code: 0, stdout: "", stderr: "" }));
+    const report = await reseedClusterKnownHosts(NODES, { sshExec });
+    expect(report.trustedIps).toEqual([]);
+    expect(report.perNode).toEqual([]);
+    // buildKeyscanSeedScript is never invoked — only gather calls are made (one per node).
+    expect(sshExec).toHaveBeenCalledTimes(NODES.length);
   });
 });
