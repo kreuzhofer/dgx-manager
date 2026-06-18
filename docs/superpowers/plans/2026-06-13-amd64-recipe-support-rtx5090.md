@@ -16,6 +16,17 @@ Another process is actively working on `feat/hf-cache-management`. **Do not edit
 
 ---
 
+## Reconciliation (2026-06-18 execution pass)
+
+Updates agreed with Daniel before executing; supersede the original text where they conflict:
+
+1. **HF-cache work has merged to `main`.** The coordination caveat above is resolved. Executing on branch `feat/amd64-recipes` off `main`.
+2. **The amd64 registry is `@rtx`, not `@dgx-amd64`.** Daniel already created `rtx-recipe-registry/` (`.sparkrun/registry.yaml` → `name: rtx`, refs `@rtx/...`), so `deriveRecipeArch` keys amd64 off `@rtx` (keep `@dgx-amd64` too for forward-compat). Update Task 1's test/impl accordingly.
+3. **Scope of this pass = Phase 1 only (Tasks 1–5), pure code + TDD.** This delivers the user's "platform selection" (arch-aware catalog + per-node-filtered recipe list). **Phase 0** (live sm_120 image probe), **Phase 2** (Ollama amd64 lineup), and **Phase 3** (authoring/validating real amd64 recipes on aihost01) are DEFERRED — they need the live RTX 5090 node and Daniel in the loop.
+4. **Platform UX:** Task 5 keeps the node-arch-driven filter (`/api/recipes?nodeId=`) for iteration 1 — selecting a node implicitly selects its platform. An explicit "Platform" dropdown is a thin follow-up if wanted.
+
+---
+
 ## Findings (evidence behind this plan)
 
 **Current state — verified live (2026-06-13):**
