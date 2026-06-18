@@ -1,5 +1,6 @@
 import { Router } from "express";
 import type { AgentHub } from "../ws/agent-hub.js";
+import { prisma } from "../prisma.js";
 
 export const recipesRouter = Router();
 
@@ -17,13 +18,38 @@ export const recipesRouter = Router();
  *       and metadata. The list is refreshed whenever an agent reconnects or when
  *       POST /api/recipes/refresh is called. Used by the deploy form to populate
  *       the recipe dropdown.
+ *     parameters:
+ *       - in: query
+ *         name: nodeId
+ *         schema: { type: string }
+ *         required: false
+ *         description: >
+ *           When supplied, the catalog is filtered to recipes whose target arch
+ *           matches the node's arch (plus arch-agnostic `any` recipes). Omitting
+ *           it returns the full, unfiltered catalog (back-compat).
  *     responses:
  *       '200':
  *         description: Array of recipe objects from the sparkrun registry
  */
-recipesRouter.get("/", (req, res) => {
+recipesRouter.get("/", async (req, res) => {
   const agentHub: AgentHub = req.app.get("agentHub");
-  res.json(agentHub.getRecipes());
+  const recipes = agentHub.getRecipes();
+
+  const nodeId = typeof req.query.nodeId === "string" ? req.query.nodeId : undefined;
+  if (!nodeId) {
+    res.json(recipes);
+    return;
+  }
+
+  // Filter to the node's arch. If the node is unknown we can't filter, so we
+  // return the full catalog rather than an empty list — the deploy-time arch
+  // admission guard is the real enforcement boundary.
+  const node = await prisma.node.findUnique({ where: { id: nodeId } });
+  if (!node?.arch) {
+    res.json(recipes);
+    return;
+  }
+  res.json(recipes.filter((r) => r.arch === node.arch || r.arch === "any"));
 });
 
 /**

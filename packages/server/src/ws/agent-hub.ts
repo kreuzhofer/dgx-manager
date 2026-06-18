@@ -14,6 +14,8 @@ export interface OllamaModelInfo {
   description: string;
 }
 
+export type RecipeArch = "amd64" | "arm64" | "any";
+
 export interface VllmRecipe {
   file: string;
   name: string;
@@ -22,6 +24,8 @@ export interface VllmRecipe {
   container: string;
   cluster_only?: boolean;
   solo_only?: boolean;
+  /** Target CPU arch of the recipe; used for per-node filtering + admission. */
+  arch: RecipeArch;
   defaults: Record<string, unknown>;
 }
 
@@ -325,7 +329,13 @@ export class AgentHub {
           }
 
           case "agent:recipes": {
-            const incoming = msg.payload.recipes as VllmRecipe[];
+            const incoming = (msg.payload.recipes as VllmRecipe[]).map((r) => ({
+              // Legacy agents (pre arch-aware) omit `arch`. Default to "arm64"
+              // — the existing fleet is all DGX Spark (arm64) — as an explicit,
+              // observable fallback so these recipes still filter/admit sanely.
+              ...r,
+              arch: r.arch === "amd64" || r.arch === "arm64" || r.arch === "any" ? r.arch : "arm64",
+            }));
             this.recipes = incoming;
             console.log(`Received ${incoming.length} vLLM recipes from agent ${nodeId}`);
             this.onRecipes?.(incoming);
