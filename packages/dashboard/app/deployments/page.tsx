@@ -16,6 +16,8 @@ interface Recipe {
   cluster_only?: boolean;
   solo_only?: boolean;
   defaults: Record<string, unknown>;
+  // Target CPU arch the recipe runs on; "any" = arch-agnostic (e.g. Ollama).
+  arch?: "amd64" | "arm64" | "any";
   // Training recipes carry a separate `deploy:` block describing inference
   // defaults (max_model_len, gpu_memory_utilization, …). Optional because
   // hand-curated vLLM recipes don't have one. Used by the fine-tune Deploy
@@ -36,6 +38,7 @@ interface Node {
   name: string;
   ipAddress: string;
   status: string;
+  arch?: "amd64" | "arm64";
   vramTotal?: number;
   metrics?: { vramUsed: number }[];
 }
@@ -111,6 +114,13 @@ const statusStyles: Record<string, string> = {
   restarting: "bg-blue-900 text-blue-300",
 };
 
+// Deploy-form platform selector: maps each CPU arch to a human label so the
+// user picks "DGX Spark" / "RTX 5090" rather than arch strings.
+const PLATFORMS: { arch: "arm64" | "amd64"; label: string }[] = [
+  { arch: "arm64", label: "DGX Spark" },
+  { arch: "amd64", label: "RTX 5090" },
+];
+
 export default function DeploymentsPage() {
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   // Training recipes are a separate endpoint from /api/recipes — they carry
@@ -136,6 +146,9 @@ export default function DeploymentsPage() {
   const [selectedOllamaModel, setSelectedOllamaModel] = useState<string>("");
   const [idleNodes, setIdleNodes] = useState<Node[]>([]);
   const [selectedNode, setSelectedNode] = useState<string>("");
+  // Platform-first UX: pick the target arch, then the recipe list is filtered
+  // to recipes that run on it (plus arch-agnostic "any" recipes).
+  const [selectedPlatform, setSelectedPlatform] = useState<string>("");
   // For cluster (TP>1) deploys: explicit per-node selection. Defaults to the
   // requiredNodes nodes with the most free VRAM (or alphabetical when no
   // metrics are available); user can override by toggling checkboxes.
@@ -711,6 +724,19 @@ export default function DeploymentsPage() {
     }
   };
 
+  // Platforms we actually have a node for — only offer these in the selector.
+  const availablePlatforms = useMemo(
+    () => PLATFORMS.filter((p) => nodes.some((n) => n.arch === p.arch)),
+    [nodes],
+  );
+
+  // Default the platform once nodes load so the controlled select has a value.
+  useEffect(() => {
+    if (!selectedPlatform && availablePlatforms.length > 0) {
+      setSelectedPlatform(availablePlatforms[0].arch);
+    }
+  }, [availablePlatforms, selectedPlatform]);
+
   // Compute auto-selected nodes
   // Compute required nodes from config overrides or recipe defaults
   const effectiveTP = parseInt(tensorParallel) || (selectedRecipeData?.defaults?.tensor_parallel as number) || 1;
@@ -819,6 +845,29 @@ export default function DeploymentsPage() {
               </div>
             ) : runtimeMode === "vllm" ? (
               <>
+                {availablePlatforms.length > 0 && (
+                  <div className="mb-3">
+                    <label className="block text-xs text-gray-400 mb-1">Platform</label>
+                    <select
+                      value={selectedPlatform}
+                      onChange={(e) => {
+                        const next = e.target.value;
+                        setSelectedPlatform(next);
+                        // Clear the recipe if it no longer fits the new platform.
+                        const current = recipes.find((r) => r.file === selectedRecipe);
+                        if (current) {
+                          const a = current.arch ?? "arm64";
+                          if (a !== "any" && a !== next) onRecipeChange("");
+                        }
+                      }}
+                      className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
+                    >
+                      {availablePlatforms.map((p) => (
+                        <option key={p.arch} value={p.arch}>{p.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
                 <label className="block text-xs text-gray-400 mb-1">Recipe</label>
                 <select
                   value={selectedRecipe}
@@ -834,6 +883,9 @@ export default function DeploymentsPage() {
                     // ones (e.g. finetune-qwen3.6-50step) don't match the
                     // pattern and stay visible.
                     .filter((r) => !/^recipes\/finetune-[a-z0-9]{12}\.yaml$/.test(r.file))
+                    // Platform filter: missing arch is treated as arm64; "any"
+                    // recipes show everywhere; show all if no platform picked.
+                    .filter((r) => { const a = r.arch ?? "arm64"; return a === "any" || a === selectedPlatform || !selectedPlatform; })
                     .map((r) => {
                     const tp = r.defaults?.tensor_parallel as number | undefined;
                     const pp = r.defaults?.pipeline_parallel as number | undefined;
