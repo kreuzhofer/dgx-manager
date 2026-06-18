@@ -6,7 +6,25 @@ vi.mock("node:child_process", () => ({
     { name: "@reg/big", file: "big", model: "X", runtime: "vllm", min_nodes: 2, tp: 2, gpu_mem: "", registry: "reg" },
   ])),
 }));
-import { discoverRecipes } from "./recipes.js";
+import { discoverRecipes, toRecipe } from "./recipes.js";
+import type { SparkrunRecipeSummary } from "./runtime/sparkrun-parse.js";
+
+describe("toRecipe", () => {
+  it("tags an arm64 (official) registry ref with arch=arm64", () => {
+    const summary: SparkrunRecipeSummary = {
+      ref: "@official/qwen3.6-27b-fp8-vllm",
+      name: "Qwen3.6 27B FP8",
+      description: "Qwen recipe",
+      runtime: "vllm",
+      registry: "official",
+      model: "Qwen/Qwen3.6-27B-FP8",
+      minNodes: 1,
+      tpDefault: 1,
+      gpuMemDefault: 0.85,
+    };
+    expect(toRecipe(summary).arch).toBe("arm64");
+  });
+});
 
 describe("discoverRecipes", () => {
   it("maps sparkrun summaries to the wire Recipe shape", () => {

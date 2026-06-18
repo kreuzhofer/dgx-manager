@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { parseSparkrunList, type SparkrunRecipeSummary } from "./runtime/sparkrun-parse.js";
+import { deriveRecipeArch, type RecipeArch } from "./runtime/recipe-arch.js";
 
 export const SPARKRUN_PKG = "sparkrun==0.2.38";
 
@@ -11,16 +12,19 @@ export interface Recipe {
   container: string;
   cluster_only?: boolean;
   solo_only?: boolean;
+  /** Target CPU arch derived from the recipe ref; used for per-node filtering. */
+  arch: RecipeArch;
   defaults: Record<string, unknown>;
 }
 
-function toRecipe(s: SparkrunRecipeSummary): Recipe {
+export function toRecipe(s: SparkrunRecipeSummary): Recipe {
   return {
     file: s.ref,
     name: s.name,
     description: s.description,
     model: s.model,
     container: "sparkrun",
+    arch: deriveRecipeArch(s.ref),
     cluster_only: s.minNodes > 1 ? true : undefined,
     solo_only: undefined,
     defaults: {
