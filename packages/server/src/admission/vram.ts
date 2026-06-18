@@ -43,6 +43,13 @@ export type NodeSnapshot = {
   vramTotalMB: number;
   /** VRAM currently in use in MB (most recent metric). */
   vramUsedMB: number;
+  /**
+   * VRAM (MB) on this node that the pending action will itself free before it
+   * needs it — i.e. the resident footprint of the deployment being restarted.
+   * Subtracted from `vramUsedMB` so a restart isn't rejected for the memory it
+   * is about to release. Defaults to 0 (a fresh deploy reclaims nothing).
+   */
+  reclaimableMB?: number;
   /** Active deployments on this node (solo or cluster member). Used only for the conflict list when a shortfall is reported. */
   conflicts: VramConflict[];
 };
@@ -82,7 +89,11 @@ export function computeVramShortfall(
   safetyMarginFraction: number = SAFETY_MARGIN_FRACTION,
 ): VramShortfall | null {
   const vramTotal = snapshot.vramTotalMB;
-  const vramUsed = snapshot.vramUsedMB;
+  // Discount VRAM the action will free before it needs it (a restart releasing
+  // its own resident model). Clamp the reclaim so a bogus/negative value can't
+  // inflate availability, and never let used drop below zero.
+  const reclaimable = Math.max(0, snapshot.reclaimableMB ?? 0);
+  const vramUsed = Math.max(0, snapshot.vramUsedMB - reclaimable);
   const vramAvailable = Math.max(0, vramTotal - vramUsed);
   const vramRequested = Math.round(vramTotal * gpuMemUtil);
   const safetyMargin = Math.round(vramTotal * safetyMarginFraction);
@@ -145,12 +156,32 @@ export async function checkVllmVramAdmission(
     });
     const conflicts = await loadConflicts(nid, excludeDeploymentId);
 
+    // On a restart (excludeDeploymentId set) the live vramUsed still includes
+    // the restarting deployment's own resident model, which is torn down before
+    // relaunch. Treat the node VRAM not attributable to OTHER active
+    // deployments as reclaimable, so the deployment isn't rejected for memory it
+    // is about to free. Self is already excluded from `conflicts`, so the
+    // subtraction below leaves only other deployments counted. This is derived
+    // purely from the node metric + conflict list — no dependence on whether the
+    // deployment's own vramActual is stored per-node or summed across a cluster.
+    // (kreuzhofer/dgx-manager#1)
+    const vramUsedMB = latestMetric?.vramUsed || 0;
+    let reclaimableMB = 0;
+    if (excludeDeploymentId) {
+      const otherFootprintMB = conflicts.reduce(
+        (sum, c) => sum + (c.vramActualMB ?? c.vramEstimateMB ?? 0),
+        0,
+      );
+      reclaimableMB = Math.max(0, vramUsedMB - otherFootprintMB);
+    }
+
     const result = computeVramShortfall(
       {
         nodeId: nid,
         nodeName: node.name,
         vramTotalMB: node.vramTotal || DEFAULT_VRAM_TOTAL_MB,
-        vramUsedMB: latestMetric?.vramUsed || 0,
+        vramUsedMB,
+        reclaimableMB,
         conflicts,
       },
       gpuMemUtil,

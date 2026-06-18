@@ -108,6 +108,24 @@ describe("computeVramShortfall", () => {
         );
       },
     );
+
+    test.prop([snapshotArb, utilArb, fc.integer({ min: 0, max: 300_000 })])(
+      "reclaimableMB can only relax admission — never turns an admit into a reject",
+      (rawSnapshot, util, reclaim) => {
+        const snapshot: NodeSnapshot = {
+          ...rawSnapshot,
+          vramUsedMB: Math.min(rawSnapshot.vramUsedMB, rawSnapshot.vramTotalMB),
+        };
+        const base = computeVramShortfall(snapshot, util);
+        const withReclaim = computeVramShortfall(
+          { ...snapshot, reclaimableMB: reclaim },
+          util,
+        );
+        // Subtracting reclaimable VRAM can only free space, so any node that
+        // admits with no reclaim must still admit with a non-negative reclaim.
+        if (base === null) expect(withReclaim).toBeNull();
+      },
+    );
   });
 
   describe("hand-picked cases", () => {
@@ -173,6 +191,43 @@ describe("computeVramShortfall", () => {
       const result = computeVramShortfall(snapshot, 0.5);
       expect(result).not.toBeNull();
       expect(result!.vramAvailableMB).toBe(0);
+    });
+
+    it("subtracts reclaimableMB (the restarting deployment's own resident VRAM) before the check", () => {
+      // Today's incident (kreuzhofer/dgx-manager#1): spark-02 measured 97069 MB
+      // used at a 0.90 restart — but ~95 GB of that IS the deployment being
+      // restarted, which is torn down before relaunch. Counting it yields a
+      // spurious shortfall.
+      const base: NodeSnapshot = {
+        nodeId: "spark-02",
+        nodeName: "dgx-spark-02",
+        vramTotalMB: 124_546,
+        vramUsedMB: 97_069,
+        conflicts: [],
+      };
+      // 0.90 util → requested 112091 + margin 6227 = threshold 118318;
+      // raw available 27477 → REJECT without reclaim.
+      expect(computeVramShortfall(base, 0.9)).not.toBeNull();
+      // Marking the restarting deployment's ~95 GB reclaimable → effective used
+      // ~2 GB, available ~122 GB ≥ 118318 → ADMIT.
+      const admitted = computeVramShortfall({ ...base, reclaimableMB: 95_000 }, 0.9);
+      expect(admitted).toBeNull();
+    });
+
+    it("clamps reclaimableMB so garbage values can't push used below zero or over-relax", () => {
+      const base: NodeSnapshot = {
+        nodeId: "n",
+        nodeName: "n",
+        vramTotalMB: 100_000,
+        vramUsedMB: 10_000,
+        conflicts: [],
+      };
+      // Reclaim larger than used → effective used 0, available = total → admit.
+      expect(computeVramShortfall({ ...base, reclaimableMB: 999_999 }, 0.5)).toBeNull();
+      // Negative reclaim is treated as 0: identical to no reclaim at all.
+      expect(computeVramShortfall({ ...base, reclaimableMB: -50_000 }, 0.9)).toEqual(
+        computeVramShortfall(base, 0.9),
+      );
     });
   });
 });

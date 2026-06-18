@@ -207,3 +207,131 @@ describe("POST /api/deployments — VRAM admission", () => {
     expect((sentMessages[0].message as { type: string }).type).toBe("cmd:deploy");
   });
 });
+
+describe("POST /api/deployments/:id/restart — VRAM admission self-exclusion (kreuzhofer/dgx-manager#1)", () => {
+  it("admits a resident cluster deploy restarting at a higher gpu_memory_utilization (its own VRAM is reclaimable)", async () => {
+    await wipeAll();
+
+    // Two GB10 nodes, each measuring ~95 GB used — held by the very
+    // deployment we are about to restart (gpt-oss-120b TP=2).
+    await Promise.all(
+      [1, 2].map((i) =>
+        prisma.node.create({
+          data: {
+            id: `node-${i}`,
+            name: `dgx-spark-0${i}`,
+            ipAddress: `192.168.44.${36 + i}`,
+            vramTotal: 124_546,
+            status: "online",
+          },
+        }),
+      ),
+    );
+    for (const nid of ["node-1", "node-2"]) {
+      await prisma.metricSnapshot.create({
+        data: { nodeId: nid, vramUsed: 95_000, gpuUtil: 0, timestamp: new Date() },
+      });
+    }
+
+    const model = await prisma.model.create({
+      data: { name: "openai/gpt-oss-120b", runtime: "vllm" },
+    });
+    const dep = await prisma.deployment.create({
+      data: {
+        nodeId: "node-1",
+        modelId: model.id,
+        status: "running",
+        port: 8000,
+        clusterMode: true,
+        config: JSON.stringify({ tensorParallel: 2, port: 8000 }),
+        vramActual: 190_000,
+      },
+    });
+    await prisma.clusterNode.createMany({
+      data: [
+        { deploymentId: dep.id, nodeId: "node-1", role: "head", status: "running" },
+        { deploymentId: dep.id, nodeId: "node-2", role: "worker", status: "running" },
+      ],
+    });
+
+    const { hub, sentMessages } = makeStubHub(RECIPE);
+    const app = makeApp(hub);
+
+    // Without the self-reclaim fix this 409s: the node's own resident model is
+    // double-counted against the 0.90 reservation.
+    const res = await request(app)
+      .post(`/api/deployments/${dep.id}/restart`)
+      .send({ config: { maxModelLen: 65535, gpuMem: 0.9 } });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("restarting");
+    // The relaunch was dispatched to the head node.
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0].nodeId).toBe("node-1");
+    expect((sentMessages[0].message as { type: string }).type).toBe("cmd:deploy");
+  });
+
+  it("still 409s when the resident VRAM is held by a DIFFERENT deployment (reclaim is scoped to self)", async () => {
+    await wipeAll();
+
+    await prisma.node.create({
+      data: {
+        id: "node-1",
+        name: "dgx-spark-01",
+        ipAddress: "192.168.44.36",
+        vramTotal: 124_546,
+        status: "online",
+      },
+    });
+    await prisma.metricSnapshot.create({
+      data: { nodeId: "node-1", vramUsed: 95_000, gpuUtil: 0, timestamp: new Date() },
+    });
+
+    // A big OTHER deployment holding ~90 GB on the same node.
+    const otherModel = await prisma.model.create({
+      data: { name: "big-resident", runtime: "vllm" },
+    });
+    await prisma.deployment.create({
+      data: {
+        nodeId: "node-1",
+        modelId: otherModel.id,
+        status: "running",
+        port: 8001,
+        config: JSON.stringify({}),
+        vramActual: 90_000,
+      },
+    });
+
+    // The small deployment we restart only owns ~4 GB.
+    const model = await prisma.model.create({
+      data: { name: "small-model", runtime: "vllm" },
+    });
+    const small = await prisma.deployment.create({
+      data: {
+        nodeId: "node-1",
+        modelId: model.id,
+        status: "running",
+        port: 8000,
+        config: JSON.stringify({ port: 8000 }),
+        vramActual: 4_000,
+      },
+    });
+
+    const { hub, sentMessages } = makeStubHub(RECIPE);
+    const app = makeApp(hub);
+
+    const res = await request(app)
+      .post(`/api/deployments/${small.id}/restart`)
+      .send({ config: { gpuMem: 0.9 } });
+
+    expect(res.status).toBe(409);
+    expect(res.body.shortfalls).toHaveLength(1);
+    // Only the small deployment's own footprint is reclaimable; the other
+    // ~90 GB stays counted, so the node is still short — and the conflict list
+    // names the OTHER deployment, not the one being restarted.
+    expect(
+      res.body.shortfalls[0].conflicts.map((c: { name: string }) => c.name),
+    ).toContain("big-resident");
+    expect(sentMessages).toHaveLength(0);
+  });
+});
