@@ -5,6 +5,7 @@ import { SHARED_STORAGE } from "../env.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import type { AgentHub } from "../ws/agent-hub.js";
 import { checkVllmVramAdmission, vramShortfallMessage } from "../admission/vram.js";
+import { checkRecipeArchAdmission, recipeArchMismatchMessage } from "../admission/recipe-arch.js";
 import { readCatalog as readOllamaCatalog } from "../ollama/catalog-store.js";
 import { ollamaVramEstimateMB } from "../ollama/vram-estimate.js";
 import { normalizeDisplayName, validateDisplayNameUnique, DisplayNameError } from "../deployments/display-name.js";
@@ -306,8 +307,28 @@ deploymentsRouter.post("/", async (req, res) => {
   if (!isOllama) {
     const agentHub: AgentHub = req.app.get("agentHub");
     const recipe = agentHub.getRecipes().find((r) => r.file === recipeFile);
-    const gpuMemUtil = (config?.gpuMem as number) || (recipe?.defaults?.gpu_memory_utilization as number) || 0.85;
     const checkNodeIds = isCluster ? (nodeIds as string[]) : [headNodeId];
+
+    // Arch admission — fail fast on a recipe/node CPU-arch mismatch (e.g. an
+    // arm64 DGX-Spark recipe deployed to the amd64 RTX-5090 host). Only the
+    // registry-ref branch (recipeFile, resolved against the catalog) is
+    // guarded; inline recipeYaml and Ollama are user-authored / arch-agnostic
+    // and intentionally bypass this.
+    if (recipe) {
+      for (const nid of checkNodeIds) {
+        const node = await prisma.node.findUnique({ where: { id: nid } });
+        const nodeArch = node?.arch;
+        if (nodeArch && !checkRecipeArchAdmission(recipe.arch, nodeArch as "amd64" | "arm64")) {
+          return res.status(400).json({
+            error: `${node?.name ?? nid}: ${recipeArchMismatchMessage(recipe.arch, nodeArch as "amd64" | "arm64")}`,
+            recipeArch: recipe.arch,
+            nodeArch,
+          });
+        }
+      }
+    }
+
+    const gpuMemUtil = (config?.gpuMem as number) || (recipe?.defaults?.gpu_memory_utilization as number) || 0.85;
     const shortfalls = await checkVllmVramAdmission(checkNodeIds, gpuMemUtil);
     if (shortfalls.length > 0) {
       return res.status(409).json({
