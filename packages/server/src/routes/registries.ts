@@ -57,7 +57,14 @@ registriesRouter.patch("/:id", async (req, res) => {
 });
 
 registriesRouter.delete("/:id", async (req, res) => {
-  await prisma.sparkrunRegistry.delete({ where: { id: req.params.id } }).catch(() => {});
+  const existing = await prisma.sparkrunRegistry.findUnique({ where: { id: req.params.id } });
+  if (existing) {
+    const count = await prisma.sparkrunRegistry.count();
+    if (count <= 1) {
+      return res.status(409).json({ error: "Cannot delete the last registry — at least one must remain." });
+    }
+    await prisma.sparkrunRegistry.delete({ where: { id: req.params.id } });
+  }
   await pushRegistriesToConnectedAgents(req.app.get("agentHub") as AgentSink);
   return res.json({ status: "deleted" });
 });

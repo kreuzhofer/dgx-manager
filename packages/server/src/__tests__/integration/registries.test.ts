@@ -93,6 +93,36 @@ describe("/api/registries", () => {
     expect(await prisma.sparkrunRegistry.findUnique({ where: { name: "atlas" } })).toBeNull();
   });
 
+  it("DELETE the last registry is refused with 409 and does NOT broadcast", async () => {
+    const { app, sent } = appWithStubHub();
+    const created = await request(app).post("/api/registries").send({
+      name: "rtx", url: "https://github.com/kreuzhofer/rtx-recipe-registry.git", subpath: "recipes",
+    });
+    expect(created.status).toBe(201);
+    const sentBefore = sent.length;
+    const res = await request(app).delete(`/api/registries/${created.body.id}`);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/last registry/);
+    expect(await prisma.sparkrunRegistry.count()).toBe(1);
+    expect(sent).toHaveLength(sentBefore); // no new broadcast
+  });
+
+  it("DELETE when others remain succeeds and broadcasts", async () => {
+    const { app, sent } = appWithStubHub();
+    const r1 = await request(app).post("/api/registries").send({
+      name: "reg1", url: "https://github.com/kreuzhofer/rtx-recipe-registry.git", subpath: "recipes",
+    });
+    await request(app).post("/api/registries").send({
+      name: "reg2", url: "https://github.com/kreuzhofer/rtx-recipe-registry.git", subpath: "other",
+    });
+    const sentBefore = sent.length;
+    const res = await request(app).delete(`/api/registries/${r1.body.id}`);
+    expect(res.status).toBe(200);
+    expect(await prisma.sparkrunRegistry.count()).toBe(1);
+    expect(sent.length).toBeGreaterThan(sentBefore);
+    expect(sent.at(-1)!.msg.type).toBe("cmd:set-registries");
+  });
+
   it("PATCH updates fields and broadcasts", async () => {
     const { app, sent } = appWithStubHub();
     const created = await request(app).post("/api/registries").send({
