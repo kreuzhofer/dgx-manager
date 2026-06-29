@@ -22,19 +22,22 @@ export function RegistriesSection() {
       await createRegistry(form);
       toast.success(`Added registry '${form.name}' — pushed to online nodes`);
       setForm(EMPTY);
-      load();
+      await load();
     } catch (e) { toast.error((e as Error).message); } finally { setBusy(false); }
   }
 
   async function remove(r: SparkrunRegistry) {
     if (!confirm(`Delete registry '${r.name}'? It will be removed from all nodes.`)) return;
-    try { await deleteRegistry(r.id); toast.success(`Removed '${r.name}'`); load(); }
+    try { await deleteRegistry(r.id); toast.success(`Removed '${r.name}'`); await load(); }
     catch (e) { toast.error((e as Error).message); }
   }
 
   async function toggleVisible(r: SparkrunRegistry) {
-    try { await updateRegistry(r.id, { visible: !r.visible }); load(); }
-    catch (e) { toast.error((e as Error).message); }
+    try {
+      await updateRegistry(r.id, { visible: !r.visible });
+      toast.success(`Registry '${r.name}' is now ${!r.visible ? "visible" : "hidden"}`);
+      await load();
+    } catch (e) { toast.error((e as Error).message); }
   }
 
   return (
