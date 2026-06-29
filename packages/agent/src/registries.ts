@@ -1,3 +1,7 @@
+import { mkdirSync, writeFileSync, renameSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+
 export interface RegistryWire {
   name: string;
   url: string;
@@ -30,4 +34,18 @@ export function renderRegistriesYaml(registries: RegistryWire[]): string {
     if (r.mods_subpath != null) lines.push(`  mods_subpath: ${q(r.mods_subpath)}`);
   }
   return lines.join("\n") + "\n";
+}
+
+/** Path sparkrun reads its registry list from (computed lazily so HOME is honored). */
+export function registriesConfigPath(): string {
+  return join(homedir(), ".config", "sparkrun", "registries.yaml");
+}
+
+/** Atomically write registries.yaml: render → temp file → rename. */
+export function writeRegistriesFile(registries: RegistryWire[]): void {
+  const path = registriesConfigPath();
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, renderRegistriesYaml(registries), "utf8");
+  renameSync(tmp, path);
 }

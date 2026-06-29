@@ -6,6 +6,7 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
 import { discoverRecipes } from "./recipes.js";
+import { writeRegistriesFile, type RegistryWire } from "./registries.js";
 import { untrackDeployment } from "./runtime/vllm.js";
 import { classifyDeadContainer, reconcileDeployStatus } from "./runtime/deploy-status.js";
 import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe, resolveHfHome } from "./runtime/sparkrun.js";
@@ -969,6 +970,19 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         sendMsg("agent:deployment:status", {
           deploymentId, status: "failed", error: String(err),
         });
+      }
+      break;
+    }
+
+    case "cmd:set-registries": {
+      const registries = (msg.payload?.registries ?? []) as RegistryWire[];
+      try {
+        writeRegistriesFile(registries);
+        const recipes = discoverRecipes();
+        sendMsg("agent:recipes", { recipes });
+        console.log(`Applied ${registries.length} registries; re-discovered ${recipes.length} recipes`);
+      } catch (err) {
+        console.error("cmd:set-registries failed:", err);
       }
       break;
     }
