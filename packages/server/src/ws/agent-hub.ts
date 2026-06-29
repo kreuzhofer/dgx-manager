@@ -7,6 +7,7 @@ import { metricsBuffer } from "../metrics-buffer.js";
 import type { HfCacheNodeInventory } from "../hf-cache/grouping.js";
 import { resolveNodeIp, isValidIpv4 } from "./node-ip.js";
 import { scheduleDebouncedReseed } from "../ssh/known-hosts-trigger.js";
+import { pushRegistriesToAgent } from "../registries/push.js";
 
 export interface OllamaModelInfo {
   name: string;
@@ -197,6 +198,10 @@ export class AgentHub {
             // A (re)connected agent may be a re-imaged node whose host key
             // changed — refresh the cluster known_hosts mesh (debounced + throttled).
             scheduleDebouncedReseed();
+            // Reconcile this node's sparkrun registries to the manager's source-of-truth set.
+            await pushRegistriesToAgent(this, nodeId!).catch((err) =>
+              console.error(`Failed to push registries to ${nodeId}:`, err),
+            );
             break;
           }
 
@@ -288,6 +293,10 @@ export class AgentHub {
             // A (re)connected agent may be a re-imaged node whose host key
             // changed — refresh the cluster known_hosts mesh (debounced + throttled).
             scheduleDebouncedReseed();
+            // Reconcile this node's sparkrun registries to the manager's source-of-truth set.
+            await pushRegistriesToAgent(this, nodeId).catch((err) =>
+              console.error(`Failed to push registries to ${nodeId}:`, err),
+            );
             break;
           }
 
