@@ -38,6 +38,8 @@ describe("renderRegistriesYaml", () => {
         description: fc.option(fc.string(), { nil: undefined }),
         visible: fc.option(fc.boolean(), { nil: undefined }),
         tuning_subpath: fc.option(fc.string({ minLength: 1 }), { nil: undefined }),
+        benchmark_subpath: fc.option(fc.string({ minLength: 1 }), { nil: undefined }),
+        mods_subpath: fc.option(fc.string({ minLength: 1 }), { nil: undefined }),
       }),
       { maxLength: 8 },
     ),
@@ -51,7 +53,16 @@ describe("renderRegistriesYaml", () => {
       expect(p.subpath).toBe(r.subpath);
       if (r.description != null) expect(p.description).toBe(r.description);
       if (r.tuning_subpath != null) expect(p.tuning_subpath).toBe(r.tuning_subpath);
+      if (r.benchmark_subpath != null) expect(p.benchmark_subpath).toBe(r.benchmark_subpath);
+      if (r.mods_subpath != null) expect(p.mods_subpath).toBe(r.mods_subpath);
       expect(p.visible === false).toBe(r.visible === false);
     });
+  });
+
+  it("escapes backslash before quote and carriage return correctly", () => {
+    const out = renderRegistriesYaml([
+      { name: "x", url: "https://h/r.git", subpath: "recipes", description: 'a \\ b "c" \r end' },
+    ]);
+    expect(parse(out).registries[0].description).toBe('a \\ b "c" \r end');
   });
 });

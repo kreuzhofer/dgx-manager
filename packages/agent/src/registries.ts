@@ -9,9 +9,9 @@ export interface RegistryWire {
   mods_subpath?: string;
 }
 
-/** Double-quote a scalar with YAML-safe escaping (backslash, quote, newline). */
+/** Double-quote a scalar with YAML-safe escaping (backslash, quote, newline, carriage return). */
 function q(s: string): string {
-  return '"' + s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n") + '"';
+  return '"' + s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r") + '"';
 }
 
 /** Render a sparkrun-compatible registries.yaml. Optional null/undefined fields
