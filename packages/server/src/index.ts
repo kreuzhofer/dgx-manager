@@ -19,6 +19,8 @@ import { datasetsRouter } from "./routes/datasets.js";
 import { benchmarksRouter } from "./routes/benchmarks.js";
 import { hfCacheRouter } from "./routes/hf-cache.js";
 import { clusterRouter } from "./routes/cluster.js";
+import { registriesRouter } from "./routes/registries.js";
+import { seedDefaultRegistries } from "./registries/seed.js";
 import { mountOpenApi } from "./openapi.js";
 import { prisma } from "./prisma.js";
 import { sseHandler } from "./sse.js";
@@ -69,6 +71,7 @@ app.use("/api/datasets", datasetsRouter);
 app.use("/api/benchmarks", benchmarksRouter);
 app.use("/api/hf-cache", hfCacheRouter);
 app.use("/api/cluster", clusterRouter);
+app.use("/api/registries", registriesRouter);
 
 // OpenAPI spec + Swagger UI
 mountOpenApi(app);
@@ -103,6 +106,13 @@ async function main() {
       completedAt: new Date(),
     },
   });
+
+  try {
+    const seeded = await seedDefaultRegistries(prisma);
+    if (seeded > 0) console.log(`Seeded ${seeded} default sparkrun registries`);
+  } catch (err) {
+    console.error("Skipping registry seed (table not ready — run `npm run db:push`):", err);
+  }
 
   const retentionDays = Number(process.env.METRIC_RETENTION_DAYS ?? 7);
   startMetricRetention({
