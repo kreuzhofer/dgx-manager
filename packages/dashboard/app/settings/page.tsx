@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import OnboardingCommand, { getServerHost } from "@/components/onboarding-command";
 import { OllamaModelsSection } from "@/components/ollama-models-section";
+import { RegistriesSection } from "@/components/registries-section";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 
@@ -128,6 +129,7 @@ export default function SettingsPage() {
         </div>
       </section>
 
+      <RegistriesSection />
       <OllamaModelsSection />
     </div>
   );

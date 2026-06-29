@@ -39,6 +39,33 @@ export async function reseedKnownHosts(): Promise<ReseedKnownHostsResult> {
   return res.json();
 }
 
+export interface SparkrunRegistry {
+  id: string;
+  name: string;
+  url: string;
+  subpath: string;
+  description: string | null;
+  visible: boolean;
+  tuningSubpath: string | null;
+  benchmarkSubpath: string | null;
+  modsSubpath: string | null;
+  sortOrder: number;
+}
+
+export type NewRegistry = Pick<SparkrunRegistry, "name" | "url" | "subpath"> &
+  Partial<Pick<SparkrunRegistry, "description" | "visible">>;
+
+export const listRegistries = () => apiFetch<SparkrunRegistry[]>("/api/registries");
+
+export const createRegistry = (body: NewRegistry) =>
+  apiFetch<SparkrunRegistry>("/api/registries", { method: "POST", body: JSON.stringify(body) });
+
+export const updateRegistry = (id: string, body: Partial<NewRegistry>) =>
+  apiFetch<SparkrunRegistry>(`/api/registries/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+
+export const deleteRegistry = (id: string) =>
+  apiFetch<{ status: string }>(`/api/registries/${id}`, { method: "DELETE" });
+
 export async function apiUpload<T>(path: string, formData: FormData): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
