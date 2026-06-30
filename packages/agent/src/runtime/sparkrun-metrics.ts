@@ -71,6 +71,44 @@ export function parseVllmMetrics(text: string): VllmMetrics {
 }
 
 /**
+ * Pure helper: determine the status string for a sparkrun deployment based on
+ * container liveness and vLLM API readiness.
+ *
+ * The vLLM HTTP server only binds after all weight shards are loaded and the
+ * engine is warmed up — a container that is running but whose /metrics endpoint
+ * hasn't responded 2xx yet is still in the loading phase, not serving traffic.
+ *
+ * containerRunning && apiReady  → "running"
+ * containerRunning && !apiReady → "starting"  (loading shards / warming up)
+ */
+export function sparkrunRunningStatus(
+  s: Pick<VllmStatus, "containerRunning" | "apiReady">
+): "running" | "starting" {
+  return s.containerRunning && s.apiReady ? "running" : "starting";
+}
+
+/**
+ * Parse vLLM's weight-shard load progress line:
+ *   "Loading safetensors checkpoint shards:  42% Completed | 35/83 [00:10<00:12, ...]"
+ *
+ * Handles variable spacing. Returns null when the line does not match.
+ */
+const LOADING_SHARDS_RE = /Loading safetensors checkpoint shards:\s+(\d+(?:\.\d+)?)%\s+Completed\s*\|\s*(\d+)\/(\d+)/;
+export function parseLoadingShards(line: string): {
+  percent: number;
+  current: number;
+  total: number;
+} | null {
+  const m = line.match(LOADING_SHARDS_RE);
+  if (!m) return null;
+  return {
+    percent: parseFloat(m[1]),
+    current: parseInt(m[2], 10),
+    total: parseInt(m[3], 10),
+  };
+}
+
+/**
  * Health-check all sparkrun-launched deployments tracked in the deployment
  * store. Uses `isWorkloadRunning` (check-job liveness) rather than `docker ps`,
  * and scrapes `/metrics` when the workload is alive.
@@ -142,19 +180,24 @@ export async function checkSparkrunDeployments(): Promise<VllmStatus[]> {
           `http://localhost:${d.port}/metrics`,
           { signal: AbortSignal.timeout(3000) },
         );
-        const text = await res.text();
-        const m = parseVllmMetrics(text);
-        status.requestsRunning = m.numRequestsRunning ?? null;
-        status.kvCacheUsage = m.kvCacheUsagePerc ?? null;
-        // tps = rate of the generation-tokens counter between this scrape and
-        // the previous one for this deployment.
-        if (m.generationTokensTotal != null) {
-          const curr: TokenSample = { total: m.generationTokensTotal, time: Date.now() };
-          status.tps = computeTps(prevTokens.get(d.deploymentId), curr);
-          prevTokens.set(d.deploymentId, curr);
+        // apiReady = true only when /metrics responds 2xx — vLLM binds the HTTP
+        // server only after all weight shards are loaded and the engine is ready.
+        status.apiReady = res.ok;
+        if (res.ok) {
+          const text = await res.text();
+          const m = parseVllmMetrics(text);
+          status.requestsRunning = m.numRequestsRunning ?? null;
+          status.kvCacheUsage = m.kvCacheUsagePerc ?? null;
+          // tps = rate of the generation-tokens counter between this scrape and
+          // the previous one for this deployment.
+          if (m.generationTokensTotal != null) {
+            const curr: TokenSample = { total: m.generationTokensTotal, time: Date.now() };
+            status.tps = computeTps(prevTokens.get(d.deploymentId), curr);
+            prevTokens.set(d.deploymentId, curr);
+          }
         }
       } catch {
-        // Metrics endpoint not ready yet — workload still alive, metrics null
+        // Metrics endpoint not ready yet — workload still alive, metrics null, apiReady falsy
       }
     }
 

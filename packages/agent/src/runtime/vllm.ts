@@ -7,6 +7,8 @@ export interface VllmStatus {
   port: number;
   alive: boolean;
   containerRunning: boolean;
+  /** True only when the vLLM HTTP server has bound and /metrics returned 2xx. */
+  apiReady?: boolean;
   requestsRunning: number | null;
   requestsWaiting: number | null;
   kvCacheUsage: number | null;

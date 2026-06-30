@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { parseVllmMetrics, firstErrorLine, computeTps } from "./sparkrun-metrics.js";
+import { parseVllmMetrics, firstErrorLine, computeTps, sparkrunRunningStatus, parseLoadingShards } from "./sparkrun-metrics.js";
 
 // Real Phase 0 shape: metric names carry {labels}; this vLLM uses kv_cache_usage_perc.
 const sample = `
@@ -108,6 +108,71 @@ describe("firstErrorLine", () => {
   });
 });
 
+// ── sparkrunRunningStatus ────────────────────────────────────────────────────
+
+describe("sparkrunRunningStatus", () => {
+  it("returns 'running' when container is running and API is ready", () => {
+    expect(sparkrunRunningStatus({ containerRunning: true, apiReady: true })).toBe("running");
+  });
+
+  it("returns 'starting' when container is running but API is not ready (still loading)", () => {
+    expect(sparkrunRunningStatus({ containerRunning: true, apiReady: false })).toBe("starting");
+  });
+
+  it("returns 'starting' when container is running and apiReady is undefined (fetch not yet attempted)", () => {
+    expect(sparkrunRunningStatus({ containerRunning: true, apiReady: undefined })).toBe("starting");
+  });
+
+  it("returns 'starting' when container is not running", () => {
+    expect(sparkrunRunningStatus({ containerRunning: false, apiReady: false })).toBe("starting");
+    expect(sparkrunRunningStatus({ containerRunning: false, apiReady: true })).toBe("starting");
+  });
+});
+
+// ── parseLoadingShards ───────────────────────────────────────────────────────
+
+describe("parseLoadingShards", () => {
+  it("parses a typical mid-progress shard-load line", () => {
+    const line = "Loading safetensors checkpoint shards:  42% Completed | 35/83 [00:10<00:12, 5.41it/s]";
+    const result = parseLoadingShards(line);
+    expect(result).not.toBeNull();
+    expect(result!.percent).toBeCloseTo(42);
+    expect(result!.current).toBe(35);
+    expect(result!.total).toBe(83);
+  });
+
+  it("parses a 0% line (first tick)", () => {
+    const line = "Loading safetensors checkpoint shards:   0% Completed | 0/83 [00:00<?, ?it/s]";
+    const result = parseLoadingShards(line);
+    expect(result).not.toBeNull();
+    expect(result!.percent).toBe(0);
+    expect(result!.current).toBe(0);
+    expect(result!.total).toBe(83);
+  });
+
+  it("parses a 100% line (final tick)", () => {
+    const line = "Loading safetensors checkpoint shards: 100% Completed | 83/83 [01:12<00:00, 1.15it/s]";
+    const result = parseLoadingShards(line);
+    expect(result).not.toBeNull();
+    expect(result!.percent).toBe(100);
+    expect(result!.current).toBe(83);
+    expect(result!.total).toBe(83);
+  });
+
+  it("is tolerant of variable spacing before the percentage", () => {
+    const tight = "Loading safetensors checkpoint shards: 5% Completed | 4/83 [00:01<00:15]";
+    const wide  = "Loading safetensors checkpoint shards:     5% Completed | 4/83 [00:01<00:15]";
+    expect(parseLoadingShards(tight)).not.toBeNull();
+    expect(parseLoadingShards(wide)).not.toBeNull();
+  });
+
+  it("returns null for a non-matching line", () => {
+    expect(parseLoadingShards("Fetching 56 files:  42%|▏| 23/56 [00:05<00:10]")).toBeNull();
+    expect(parseLoadingShards("INFO: Loading model...")).toBeNull();
+    expect(parseLoadingShards("")).toBeNull();
+  });
+});
+
 // ── checkSparkrunDeployments tests ──────────────────────────────────────────
 
 const { loadDeploymentsMock, isWorkloadRunningMock, inspectSparkrunContainerMock, captureCrashedContainerLogsMock, fetchMock } = vi.hoisted(() => ({
@@ -169,6 +234,7 @@ describe("checkSparkrunDeployments", () => {
     expect(s.deploymentId).toBe("dep-1");
     expect(s.alive).toBe(true);
     expect(s.containerRunning).toBe(true);
+    expect(s.apiReady).toBe(true);
     expect(s.requestsRunning).toBe(5);
     expect(s.kvCacheUsage).toBeCloseTo(0.42);
     expect(s.port).toBe(8000);
@@ -216,6 +282,8 @@ describe("checkSparkrunDeployments", () => {
     // Alive (workload running) but metrics endpoint not yet ready
     expect(s.alive).toBe(true);
     expect(s.containerRunning).toBe(true);
+    // apiReady must be falsy when the fetch throws (endpoint not bound yet)
+    expect(s.apiReady).toBeFalsy();
     expect(s.requestsRunning).toBeNull();
   });
 

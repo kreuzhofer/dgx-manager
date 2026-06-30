@@ -11,7 +11,7 @@ import { untrackDeployment } from "./runtime/vllm.js";
 import { classifyDeadContainer, reconcileDeployStatus } from "./runtime/deploy-status.js";
 import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe, resolveHfHome } from "./runtime/sparkrun.js";
 import { buildInventory, deleteCachedRepo, type RepoKind } from "./runtime/hf-cache.js";
-import { checkSparkrunDeployments } from "./runtime/sparkrun-metrics.js";
+import { checkSparkrunDeployments, sparkrunRunningStatus, parseLoadingShards } from "./runtime/sparkrun-metrics.js";
 import { loadDeployments, saveDeployment } from "./runtime/deployment-store.js";
 import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth } from "./runtime/ollama.js";
 import { discoverTrainingRecipes } from "./training-recipes.js";
@@ -296,7 +296,9 @@ function connect() {
               untrackDeployment(status.deploymentId);
             }
           } else if (status.containerRunning) {
-            // Report vramActual for running vLLM containers
+            // Report status for vLLM containers: "running" only once the API is
+            // ready (apiReady===true), "starting" while shards are still loading.
+            const deployStatus = sparkrunRunningStatus(status);
             const m = await collectMetrics();
             if (m.vramUsed > 0) {
               const prevVram = vllmLastVram.get(status.deploymentId);
@@ -305,8 +307,9 @@ function connect() {
                 vllmLastVram.set(status.deploymentId, m.vramUsed);
                 sendMsg("agent:deployment:status", {
                   deploymentId: status.deploymentId,
-                  status: "running",
-                  port: status.port,
+                  status: deployStatus,
+                  // Only advertise the port once the API server is actually bound.
+                  port: deployStatus === "running" ? status.port : undefined,
                   vramActual: m.vramUsed,
                 });
               }
@@ -507,7 +510,19 @@ function collapseCarriageReturns(chunk: string): string {
 // Per-deployment throttle for progress emissions. tqdm fires many times a
 // second; we cap to ~1/sec to keep the WS quiet without losing fidelity.
 const lastProgressEmit = new Map<string, number>();
-function emitDeploymentProgress(deploymentId: string, progress: ReturnType<typeof parseFetchingProgress>) {
+
+type ProgressData = { percent: number; current: number; total: number; elapsed?: string; eta?: string };
+
+/**
+ * Emit a throttled `agent:deployment:progress` message for either the
+ * "downloading" (HuggingFace fetch) or "loading" (vLLM shard load) phase.
+ * Emits at most once per second, but always lets the first and 100% ticks through.
+ */
+function emitDeploymentProgress(
+  deploymentId: string,
+  phase: "downloading" | "loading",
+  progress: ProgressData | null,
+) {
   if (!progress) return;
   const now = Date.now();
   const last = lastProgressEmit.get(deploymentId) || 0;
@@ -516,12 +531,12 @@ function emitDeploymentProgress(deploymentId: string, progress: ReturnType<typeo
   lastProgressEmit.set(deploymentId, now);
   sendMsg("agent:deployment:progress", {
     deploymentId,
-    phase: "downloading",
+    phase,
     phaseProgress: progress.percent,
     current: progress.current,
     total: progress.total,
-    elapsed: progress.elapsed,
-    eta: progress.eta,
+    ...(progress.elapsed !== undefined && { elapsed: progress.elapsed }),
+    ...(progress.eta !== undefined && { eta: progress.eta }),
   });
 }
 
@@ -630,8 +645,11 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
               const cleaned = collapseCarriageReturns(line);
               sendMsg("agent:deployment:log", { deploymentId, log: cleaned });
 
-              const progress = parseFetchingProgress(line);
-              if (progress) emitDeploymentProgress(deploymentId, progress);
+              const fetchProgress = parseFetchingProgress(line);
+              if (fetchProgress) emitDeploymentProgress(deploymentId, "downloading", fetchProgress);
+
+              const loadProgress = parseLoadingShards(line);
+              if (loadProgress) emitDeploymentProgress(deploymentId, "loading", loadProgress);
 
               const phase = detectPhase(line);
               if (phase && phase !== lastPhase) {
@@ -937,8 +955,11 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             const cleaned = collapseCarriageReturns(line);
             sendMsg("agent:deployment:log", { deploymentId, log: cleaned });
 
-            const progress = parseFetchingProgress(line);
-            if (progress) emitDeploymentProgress(deploymentId, progress);
+            const fetchProgress = parseFetchingProgress(line);
+            if (fetchProgress) emitDeploymentProgress(deploymentId, "downloading", fetchProgress);
+
+            const loadProgress = parseLoadingShards(line);
+            if (loadProgress) emitDeploymentProgress(deploymentId, "loading", loadProgress);
 
             const phase = detectPhase(line);
             if (phase && phase !== lastPhase) {
