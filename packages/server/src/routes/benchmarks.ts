@@ -11,7 +11,7 @@ import {
 } from "../benchmarks/presets.js";
 import { buildBenchyArgs } from "../benchmarks/args.js";
 import { buildToolEvalArgs } from "../benchmarks/tool-eval-args.js";
-import { deploymentEndpointUrl } from "../benchmarks/endpoint.js";
+import { deploymentEndpointUrl, resolveServedModelName } from "../benchmarks/endpoint.js";
 import {
   runBenchmark,
   runToolEval,
@@ -312,7 +312,13 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
   } catch (e) {
     return res.status(409).json({ error: (e as Error).message });
   }
-  const servedModelName = deployment.displayName ?? deployment.model.name;
+  // Ask the running endpoint what it actually serves — vLLM uses the recipe's
+  // --served-model-name, which may differ from displayName/model.name. Falls
+  // back to those if the endpoint isn't reachable yet.
+  const servedModelName = await resolveServedModelName(
+    endpointUrl,
+    deployment.displayName ?? deployment.model.name,
+  );
 
   const run = await prisma.benchmarkRun.create({
     data: {

@@ -5,7 +5,7 @@ import { hostname as osHostname, homedir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
-import { discoverRecipes } from "./recipes.js";
+import { discoverRecipes, updateRegistries } from "./recipes.js";
 import { writeRegistriesFile, type RegistryWire } from "./registries.js";
 import { untrackDeployment } from "./runtime/vllm.js";
 import { classifyDeadContainer, reconcileDeployStatus } from "./runtime/deploy-status.js";
@@ -1011,8 +1011,11 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
     case "cmd:rescan-recipes": {
       // Re-scan local recipe directories on demand. Without this, recipes
       // added to the NFS share after agent startup stay invisible until
-      // the agent reconnects.
+      // the agent reconnects. Pull the registries from git first so edits to
+      // existing recipes are reflected (sparkrun list/run use cached clones
+      // that are never auto-pulled).
       try {
+        updateRegistries();
         const recipes = discoverRecipes();
         sendMsg("agent:recipes", { recipes });
         const trainingRecipes = discoverTrainingRecipes();

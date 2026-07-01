@@ -36,6 +36,29 @@ export function toRecipe(s: SparkrunRecipeSummary): Recipe {
   };
 }
 
+/**
+ * Re-pull the recipe registries from git (`sparkrun registry update`).
+ *
+ * `sparkrun list` reads whatever is in sparkrun's cached registry clones and
+ * does NOT `git pull` them, and `sparkrun run` reads the same clones — so after
+ * a recipe is edited upstream, a plain rescan surfaces the old content and a
+ * deploy launches the stale recipe. Calling this before discovery makes
+ * `POST /api/recipes/refresh` actually reflect (and deploy) the latest recipes.
+ * Best-effort: logs and returns on failure rather than aborting the rescan.
+ */
+export function updateRegistries(): void {
+  try {
+    execFileSync(
+      "uvx",
+      ["--from", SPARKRUN_PKG, "sparkrun", "registry", "update"],
+      { encoding: "utf8", timeout: 60_000 },
+    );
+    console.log("Updated sparkrun recipe registries from git");
+  } catch (err) {
+    console.error("Failed to update sparkrun registries:", err);
+  }
+}
+
 /** Discover available recipes by running `sparkrun list --json`. */
 export function discoverRecipes(): Recipe[] {
   try {

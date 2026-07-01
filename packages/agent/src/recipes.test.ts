@@ -6,7 +6,8 @@ vi.mock("node:child_process", () => ({
     { name: "@reg/big", file: "big", model: "X", runtime: "vllm", min_nodes: 2, tp: 2, gpu_mem: "", registry: "reg" },
   ])),
 }));
-import { discoverRecipes, toRecipe } from "./recipes.js";
+import { execFileSync } from "node:child_process";
+import { discoverRecipes, toRecipe, updateRegistries, SPARKRUN_PKG } from "./recipes.js";
 import type { SparkrunRecipeSummary } from "./runtime/sparkrun-parse.js";
 
 describe("toRecipe", () => {
@@ -23,6 +24,25 @@ describe("toRecipe", () => {
       gpuMemDefault: 0.85,
     };
     expect(toRecipe(summary).arch).toBe("arm64");
+  });
+});
+
+describe("updateRegistries", () => {
+  it("runs `sparkrun registry update` to re-pull registries from git", () => {
+    vi.mocked(execFileSync).mockClear();
+    updateRegistries();
+    expect(execFileSync).toHaveBeenCalledWith(
+      "uvx",
+      ["--from", SPARKRUN_PKG, "sparkrun", "registry", "update"],
+      expect.any(Object),
+    );
+  });
+
+  it("does not throw when the update command fails (best-effort)", () => {
+    vi.mocked(execFileSync).mockImplementationOnce(() => {
+      throw new Error("network down");
+    });
+    expect(() => updateRegistries()).not.toThrow();
   });
 });
 
