@@ -98,6 +98,18 @@ model Deployment {
   benchmarkRuns BenchmarkRun[]
 }
 
+// Durable "last deployed" timestamp per HF-cache repo. Deployment rows get
+// hard-deleted as part of the normal cleanup workflow, which erased the only
+// source the models page had for last-deployed — so every cached repo showed
+// "—". This table is upserted at deploy time and survives that deletion.
+// Keyed by a lowercased model-candidate string (the resolved HF repo id, plus
+// harmless extras like Ollama tags / recipe slugs that simply never match a
+// cache repo). Match is exact case-insensitive equality against repoId.
+model RepoDeployment {
+  repoId         String   @id
+  lastDeployedAt DateTime
+}
+
 model ClusterNode {
   id           String     @id @default(cuid())
   deploymentId String

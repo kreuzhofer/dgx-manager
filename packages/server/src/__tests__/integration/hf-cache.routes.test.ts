@@ -12,6 +12,8 @@ process.env.DATABASE_URL = `file:${DB_PATH}`;
 
 let prisma: typeof import("../../prisma.js").prisma;
 let hfCacheRouter: typeof import("../../routes/hf-cache.js").hfCacheRouter;
+let recordRepoDeployment: typeof import("../../hf-cache/repo-deployment.js").recordRepoDeployment;
+let loadRepoLastDeployed: typeof import("../../hf-cache/repo-deployment.js").loadRepoLastDeployed;
 
 beforeAll(async () => {
   execSync("npx prisma db push --force-reset", {
@@ -26,6 +28,7 @@ beforeAll(async () => {
   });
   ({ prisma } = await import("../../prisma.js"));
   ({ hfCacheRouter } = await import("../../routes/hf-cache.js"));
+  ({ recordRepoDeployment, loadRepoLastDeployed } = await import("../../hf-cache/repo-deployment.js"));
 });
 
 afterAll(async () => {
@@ -40,6 +43,7 @@ beforeEach(async () => {
   await prisma.model.deleteMany({});
   await prisma.fineTuneJob.deleteMany({});
   await prisma.node.deleteMany({});
+  await prisma.repoDeployment.deleteMany({});
 });
 
 /** Minimal stand-in for AgentHub — only what the router touches. */
@@ -177,6 +181,42 @@ describe("GET /api/hf-cache", () => {
     expect(r.inUse).toBe(true);
   });
 
+  it("shows lastDeployedAt from the durable RepoDeployment table with NO live deployment (the bug)", async () => {
+    // Reproduces the reported bug: the deployment was created then deleted (the
+    // cleanup workflow hard-deletes rows), so there is no Deployment/Model row
+    // left — yet the repo must still show when it was last deployed.
+    const node = await prisma.node.create({ data: { name: "spark-1" } });
+    await prisma.repoDeployment.create({
+      data: { repoId: "qwen/qwen3-32b-awq", lastDeployedAt: new Date("2026-06-20T12:00:00.000Z") },
+    });
+    const hub = makeHub();
+    hub.inventories = [inv(node.id, "shared", [repo("Qwen/Qwen3-32B-AWQ")])];
+
+    const res = await request(makeApp(hub)).get("/api/hf-cache");
+    const r = res.body.caches[0].repos.find((x: { repoId: string }) => x.repoId === "Qwen/Qwen3-32B-AWQ");
+    // Case-insensitive lookup against the lowercased key, and no live deployment.
+    expect(r.lastDeployedAt).toBe("2026-06-20T12:00:00.000Z");
+    expect(r.inUse).toBe(false);
+  });
+
+  it("takes the newer of the live-deployment date and the durable record", async () => {
+    const node = await prisma.node.create({ data: { name: "spark-1" } });
+    const model = await prisma.model.create({ data: { name: "org/alpha", runtime: "vllm" } });
+    await prisma.deployment.create({
+      data: { nodeId: node.id, modelId: model.id, status: "running", displayName: "alpha" },
+    });
+    // Durable record is OLDER than the live deployment (createdAt ~ now).
+    await prisma.repoDeployment.create({
+      data: { repoId: "org/alpha", lastDeployedAt: new Date("2020-01-01T00:00:00.000Z") },
+    });
+    const hub = makeHub();
+    hub.inventories = [inv(node.id, "shared", [repo("org/alpha")])];
+
+    const res = await request(makeApp(hub)).get("/api/hf-cache");
+    const r = res.body.caches[0].repos.find((x: { repoId: string }) => x.repoId === "org/alpha");
+    expect(new Date(r.lastDeployedAt).getTime()).toBeGreaterThan(new Date("2020-01-01T00:00:00.000Z").getTime());
+  });
+
   it("returns an empty caches list when no agent has reported", async () => {
     const res = await request(makeApp(makeHub())).get("/api/hf-cache");
     expect(res.status).toBe(200);
@@ -202,6 +242,26 @@ describe("GET /api/hf-cache", () => {
     const r = cache.repos.find((x: { repoId: string }) => x.repoId === "org/alpha");
     expect(r.inUse).toBe(true);
     expect(r.inUseBy).toEqual(["tp-prod"]);
+  });
+});
+
+describe("recordRepoDeployment / loadRepoLastDeployed", () => {
+  it("round-trips keys and keeps the newest timestamp on re-record", async () => {
+    await recordRepoDeployment(prisma, ["org/alpha", "org/beta"], new Date("2026-06-01T00:00:00.000Z"));
+    let map = await loadRepoLastDeployed(prisma);
+    expect(map.get("org/alpha")).toBe("2026-06-01T00:00:00.000Z");
+    expect(map.get("org/beta")).toBe("2026-06-01T00:00:00.000Z");
+
+    // A later deploy overwrites with the newer date.
+    await recordRepoDeployment(prisma, ["org/alpha"], new Date("2026-06-15T00:00:00.000Z"));
+    map = await loadRepoLastDeployed(prisma);
+    expect(map.get("org/alpha")).toBe("2026-06-15T00:00:00.000Z");
+    expect(map.get("org/beta")).toBe("2026-06-01T00:00:00.000Z");
+  });
+
+  it("no-ops on an empty key set", async () => {
+    await recordRepoDeployment(prisma, [], new Date("2026-06-01T00:00:00.000Z"));
+    expect((await loadRepoLastDeployed(prisma)).size).toBe(0);
   });
 });
 

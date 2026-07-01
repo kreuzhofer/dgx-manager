@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { fc, it as fcIt } from "@fast-check/vitest";
 import {
-  groupInventories, matchRepoToModels, deploymentModelCandidates, repoUsage,
+  groupInventories, matchRepoToModels, deploymentModelCandidates, deploymentRepoKeys,
+  newerIso, repoUsage,
   type HfCacheNodeInventory, type DeploymentUsage,
 } from "./grouping.js";
 
@@ -72,6 +73,41 @@ describe("deploymentModelCandidates", () => {
 
   it("handles nulls", () => {
     expect(deploymentModelCandidates(null, null)).toEqual([]);
+  });
+});
+
+describe("deploymentRepoKeys", () => {
+  it("collects all four sources, lowercased and deduped", () => {
+    expect(
+      deploymentRepoKeys(
+        "Recipe-Slug",
+        JSON.stringify({ modelName: "Org/Alpha", recipeFile: "recipes/x.yaml" }),
+        "Org/Alpha", // recipe HF id — dupes config.modelName after lowercasing
+        "Org/Base",
+      ).sort(),
+    ).toEqual(["org/alpha", "org/base", "recipe-slug"]);
+  });
+
+  it("drops empties and survives all-null input", () => {
+    expect(deploymentRepoKeys(null, null, null, null)).toEqual([]);
+    expect(deploymentRepoKeys("", "{}", "", "")).toEqual([]);
+  });
+
+  it("includes the recipe HF id for a registry-ref deploy whose Model.name is a slug", () => {
+    // The exact bug scenario: Model.name is the recipe slug, cached repo is the HF id.
+    const keys = deploymentRepoKeys("gemma4-26b-a4b", JSON.stringify({ recipeFile: "recipes/g.yaml" }),
+      "google/gemma-4-26B-A4B-it", null);
+    expect(keys).toContain("google/gemma-4-26b-a4b-it");
+  });
+});
+
+describe("newerIso", () => {
+  it("returns the later timestamp, tolerating nulls on either side", () => {
+    expect(newerIso("2026-05-01T00:00:00.000Z", "2026-06-01T00:00:00.000Z")).toBe("2026-06-01T00:00:00.000Z");
+    expect(newerIso("2026-06-01T00:00:00.000Z", "2026-05-01T00:00:00.000Z")).toBe("2026-06-01T00:00:00.000Z");
+    expect(newerIso(null, "2026-06-01T00:00:00.000Z")).toBe("2026-06-01T00:00:00.000Z");
+    expect(newerIso("2026-06-01T00:00:00.000Z", null)).toBe("2026-06-01T00:00:00.000Z");
+    expect(newerIso(null, null)).toBeNull();
   });
 });
 

@@ -2,8 +2,9 @@ import { Router } from "express";
 import { prisma } from "../prisma.js";
 import type { AgentHub } from "../ws/agent-hub.js";
 import {
-  deploymentModelCandidates, groupInventories, repoUsage, type DeploymentUsage,
+  deploymentModelCandidates, groupInventories, newerIso, repoUsage, type DeploymentUsage,
 } from "../hf-cache/grouping.js";
+import { loadRepoLastDeployed } from "../hf-cache/repo-deployment.js";
 
 export const hfCacheRouter = Router();
 
@@ -74,6 +75,10 @@ hfCacheRouter.get("/", async (req, res) => {
   const agentHub: AgentHub = req.app.get("agentHub");
   const groups = groupInventories(agentHub.getHfCacheInventories());
   const usage = await loadDeploymentUsage(agentHub);
+  // Durable last-deployed, keyed by lowercased repo id. Survives Deployment-row
+  // deletion (the live `usage` above only reflects deployments that still
+  // exist), so a repo deployed-then-torn-down still shows a date.
+  const persistedLastDeployed = await loadRepoLastDeployed(prisma);
   const nodes = await prisma.node.findMany({ select: { id: true, name: true } });
   const nameById = new Map(nodes.map((n) => [n.id, n.name]));
 
@@ -91,10 +96,16 @@ hfCacheRouter.get("/", async (req, res) => {
       totalBytes: group.newest.totalBytes,
       diskFreeBytes: group.newest.diskFreeBytes,
       error: group.newest.error,
-      repos: group.newest.repos.map((r) => ({
-        ...r,
-        ...repoUsage(r.repoId, groupNodeIds, usage),
-      })),
+      repos: group.newest.repos.map((r) => {
+        const use = repoUsage(r.repoId, groupNodeIds, usage);
+        return {
+          ...r,
+          ...use,
+          // Newer of the live-deployment date and the durable record — either
+          // may be absent (no live deploy, or recorded before this table existed).
+          lastDeployedAt: newerIso(use.lastDeployedAt, persistedLastDeployed.get(r.repoId.toLowerCase()) ?? null),
+        };
+      }),
     };
   });
   res.json({ caches });

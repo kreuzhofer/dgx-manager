@@ -12,6 +12,8 @@ import { normalizeDisplayName, validateDisplayNameUnique, DisplayNameError } fro
 import { isValidVariantSlug } from "./finetune.js";
 import { resolveRecipePath } from "../deployments/recipe-path.js";
 import { validateInlineRecipe, parseInlineRecipeModel } from "../deployments/recipe-inline.js";
+import { deploymentRepoKeys } from "../hf-cache/grouping.js";
+import { recordRepoDeployment } from "../hf-cache/repo-deployment.js";
 
 export const deploymentsRouter = Router();
 
@@ -406,6 +408,25 @@ deploymentsRouter.post("/", async (req, res) => {
 
   // Send deploy command to head agent
   const agentHub: AgentHub = req.app.get("agentHub");
+
+  // Durably record last-deployed for this deployment's HF repo id(s), so the
+  // models page keeps showing a date after the Deployment row is deleted.
+  // Resolves the recipe's HF id (registry-ref vLLM) and the fine-tune base
+  // model, matching the candidate set the in-use guard uses.
+  const recipeModel = agentHub.getRecipes().find((r) => r.file === recipeFile)?.model ?? null;
+  let finetuneBaseModel: string | null = null;
+  if (model.finetuneJobId) {
+    const job = await prisma.fineTuneJob.findUnique({
+      where: { id: model.finetuneJobId }, select: { baseModel: true },
+    });
+    finetuneBaseModel = job?.baseModel ?? null;
+  }
+  await recordRepoDeployment(
+    prisma,
+    deploymentRepoKeys(model.name, deployment.config, recipeModel, finetuneBaseModel),
+    deployment.createdAt,
+  );
+
   agentHub.sendToAgent(headNodeId, {
     type: "cmd:deploy",
     payload: {

@@ -85,6 +85,34 @@ export function deploymentModelCandidates(
   return out;
 }
 
+/** The lowercased, deduped set of repo-id keys a deployment should be recorded
+ *  under in the durable RepoDeployment table. Same four sources the in-use
+ *  guard matches on — Model.name, config.modelName, the recipe's resolved HF
+ *  id, and any fine-tune base model — normalized to lowercase so lookups match
+ *  matchRepoToModels' case-insensitivity. Empties dropped. Recording extra
+ *  non-HF strings (Ollama tags, recipe slugs) is harmless: they never equal a
+ *  cache repo id, so they never surface a last-deployed value. */
+export function deploymentRepoKeys(
+  modelName: string | null | undefined,
+  configJson: string | null | undefined,
+  recipeModel: string | null | undefined,
+  finetuneBaseModel: string | null | undefined,
+): string[] {
+  const raw = deploymentModelCandidates(modelName, configJson);
+  if (recipeModel) raw.push(recipeModel);
+  if (finetuneBaseModel) raw.push(finetuneBaseModel);
+  return [...new Set(raw.map((s) => s.toLowerCase()).filter((s) => s.length > 0))];
+}
+
+/** The later of two nullable ISO-8601 timestamps (string comparison is correct
+ *  for same-offset ISO). Used to merge the live-deployment lastDeployedAt with
+ *  the durable RepoDeployment value — either may be newer or absent. */
+export function newerIso(a: string | null, b: string | null): string | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return a >= b ? a : b;
+}
+
 export interface DeploymentUsage {
   status: string;
   nodeId: string;
