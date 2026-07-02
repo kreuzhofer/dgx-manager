@@ -181,7 +181,7 @@ export default function BenchmarksPage() {
                   <th className="px-4 py-3">Preset</th>
                   <th className="px-4 py-3">Kind</th>
                   <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3 text-right">Mean t/s</th>
+                  <th className="px-4 py-3 text-right">Decode t/s</th>
                   <th className="px-4 py-3 text-right">Mean TTFR</th>
                   <th className="px-4 py-3 w-32"></th>
                 </tr>

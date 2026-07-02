@@ -78,13 +78,19 @@ describe("parseBenchyResults", () => {
 });
 
 describe("summarizeResults", () => {
-  it("computes mean tps and mean ttfr across all rows", () => {
+  it("computes mean tps over decode (tg) rows only — prefill must not inflate it", () => {
     const rows = parseBenchyResults(fixture);
     const summary = summarizeResults(rows);
-    // 4 rows, tps: (1840.4 + 84.5 + 880.0 + 220.3) / 4 = 756.3
-    expect(summary.meanTps).toBeCloseTo(756.3, 1);
-    // ttfr is per-workload (shared by pp+tg rows): (142.3 + 142.3 + 410.0 + 410.0) / 4 = 276.15
+    // fixture tg rows tps: (84.5 + 220.3) / 2 = 152.4 — NOT the pp+tg blend 756.3
+    expect(summary.meanTps).toBeCloseTo(152.4, 1);
+    // ttfr is per-workload (identical on the pp and tg rows of a workload):
+    // (142.3 + 410.0) / 2 = 276.15
     expect(summary.meanTtfrMs).toBeCloseTo(276.15, 1);
+  });
+
+  it("returns null meanTps when there are no tg rows", () => {
+    const rows = parseBenchyResults(fixture).filter((r) => r.opType === "pp");
+    expect(summarizeResults(rows).meanTps).toBeNull();
   });
 
   it("returns nulls when given no rows", () => {

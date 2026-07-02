@@ -100,11 +100,19 @@ export function summarizeResults(rows: BenchmarkResultInput[]): {
   meanTtfrMs: number | null;
 } {
   if (rows.length === 0) return { meanTps: null, meanTtfrMs: null };
+  // meanTps is a DECODE metric: average tg rows only. Averaging prefill tps
+  // into it produced numbers like "35.8 tok/s" for a model that generates at
+  // 4.6 tok/s (benchmark cmr1a4tm02pp136k42hhf2d9u).
+  const tgRows = rows.filter((r) => r.opType === "tg");
   const meanTps =
-    rows.reduce((acc, r) => acc + r.tps, 0) / rows.length;
-  const ttfrRows = rows.filter((r) => r.ttfrMs !== null) as Array<
-    BenchmarkResultInput & { ttfrMs: number }
-  >;
+    tgRows.length === 0
+      ? null
+      : tgRows.reduce((acc, r) => acc + r.tps, 0) / tgRows.length;
+  // ttfr is per-workload (shared by a workload's pp and tg rows) — average it
+  // over the same tg rows so both summary metrics describe the same set.
+  const ttfrRows = (tgRows.length > 0 ? tgRows : rows).filter(
+    (r) => r.ttfrMs !== null,
+  ) as Array<BenchmarkResultInput & { ttfrMs: number }>;
   const meanTtfrMs =
     ttfrRows.length === 0
       ? null

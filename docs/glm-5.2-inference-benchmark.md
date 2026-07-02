@@ -11,7 +11,9 @@ Served as: `glm-5.2` — deployed and benchmarked through the dgx-manager API
 **GLM-5.2 runs on the 4-Spark cluster** and is genuinely strong at tool use.
 
 - **Tool-eval: 97 / 100 — ★★★★★ Excellent** (`tool-eval-quick` preset)
-- **Throughput: 35.8 tok/s**, TTFR 1552 ms (`quick-smoke` preset, cudagraph FULL, c=1)
+- **Decode: 4.6 tok/s** (prefill 67 tok/s), TTFR 1552 ms (`quick-smoke`, cudagraph FULL, c=1) —
+  the previously reported "35.8 tok/s" was a prefill+decode blend from a since-fixed
+  `meanTps` bug. See `2026-07-02-glm52-decode-perf.md` for the fix plan (MTP → 20+ tok/s).
 - Tool calling, reasoning parser, and 32K context all work end-to-end
 - Requires a **custom image** — the stock eugr-nightly image cannot run the DSA indexer
   (missing sm_121 DeepGEMM kernels). Build: [glm-5.2-custom-image-build.md](./glm-5.2-custom-image-build.md)
@@ -31,7 +33,8 @@ max-model-len 32768.
 
 | metric | value |
 |---|---|
-| mean tok/s | **35.81** |
+| decode tok/s | **4.56** (peak 6.0) |
+| prefill tok/s | 67.1 |
 | mean TTFR | **1552 ms** |
 
 cudagraph FULL (with b12x) roughly 4–7× the eager-mode rate observed on earlier stock-image
