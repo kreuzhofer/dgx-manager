@@ -49,6 +49,61 @@ export interface PrereqCheck {
   detail: string;
 }
 
+// ---------------------------------------------------------------------------
+// Ollama command-string builders + audit parsing (pure, exported for tests)
+// ---------------------------------------------------------------------------
+
+/**
+ * Audit: is the Ollama binary installed, independent of service run-state?
+ * Fleet policy keeps the ollama service disabled (unauthenticated :11434),
+ * so a stopped-but-installed Ollama must still count as installed.
+ *
+ * Output (only when the binary exists): a version line ("0.20.3") followed
+ * by the systemd active-state line ("active" / "inactive" / ...). Empty
+ * output means not installed.
+ */
+export function ollamaAuditCmd(): string {
+  return `if command -v ollama >/dev/null 2>&1; then ollama --version 2>&1 | grep -oP 'version is \\K[0-9.]+'; systemctl is-active ollama 2>/dev/null || true; fi`;
+}
+
+/** Parse ollamaAuditCmd() output into the Ollama prerequisite check. */
+export function evalOllamaAudit(stdout: string): PrereqCheck {
+  const lines = stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) {
+    return { name: "Ollama", status: "yellow", detail: "Not installed — can auto-install" };
+  }
+  const version = lines.find((l) => /^[0-9][0-9.]*$/.test(l));
+  const serviceActive = lines.includes("active");
+  return {
+    name: "Ollama",
+    status: "green",
+    detail: `${version ? `v${version}` : "installed (version unknown)"} (service ${serviceActive ? "running" : "stopped"})`,
+  };
+}
+
+/**
+ * Install Ollama with the NFS models dir + OLLAMA_HOST drop-in, WITHOUT
+ * boot auto-start. Ollama's :11434 API is unauthenticated; fleet policy is
+ * autostart disabled everywhere, so the final step is `systemctl disable`.
+ * The service is deliberately NOT stopped — it stays in whatever run-state
+ * the installer left it in for this boot (an Ollama deploy may use it).
+ */
+export function ollamaInstallCmd(sshUser: string): string {
+  return [
+    "curl -fsSL https://ollama.ai/install.sh | sh",
+    // Ensure systemd service exists with OLLAMA_MODELS on NFS
+    "sudo mkdir -p /etc/systemd/system/ollama.service.d",
+    `echo -e '[Service]\\nUser=${sshUser}\\nEnvironment=HOME=/home/${sshUser}\\nEnvironment=OLLAMA_MODELS=${SHARED_STORAGE}/models/ollama\\nEnvironment=OLLAMA_HOST=0.0.0.0\\nEnvironment=OLLAMA_MAX_LOADED_MODELS=0' | sudo tee /etc/systemd/system/ollama.service.d/override.conf`,
+    "sudo systemctl daemon-reload",
+    "sudo systemctl restart ollama",
+    // No autostart on boot (installer enables it by default — undo that).
+    "sudo systemctl disable ollama",
+  ].join(" && ");
+}
+
 export interface ProvisionReport {
   reachable: boolean;
   sudoAvailable: boolean;
@@ -156,13 +211,12 @@ export async function auditNode(host: string, nodeId?: string): Promise<Provisio
       }),
     },
     {
+      // Detects the binary, not the HTTP API — fleet policy keeps the
+      // ollama service disabled (unauthenticated :11434), so installed-
+      // but-stopped must still report green.
       name: "Ollama",
-      cmd: "curl -sf --max-time 2 http://localhost:11434/api/tags > /dev/null 2>&1 && ollama --version 2>&1 | grep -oP 'version is \\K[0-9.]+' || echo ''",
-      eval: (r) => ({
-        name: "Ollama",
-        status: r.code === 0 && r.stdout.trim() ? "green" : "yellow",
-        detail: r.code === 0 && r.stdout.trim() ? `v${r.stdout.trim()} (running)` : "Not running — install or start service",
-      }),
+      cmd: ollamaAuditCmd(),
+      eval: (r) => evalOllamaAudit(r.stdout),
     },
     {
       name: `NFS ${SHARED_STORAGE}`,
@@ -258,15 +312,7 @@ export async function provisionNode(host: string, checks: PrereqCheck[], nodeId?
         r = await sshExec(host, "curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs", { timeout: 120_000 });
         break;
       case "Ollama":
-        r = await sshExec(host, [
-          "curl -fsSL https://ollama.ai/install.sh | sh",
-          // Ensure systemd service exists with OLLAMA_MODELS on NFS
-          "sudo mkdir -p /etc/systemd/system/ollama.service.d",
-          `echo -e '[Service]\\nUser=${process.env.SSH_USER || "ubuntu"}\\nEnvironment=HOME=/home/${process.env.SSH_USER || "ubuntu"}\\nEnvironment=OLLAMA_MODELS=${SHARED_STORAGE}/models/ollama\\nEnvironment=OLLAMA_HOST=0.0.0.0\\nEnvironment=OLLAMA_MAX_LOADED_MODELS=0' | sudo tee /etc/systemd/system/ollama.service.d/override.conf`,
-          "sudo systemctl daemon-reload",
-          "sudo systemctl enable ollama",
-          "sudo systemctl restart ollama",
-        ].join(" && "), { timeout: 300_000 });
+        r = await sshExec(host, ollamaInstallCmd(process.env.SSH_USER || "ubuntu"), { timeout: 300_000 });
         break;
       case "sparkrun": {
         // Run setup steps in sequence; no sudo required.
