@@ -90,7 +90,11 @@ describe("summarizeResults", () => {
 
   it("returns null meanTps when there are no tg rows", () => {
     const rows = parseBenchyResults(fixture).filter((r) => r.opType === "pp");
-    expect(summarizeResults(rows).meanTps).toBeNull();
+    const summary = summarizeResults(rows);
+    expect(summary.meanTps).toBeNull();
+    // meanTtfrMs falls back to all rows when there are no tg rows:
+    // pp rows carry ttfr 142.3 and 410.0 → mean 276.15
+    expect(summary.meanTtfrMs).toBeCloseTo(276.15, 1);
   });
 
   it("returns nulls when given no rows", () => {

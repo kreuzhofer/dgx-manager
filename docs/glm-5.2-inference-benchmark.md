@@ -13,7 +13,7 @@ Served as: `glm-5.2` — deployed and benchmarked through the dgx-manager API
 - **Tool-eval: 97 / 100 — ★★★★★ Excellent** (`tool-eval-quick` preset)
 - **Decode: 4.6 tok/s** (prefill 67 tok/s), TTFR 1552 ms (`quick-smoke`, cudagraph FULL, c=1) —
   the previously reported "35.8 tok/s" was a prefill+decode blend from a since-fixed
-  `meanTps` bug. See `2026-07-02-glm52-decode-perf.md` for the fix plan (MTP → 20+ tok/s).
+  `meanTps` bug. See `superpowers/plans/2026-07-02-glm52-decode-perf.md` for the fix plan (MTP → 20+ tok/s).
 - Tool calling, reasoning parser, and 32K context all work end-to-end
 - Requires a **custom image** — the stock eugr-nightly image cannot run the DSA indexer
   (missing sm_121 DeepGEMM kernels). Build: [glm-5.2-custom-image-build.md](./glm-5.2-custom-image-build.md)
