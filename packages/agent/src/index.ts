@@ -19,6 +19,7 @@ import { findInferenceTemplate, applyFinetuneSubstitutions, renderSparkrunFinetu
 import { startFinetuneJob, stopFinetuneJob, mergeLoraAdapter, reattachFinetuneJobs } from "./runtime/finetune.js";
 import { quantizeMergedToFp8 } from "./runtime/finetune-quantize.js";
 import { selfAudit } from "./self-audit.js";
+import { applyOllamaFirewall } from "./firewall.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_DIR = join(__dirname, "..");
@@ -1141,5 +1142,11 @@ rm -f /tmp/dgx-deprovision.sh
       console.log(`Unknown command: ${msg.type}`);
   }
 }
+
+// Restrict Ollama's unauthenticated :11434 to the manager + loopback.
+// Fire-and-forget at boot: never blocks the WS connect, and a firewall
+// failure must not take down metrics/deploy duties — applyOllamaFirewall
+// logs loudly to the journal instead of throwing.
+void applyOllamaFirewall(MANAGER_URL);
 
 connect();
