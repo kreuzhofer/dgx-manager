@@ -136,7 +136,8 @@ agentBundleRouter.get("/install.sh", (req, res) => {
   res.send(script);
 });
 
-function generateInstallScript(serverUrl: string): string {
+/** Exported for tests: the sudoers whitelist below is a security contract. */
+export function generateInstallScript(serverUrl: string): string {
   return `#!/usr/bin/env bash
 # DGX Manager Agent — Bootstrap Install Script
 # Usage: curl -sL ${serverUrl}/api/agent/install.sh | sudo bash -s -- --token TOKEN
@@ -334,11 +335,14 @@ tar -xzf "\$BUNDLE_TMP" -C /opt/dgx-agent/
 chown -R "\$AGENT_USER":"\$AGENT_USER" /opt/dgx-agent
 rm -f "\$BUNDLE_TMP"
 
-# Step 7: Configure sudoers for agent self-update
+# Step 7: Configure sudoers for agent self-update, on-demand Ollama start,
+# and the Ollama :11434 firewall (agent runs sudo -n iptables/ip6tables at boot).
+# Ubuntu 24.04 sudo resolves bare commands via secure_path (/usr/sbin first),
+# so /usr/sbin/iptables matches \`sudo -n iptables\`.
 SUDOERS_FILE="/etc/sudoers.d/dgx-agent"
 if [ ! -f "\$SUDOERS_FILE" ]; then
   log "Configuring sudoers for agent service management..."
-  echo "\$AGENT_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart dgx-agent, /usr/bin/systemctl stop dgx-agent" > "\$SUDOERS_FILE"
+  echo "\$AGENT_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart dgx-agent, /usr/bin/systemctl stop dgx-agent, /usr/bin/systemctl start ollama, /usr/sbin/iptables, /usr/sbin/ip6tables" > "\$SUDOERS_FILE"
   chmod 440 "\$SUDOERS_FILE"
 fi
 

@@ -144,6 +144,9 @@ export interface EnsureOllamaDeps {
  * until it answers (bounded: maxAttempts x intervalMs, default ~20s).
  * Throws with a clear message if the start command fails or the API never
  * becomes reachable — no silent fallback.
+ *
+ * Concurrent deploys may both call this; the double-start is benign
+ * (`systemctl start` is idempotent) and each caller polls independently.
  */
 export async function ensureOllamaRunning(
   deps: EnsureOllamaDeps,
@@ -158,8 +161,9 @@ export async function ensureOllamaRunning(
   try {
     await deps.startService();
   } catch (err) {
+    // execFile errors already name the failing command, so don't repeat it here.
     throw new Error(
-      `Failed to start Ollama service (sudo -n systemctl start ollama): ${err instanceof Error ? err.message : String(err)}`,
+      `Failed to start Ollama service: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 
@@ -171,7 +175,7 @@ export async function ensureOllamaRunning(
     }
   }
   throw new Error(
-    `Ollama service was started but the API did not become reachable within ${Math.round((maxAttempts * intervalMs) / 1000)}s (port ${OLLAMA_PORT})`,
+    `Ollama service was started but the API did not become reachable after ${maxAttempts} attempts over ~${Math.round((maxAttempts * intervalMs) / 1000)}s (port ${OLLAMA_PORT})`,
   );
 }
 

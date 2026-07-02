@@ -127,13 +127,14 @@ describe("ensureOllamaRunning", () => {
   });
 
   /** A failing `systemctl start` (missing sudoers rule, masked unit, …)
-   *  must fail the deploy with a message naming the command — no silent
-   *  fallback into the pull step against a dead API. */
+   *  must fail the deploy with a message that keeps the underlying cause
+   *  (execFile errors already name the command) — no silent fallback into
+   *  the pull step against a dead API. */
   it("throws with a clear message when the start command fails", async () => {
     const deps = makeDeps([false]);
     deps.startService.mockRejectedValue(new Error("sudo: a password is required"));
     await expect(ensureOllamaRunning(deps)).rejects.toThrow(
-      /Failed to start Ollama service \(sudo -n systemctl start ollama\): sudo: a password is required/,
+      /Failed to start Ollama service: sudo: a password is required/,
     );
     expect(deps.sleep).not.toHaveBeenCalled();
   });
@@ -144,9 +145,11 @@ describe("ensureOllamaRunning", () => {
     const deps = makeDeps([false]);
     await expect(
       ensureOllamaRunning(deps, { maxAttempts: 4, intervalMs: 100 }),
-    ).rejects.toThrow(/did not become reachable/);
+    ).rejects.toThrow(/did not become reachable after 4 attempts over ~0s/);
     expect(deps.startService).toHaveBeenCalledTimes(1);
     expect(deps.sleep).toHaveBeenCalledTimes(4);
+    // opts.intervalMs must flow through to the injected sleep
+    expect(deps.sleep).toHaveBeenCalledWith(100);
     // pre-check + 4 polls
     expect(deps.isRunning).toHaveBeenCalledTimes(5);
   });
