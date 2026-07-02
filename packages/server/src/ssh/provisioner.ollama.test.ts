@@ -64,9 +64,17 @@ describe("ollamaInstallCmd", () => {
   });
 
   it("disable runs after restart so the final state is disabled-for-boot", () => {
-    expect(cmd.indexOf("systemctl disable ollama")).toBeGreaterThan(
-      cmd.indexOf("systemctl restart ollama"),
-    );
+    const restartIdx = cmd.indexOf("systemctl restart ollama");
+    expect(restartIdx).toBeGreaterThan(-1);
+    expect(cmd.indexOf("systemctl disable ollama")).toBeGreaterThan(restartIdx);
+  });
+
+  it("rejects an sshUser that would break single-quoting in the root tee pipeline", () => {
+    expect(() => ollamaInstallCmd("bad'user")).toThrow(/invalid sshUser/);
+  });
+
+  it("accepts a normal unix username", () => {
+    expect(() => ollamaInstallCmd("ubuntu")).not.toThrow();
   });
 
   it("keeps the install source and systemd drop-in config unchanged", () => {

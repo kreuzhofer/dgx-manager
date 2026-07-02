@@ -92,6 +92,11 @@ export function evalOllamaAudit(stdout: string): PrereqCheck {
  * the installer left it in for this boot (an Ollama deploy may use it).
  */
 export function ollamaInstallCmd(sshUser: string): string {
+  // sshUser is interpolated inside a single-quoted string piped to a
+  // root-privileged tee — fail fast on anything that could break quoting.
+  if (!/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(sshUser)) {
+    throw new Error(`ollamaInstallCmd: invalid sshUser ${JSON.stringify(sshUser)}`);
+  }
   return [
     "curl -fsSL https://ollama.ai/install.sh | sh",
     // Ensure systemd service exists with OLLAMA_MODELS on NFS
