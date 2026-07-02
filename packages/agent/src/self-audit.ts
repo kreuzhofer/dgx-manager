@@ -1,5 +1,6 @@
 import { execSync } from "child_process";
 import { hostname as osHostname } from "os";
+import { firewallAuditCheck } from "./firewall.js";
 
 export interface SelfAuditCheck {
   name: string;
@@ -52,6 +53,11 @@ export function selfAudit(): SelfAuditReport {
       ? { name: "Ollama", status: "green", detail: ollama.replace(/^ollama version is\s*/i, "v") }
       : { name: "Ollama", status: "yellow", detail: "Not installed (optional)" }
   );
+
+  // Ollama :11434 firewall state — applied fire-and-forget at agent boot;
+  // this reads the CURRENT state (may be "pending" on the very first audit
+  // of a fresh process; reconnect audits deliver the final state).
+  checks.push(firewallAuditCheck());
 
   const tank = run("findmnt -n /mnt/tank -o SOURCE,FSTYPE 2>/dev/null");
   checks.push(
