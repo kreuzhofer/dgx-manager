@@ -387,11 +387,16 @@ all 5 agents report to it, and the DGX manager is retired (head freed, ~112 GiB)
   deferred to avoid re-disrupting nfs01).
 
 **Open follow-ups:**
-1. **GLM-5.2 is STOPPED** (stopped to free nodes for spark-04's reset). Redeploy via the Pi
-   → comes up at `max_model_len 57344` (56K), gpu-mem 0.88.
-2. **Rebuild the Pi server image** — it was built from the pre-migration checkout (37e7511),
-   so the running server lacks this session's server fixes (benchmark served-model
-   resolution, `f439761`). The Pi *checkout* is now current (`a1518c6`); the *image* is not.
-   Rebuild on the Pi (`MANAGER_ADVERTISE_HOST=192.168.44.14 docker compose build && up -d`)
-   or build on a fast box + transfer.
+1. **GLM-5.2 not currently deployed** (stopped to free nodes for spark-04's reset; the
+   deployment record is gone, so this is a *fresh deploy*, not an un-pause). Redeploy via
+   the Pi using model `cmr0octnr1xg536k4tbroqlgl` / recipe
+   `@community-kreuzhofer/glm-5.2-awq-15pct-vllm-kreuzhofer` → comes up at
+   `max_model_len 57344` (56K), gpu-mem 0.88. Consumes a DGX node's GPU — do on demand.
+2. ✅ **RESOLVED (2026-07-02)** — the Pi server image was rebuilt at 10:40, *after* the last
+   `packages/server/src` commit (`37e7511`, which includes the `f439761` benchmark fix). The
+   running server now carries this session's server fixes; image is current with `HEAD`.
 3. Optionally harden `nfs01` (it OOM'd at 06:10, killing `rpc.nfsd` — errno 12).
+
+**Verified state (2026-07-02, on the Pi `raspi-dev-01`):** both manager containers up; all
+5 agents `online` with fresh `lastSeen` (age 0–4s); one `stopped` deployment record remains
+(`qwen3-embedding:8b` on aihost01, Ollama :11434).
