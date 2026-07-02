@@ -1,6 +1,10 @@
 import { dirname } from "path";
 import { fileURLToPath } from "url";
 import http from "http";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OLLAMA_API = process.env.OLLAMA_HOST || "http://localhost:11434";
@@ -119,6 +123,64 @@ async function pullModel(
   });
 }
 
+/**
+ * Injected dependencies for ensureOllamaRunning — lets tests drive the
+ * decision/wait logic without systemd or a real Ollama HTTP API.
+ */
+export interface EnsureOllamaDeps {
+  /** Is the Ollama HTTP API reachable right now? */
+  isRunning: () => Promise<boolean>;
+  /** Start the systemd unit (throws on failure). */
+  startService: () => Promise<void>;
+  /** Injectable sleep so tests never actually wait. */
+  sleep: (ms: number) => Promise<void>;
+  onLog?: (line: string) => void;
+}
+
+/**
+ * Make sure the Ollama service is up before a deploy. Fleet policy disables
+ * Ollama autostart on all nodes (unauthenticated :11434 API), so a stopped
+ * service is the expected state — start it via systemd and poll the API
+ * until it answers (bounded: maxAttempts x intervalMs, default ~20s).
+ * Throws with a clear message if the start command fails or the API never
+ * becomes reachable — no silent fallback.
+ */
+export async function ensureOllamaRunning(
+  deps: EnsureOllamaDeps,
+  opts: { maxAttempts?: number; intervalMs?: number } = {},
+): Promise<void> {
+  const maxAttempts = opts.maxAttempts ?? 10;
+  const intervalMs = opts.intervalMs ?? 2000;
+
+  if (await deps.isRunning()) return;
+
+  deps.onLog?.("Ollama service not running, starting it (systemctl start ollama)...\n");
+  try {
+    await deps.startService();
+  } catch (err) {
+    throw new Error(
+      `Failed to start Ollama service (sudo -n systemctl start ollama): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await deps.sleep(intervalMs);
+    if (await deps.isRunning()) {
+      deps.onLog?.("Ollama service started.\n");
+      return;
+    }
+  }
+  throw new Error(
+    `Ollama service was started but the API did not become reachable within ${Math.round((maxAttempts * intervalMs) / 1000)}s (port ${OLLAMA_PORT})`,
+  );
+}
+
+/** Start the Ollama systemd unit. `sudo -n` so a missing sudoers rule fails
+ *  fast instead of hanging on a password prompt; argv-array exec (no shell). */
+async function startOllamaService(): Promise<void> {
+  await execFileAsync("sudo", ["-n", "systemctl", "start", "ollama"], { timeout: 15_000 });
+}
+
 /** Deploy an Ollama model: pull if needed, load into GPU memory. */
 export async function deployModel(
   deploymentId: string,
@@ -133,23 +195,15 @@ export async function deployModel(
   activeAbortControllers.set(deploymentId, abortController);
 
   try {
-    // Verify Ollama service is reachable, try to start it if not
-    if (!await isOllamaRunning()) {
-      onLog?.("Ollama service not running, attempting to start...\n");
-      try {
-        const { execSync } = await import("child_process");
-        execSync("sudo systemctl start ollama", { timeout: 10_000 });
-        // Wait for it to come up
-        for (let i = 0; i < 5; i++) {
-          await new Promise((r) => setTimeout(r, 2000));
-          if (await isOllamaRunning()) break;
-        }
-      } catch { /* ignore */ }
-      if (!await isOllamaRunning()) {
-        throw new Error("Ollama service is not running and could not be started (port 11434 unreachable)");
-      }
-      onLog?.("Ollama service started.\n");
-    }
+    // Fleet policy: Ollama's systemd unit does not auto-start (unauthenticated
+    // :11434 API), so an Ollama deploy must start the service on demand.
+    // Failure throws and is reported to the manager via the catch below.
+    await ensureOllamaRunning({
+      isRunning: isOllamaRunning,
+      startService: startOllamaService,
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      onLog,
+    });
 
     // Pull model (streams progress, skips if cached)
     onStatus?.("downloading");
@@ -215,6 +269,9 @@ export async function stopModel(deploymentId: string, modelNameOverride?: string
   } catch { /* model may already be unloaded */ }
 
   activeDeployments.delete(deploymentId);
+  // NOTE: auto-stopping the Ollama service after the last deployment is
+  // removed is intentionally out of scope for now; a future stop hook
+  // (e.g. `systemctl stop ollama` when activeDeployments is empty) would go here.
 }
 
 /** Check health of an Ollama deployment. */
