@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Target Pi: **192.168.44.14**, arm64, inference-free. Manager advertises as `MANAGER_ADVERTISE_HOST=192.168.44.14`, `SSH_USER=daniel`, `SHARED_STORAGE_PATH=/mnt/tank`.
-- NFS mount on the Pi MUST be **soft**: `soft,timeo=100,retrans=3,_netdev,nofail,x-systemd.automount` against `192.168.100.101:/tank`. Never `hard`.
+- NFS mount on the Pi MUST be **soft**: `soft,timeo=100,retrans=3,_netdev,nofail,x-systemd.automount` against **`192.168.44.22:/tank`** — nfs01 is dual-homed; the Pi has no route to the 100.x storage net, so it mounts nfs01's 44.x address (NOT `192.168.100.101`). Never `hard`.
 - The manager container bind-mounts `/mnt/tank`; it MUST be (re)created only **after** the host NFS is mounted, or it captures the empty mountpoint.
 - Migrate the `dgx-data` SQLite DB but **prune `MetricSnapshot`** to a ≤3-day window + `VACUUM`.
 - Cutover order: **canary one worker (dgx-spark-04) → verify → roll out the other 4 → retire DGX manager.** Rollback at any point = flip the agent's `MANAGER_URL` drop-in back to `.36`.
@@ -85,7 +85,7 @@ ssh daniel@192.168.44.14 'git clone https://github.com/kreuzhofer/dgx-manager.gi
 - [ ] **Step 1: Add the soft-mount fstab entry**
 
 ```bash
-ssh daniel@192.168.44.14 'echo "192.168.100.101:/tank  /mnt/tank  nfs  soft,timeo=100,retrans=3,_netdev,nofail,x-systemd.automount  0  0" | sudo tee -a /etc/fstab'
+ssh daniel@192.168.44.14 'echo "192.168.44.22:/tank  /mnt/tank  nfs  soft,timeo=100,retrans=3,_netdev,nofail,x-systemd.automount  0  0" | sudo tee -a /etc/fstab'
 ssh daniel@192.168.44.14 'sudo mkdir -p /mnt/tank && sudo systemctl daemon-reload'
 ```
 
@@ -362,3 +362,36 @@ Expected: with the DGX manager **down** (retired in Task 7), spark-02 will show 
 - **DATABASE_URL / DB filename:** the plan assumes SQLite at `/app/data/dev.db` (the repo default `file:./dev.db` under the `dgx-data` volume). If `DATABASE_URL` in `.env`/compose points elsewhere, adjust `DB_IN_CONTAINER` in `migrate-manager-db.sh` and the `docker cp` path in Task 5 Step 2 accordingly — verify with `ssh daniel@192.168.44.36 'docker exec dgx-manager-server-1 sh -lc "echo \$DATABASE_URL; ls -la /app/data"'` first.
 - **MetricSnapshot.timestamp type:** the prune uses SQLite `datetime('now','-3 days')`. If `timestamp` is stored as epoch-ms integers rather than ISO text, switch the `DELETE` predicate to `timestamp < (strftime('%s','now','-3 days')*1000)`. Check with `sqlite3 … "SELECT typeof(timestamp), timestamp FROM MetricSnapshot LIMIT 1;"` before running.
 - **Do the drills (Task 8) before Task 7 Step 3** if you want a live-fallback rollback test; otherwise the DGX manager is already down.
+
+
+---
+
+## Execution status (2026-07-02) — COMPLETE
+
+Executed inline. The migration is **done**: the Pi (192.168.44.14) is the sole manager,
+all 5 agents report to it, and the DGX manager is retired (head freed, ~112 GiB).
+
+**Per-task outcome:**
+- T1 ✅ Pi prereqs (Docker 29.1.3 + compose v5.2.0 installed via the plugin binary since
+  `docker-compose-plugin` isn't in the Pi's apt repos; nfs-common; docker group; key
+  `id_ed25519_shared` + `~/.ssh/config` copied; repo cloned).
+- T2 ✅ NFS soft-mounted — **via `192.168.44.22`, not `100.101`** (Pi has no 100.x route).
+- T3 ✅ Images built on the Pi (agent bundles copied from the DGX to skip the slow qemu
+  cross-build; server + dashboard built with `MANAGER_ADVERTISE_HOST=192.168.44.14`).
+- T4 ✅ DB migrated via online backup (no downtime) + VACUUM: 517 MB → 47 MB.
+- T5 ✅ Pi manager booted on the migrated DB; container sees live NFS.
+- T6 ✅ Canary = **spark-03** (spark-04 was SSH-congested); registered fresh, 105 recipes.
+- T7 ✅ Rolled out to all nodes; **spark-04 needed a hard power-cycle** (its orphaned model
+  shard wedged sshd — SSH `kex_exchange_identification` reset); DGX manager retired.
+- T8 ⏭️ Drills skipped (extensive real-world validation already done; NFS-outage drill
+  deferred to avoid re-disrupting nfs01).
+
+**Open follow-ups:**
+1. **GLM-5.2 is STOPPED** (stopped to free nodes for spark-04's reset). Redeploy via the Pi
+   → comes up at `max_model_len 57344` (56K), gpu-mem 0.88.
+2. **Rebuild the Pi server image** — it was built from the pre-migration checkout (37e7511),
+   so the running server lacks this session's server fixes (benchmark served-model
+   resolution, `f439761`). The Pi *checkout* is now current (`a1518c6`); the *image* is not.
+   Rebuild on the Pi (`MANAGER_ADVERTISE_HOST=192.168.44.14 docker compose build && up -d`)
+   or build on a fast box + transfer.
+3. Optionally harden `nfs01` (it OOM'd at 06:10, killing `rpc.nfsd` — errno 12).
