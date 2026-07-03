@@ -54,6 +54,7 @@ function makeApp() {
   const app = express();
   app.use(express.json());
   app.set("agentHub", hub);
+  app.set("sshExec", async () => ({ code: 0, stdout: "false", stderr: "" }));
   app.use("/api/deployments", deploymentsRouter);
   return { app, sentMessages };
 }

@@ -63,6 +63,9 @@ function makeApp(hub: unknown) {
   const app = express();
   app.use(express.json());
   app.set("agentHub", hub);
+  // Hermetic: stub sshExec so the maxoutmem reclaim never opens a real SSH
+  // connection to a fake node IP. Flag reads as absent (stdout "false").
+  app.set("sshExec", async () => ({ code: 0, stdout: "false", stderr: "" }));
   app.use("/api/deployments", deploymentsRouter);
   return app;
 }

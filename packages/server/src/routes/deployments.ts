@@ -14,6 +14,8 @@ import { resolveRecipePath } from "../deployments/recipe-path.js";
 import { validateInlineRecipe, parseInlineRecipeModel } from "../deployments/recipe-inline.js";
 import { deploymentRepoKeys } from "../hf-cache/grouping.js";
 import { recordRepoDeployment } from "../hf-cache/repo-deployment.js";
+import { maxOutMemoryForDeploy } from "../deployments/maxoutmem.js";
+import { sshExec } from "../ssh/executor.js";
 
 export const deploymentsRouter = Router();
 
@@ -426,6 +428,36 @@ deploymentsRouter.post("/", async (req, res) => {
     deploymentRepoKeys(model.name, deployment.config, recipeModel, finetuneBaseModel),
     deployment.createdAt,
   );
+
+  // Declarative `maxoutmem` recipe flag (vLLM registry-ref deploys only): if
+  // the recipe YAML in the head node's sparkrun cache declares
+  // `maxoutmem: true`, free unified memory on the target nodes (stop gdm, etc.)
+  // BEFORE sparkrun launches the vLLM containers, so the headroom is available
+  // at KV-cache init. Best-effort: never blocks or fails the deploy.
+  if (!isOllama && recipeFile) {
+    let targetIps: string[] = [];
+    if (isCluster) {
+      targetIps = clusterNodeIps ?? [];
+    } else {
+      const soloNode = await prisma.node.findUnique({ where: { id: headNodeId } });
+      if (soloNode?.ipAddress) targetIps = [soloNode.ipAddress];
+    }
+    if (targetIps.length > 0) {
+      // sshExec is injectable (same idiom as agentHub) so integration tests
+      // stay hermetic — no live SSH to fake node IPs.
+      const sshExecFn = (req.app.get("sshExec") as typeof sshExec) ?? sshExec;
+      await maxOutMemoryForDeploy({
+        recipeRef: recipeFile,
+        headIp: targetIps[0],
+        nodeIps: targetIps,
+        sshExec: sshExecFn,
+        log: (m) => console.log(m),
+      }).catch((e) => {
+        console.error("[maxoutmem] skipped:", e);
+        return { applied: false, perNode: [] };
+      });
+    }
+  }
 
   agentHub.sendToAgent(headNodeId, {
     type: "cmd:deploy",
