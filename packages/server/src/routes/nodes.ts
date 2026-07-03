@@ -7,7 +7,7 @@ import { auditNode, provisionNode } from "../ssh/provisioner.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import { metricsBuffer } from "../metrics-buffer.js";
 import type { AgentHub } from "../ws/agent-hub.js";
-import { powerCommand, macCaptureCmd, wolArmCmd, normalizeMac, type PowerAction } from "../nodes/power.js";
+import { powerCommand, macCaptureCmd, wolArmCmd, normalizeMac, agentSupportsPower, type PowerAction } from "../nodes/power.js";
 import { sshExec as defaultSshExec } from "../ssh/executor.js";
 import { broadcastFor, sendMagicPacket as defaultWolSend } from "../nodes/wol.js";
 import { triggerClusterReseed } from "../ssh/known-hosts-trigger.js";
@@ -461,9 +461,11 @@ nodesRouter.post("/:id/power", async (req, res) => {
   const powerState = action === "reboot" ? "rebooting" : action === "sleep" ? "asleep" : "off";
   const agentHub: AgentHub = req.app.get("agentHub");
 
-  // Primary path: dispatch over the agent's WS when it's connected. The agent
-  // acks with its MAC (persisted via agent:power:accepted) and arms WOL itself.
-  if (agentHub?.isAgentOnline(node.id)) {
+  // Primary path: dispatch over the agent's WS when it's connected AND new enough
+  // to implement cmd:power — an older agent would silently ignore the message, so
+  // for those we fall through to SSH. The agent acks with its MAC (persisted via
+  // agent:power:accepted) and arms WOL itself.
+  if (agentHub?.isAgentOnline(node.id) && agentSupportsPower(node.agentVersion)) {
     agentHub.sendToAgent(node.id, { type: "cmd:power", payload: { action, force } });
     await prisma.node.update({ where: { id: node.id }, data: { powerState } });
     sseBroadcast({ type: "node:status", payload: { nodeId: node.id, powerState } });

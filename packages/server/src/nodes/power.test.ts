@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { powerCommand, macCaptureCmd, wolArmCmd, normalizeMac } from "./power.js";
+import {
+  powerCommand,
+  macCaptureCmd,
+  wolArmCmd,
+  normalizeMac,
+  versionGte,
+  agentSupportsPower,
+  MIN_AGENT_POWER_VERSION,
+} from "./power.js";
 
 describe("powerCommand", () => {
   // Uses systemd --no-block so the SSH exec returns BEFORE the node drops,
@@ -71,6 +79,26 @@ describe("wolArmCmd", () => {
     expect(() => wolArmCmd('1.2.3.4"; reboot; "')).toThrow();
     expect(() => wolArmCmd("not-an-ip")).toThrow();
     expect(() => wolArmCmd("1.2.3.4 && rm -rf /")).toThrow();
+  });
+});
+
+describe("versionGte / agentSupportsPower", () => {
+  it("compares dotted-numeric versions component-wise", () => {
+    expect(versionGte("0.5.645", "0.5.645")).toBe(true); // equal
+    expect(versionGte("0.5.646", "0.5.645")).toBe(true);
+    expect(versionGte("0.6.0", "0.5.645")).toBe(true);
+    expect(versionGte("0.5.608", "0.5.645")).toBe(false);
+    expect(versionGte("0.5.9", "0.5.645")).toBe(false); // 9 < 645, not string compare
+  });
+  it("treats missing/garbage versions as not-supported", () => {
+    expect(versionGte(null, "0.5.645")).toBe(false);
+    expect(versionGte(undefined, "0.5.645")).toBe(false);
+    expect(versionGte("", "0.5.645")).toBe(false);
+  });
+  it("gates cmd:power support on the minimum version", () => {
+    expect(agentSupportsPower(MIN_AGENT_POWER_VERSION)).toBe(true);
+    expect(agentSupportsPower("0.5.608")).toBe(false);
+    expect(agentSupportsPower(null)).toBe(false);
   });
 });
 

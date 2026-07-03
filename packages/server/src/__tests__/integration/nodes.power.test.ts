@@ -59,7 +59,7 @@ function makeApp(
 describe("POST /api/nodes/:id/power", () => {
   it("agent online: dispatches cmd:power over the WS and does not touch SSH", async () => {
     const node = await prisma.node.create({
-      data: { name: "spark-test", ipAddress: "192.168.44.41" },
+      data: { name: "spark-test", ipAddress: "192.168.44.41", agentVersion: "0.5.645" },
     });
     const sshExec = vi.fn();
     const sendToAgent = vi.fn();
@@ -82,7 +82,7 @@ describe("POST /api/nodes/:id/power", () => {
 
   it("agent online: carries force + maps shutdown to powerState=off", async () => {
     const node = await prisma.node.create({
-      data: { name: "spark-test", ipAddress: "192.168.44.41" },
+      data: { name: "spark-test", ipAddress: "192.168.44.41", agentVersion: "0.5.645" },
     });
     const sendToAgent = vi.fn();
     const app = makeApp(vi.fn(), { online: true, sendToAgent });
@@ -100,7 +100,9 @@ describe("POST /api/nodes/:id/power", () => {
   });
 
   it("agent online: works even without an ipAddress (no SSH needed)", async () => {
-    const node = await prisma.node.create({ data: { name: "spark-test" } });
+    const node = await prisma.node.create({
+      data: { name: "spark-test", agentVersion: "0.5.645" },
+    });
     const sendToAgent = vi.fn();
     const app = makeApp(vi.fn(), { online: true, sendToAgent });
 
@@ -110,6 +112,28 @@ describe("POST /api/nodes/:id/power", () => {
 
     expect(res.status).toBe(200);
     expect(sendToAgent).toHaveBeenCalled();
+  });
+
+  it("agent online but OLD (no cmd:power support): falls back to SSH", async () => {
+    const node = await prisma.node.create({
+      data: { name: "spark-test", ipAddress: "192.168.44.41", agentVersion: "0.5.608" },
+    });
+    const sshExec = vi.fn().mockResolvedValue({ code: 0, stdout: "", stderr: "" });
+    const sendToAgent = vi.fn();
+    const app = makeApp(sshExec, { online: true, sendToAgent });
+
+    const res = await request(app)
+      .post(`/api/nodes/${node.id}/power`)
+      .send({ action: "reboot" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.via).toBe("ssh");
+    expect(sendToAgent).not.toHaveBeenCalled();
+    expect(sshExec).toHaveBeenCalledWith(
+      "192.168.44.41",
+      "sudo systemctl --no-block reboot",
+      expect.anything(),
+    );
   });
 
   it("reboot: runs the systemd reboot command and sets powerState=rebooting", async () => {

@@ -64,6 +64,32 @@ export function wolArmCmd(ip: string): string {
   );
 }
 
+/**
+ * Minimum agent version that implements the `cmd:power` WS handler. Older agents
+ * silently ignore `cmd:power`, so the /power route must fall back to SSH for
+ * them rather than sending a command that no-ops (a silent failure).
+ */
+export const MIN_AGENT_POWER_VERSION = "0.5.645";
+
+/** True if dotted-numeric `version` is >= `min`. Missing/garbage → false. */
+export function versionGte(version: string | null | undefined, min: string): boolean {
+  if (!version) return false;
+  const a = version.split(".").map((n) => parseInt(n, 10) || 0);
+  const b = min.split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] || 0;
+    const y = b[i] || 0;
+    if (x > y) return true;
+    if (x < y) return false;
+  }
+  return true; // equal
+}
+
+/** Whether an agent at `version` can handle the cmd:power WS message. */
+export function agentSupportsPower(version: string | null | undefined): boolean {
+  return versionGte(version, MIN_AGENT_POWER_VERSION);
+}
+
 const MAC_RE = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/;
 
 /** Trim+lowercase a captured MAC, or null if it is not a valid MAC. */
