@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { powerCommand, macCaptureCmd, normalizeMac } from "./power.js";
+import { powerCommand, macCaptureCmd, wolArmCmd, normalizeMac } from "./power.js";
 
 describe("powerCommand", () => {
   // Uses systemd --no-block so the SSH exec returns BEFORE the node drops,
@@ -32,6 +32,24 @@ describe("macCaptureCmd", () => {
     expect(() => macCaptureCmd("not-an-ip")).toThrow();
     expect(() => macCaptureCmd("1.2.3.4 && rm -rf /")).toThrow();
     expect(() => macCaptureCmd("999.999.999.999")).toThrow();
+  });
+});
+
+describe("wolArmCmd", () => {
+  // Resolves the iface bound to `ip`, then arms magic-packet Wake-on-LAN on it.
+  // Run best-effort before poweroff so a later /wake can actually reach the NIC.
+  it("builds an ssh command that finds the iface for an IP then arms WOL via ethtool", () => {
+    const cmd = wolArmCmd("192.168.44.41");
+    expect(cmd).toContain("192.168.44.41");
+    expect(cmd).toContain("ethtool -s");
+    expect(cmd).toContain("wol g");
+  });
+  // Same injection surface as macCaptureCmd: the ip reaches a remote shell, so
+  // it must be a strict IPv4 literal.
+  it("throws on a non-IPv4 / injection-bearing ip", () => {
+    expect(() => wolArmCmd('1.2.3.4"; reboot; "')).toThrow();
+    expect(() => wolArmCmd("not-an-ip")).toThrow();
+    expect(() => wolArmCmd("1.2.3.4 && rm -rf /")).toThrow();
   });
 });
 

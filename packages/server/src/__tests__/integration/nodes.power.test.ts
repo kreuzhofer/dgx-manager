@@ -70,14 +70,15 @@ describe("POST /api/nodes/:id/power", () => {
     expect(after?.powerState).toBe("rebooting");
   });
 
-  it("shutdown: sets powerState=off and captures MAC first", async () => {
+  it("shutdown: captures MAC, arms WOL, then powers off with powerState=off", async () => {
     const node = await prisma.node.create({
       data: { name: "spark-test", ipAddress: "192.168.44.41" },
     });
+    // Call order: 1) MAC capture, 2) arm WOL, 3) poweroff.
     const sshExec = vi
       .fn()
       .mockResolvedValueOnce({ code: 0, stdout: "AA:BB:CC:DD:EE:FF", stderr: "" })
-      .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" });
+      .mockResolvedValue({ code: 0, stdout: "", stderr: "" });
     const app = makeApp(sshExec);
 
     const res = await request(app)
@@ -89,6 +90,34 @@ describe("POST /api/nodes/:id/power", () => {
     const after = await prisma.node.findUnique({ where: { id: node.id } });
     expect(after?.powerState).toBe("off");
     expect(after?.macAddress).toBe("aa:bb:cc:dd:ee:ff");
+    // WOL was armed against the node IP before the poweroff command ran.
+    const cmds = sshExec.mock.calls.map((c) => c[1] as string);
+    const armIdx = cmds.findIndex((c) => c.includes("ethtool -s") && c.includes("wol g"));
+    const offIdx = cmds.findIndex((c) => c === "sudo systemctl --no-block poweroff");
+    expect(armIdx).toBeGreaterThanOrEqual(0);
+    expect(offIdx).toBeGreaterThan(armIdx);
+    expect(sshExec.mock.calls[armIdx][0]).toBe("192.168.44.41");
+  });
+
+  it("shutdown still succeeds when arming WOL fails (best-effort)", async () => {
+    const node = await prisma.node.create({
+      data: { name: "spark-test", ipAddress: "192.168.44.41" },
+    });
+    // MAC capture ok, arm WOL rejects, poweroff ok — the arm failure must not
+    // fail the request.
+    const sshExec = vi
+      .fn()
+      .mockResolvedValueOnce({ code: 0, stdout: "AA:BB:CC:DD:EE:FF", stderr: "" })
+      .mockRejectedValueOnce(new Error("ethtool: not found"))
+      .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" });
+    const app = makeApp(sshExec);
+
+    const res = await request(app)
+      .post(`/api/nodes/${node.id}/power`)
+      .send({ action: "shutdown" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.powerState).toBe("off");
   });
 
   it("returns 404 for an unknown node", async () => {

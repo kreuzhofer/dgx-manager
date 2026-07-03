@@ -7,7 +7,7 @@ import { auditNode, provisionNode } from "../ssh/provisioner.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import { metricsBuffer } from "../metrics-buffer.js";
 import type { AgentHub } from "../ws/agent-hub.js";
-import { powerCommand, macCaptureCmd, normalizeMac, type PowerAction } from "../nodes/power.js";
+import { powerCommand, macCaptureCmd, wolArmCmd, normalizeMac, type PowerAction } from "../nodes/power.js";
 import { sshExec as defaultSshExec } from "../ssh/executor.js";
 import { broadcastFor, sendMagicPacket as defaultWolSend } from "../nodes/wol.js";
 import { triggerClusterReseed } from "../ssh/known-hosts-trigger.js";
@@ -467,6 +467,14 @@ nodesRouter.post("/:id/power", async (req, res) => {
       if (mac) macAddress = mac;
     } catch {
       // non-fatal: WOL just won't be available if we never captured a MAC
+    }
+    // Arm Wake-on-LAN on the NIC while we still have SSH. NICs often ship with
+    // WOL off and the setting doesn't survive a reboot, so arming here is what
+    // makes a later /wake actually reach the interface. Best-effort.
+    try {
+      await sshExec(node.ipAddress, wolArmCmd(node.ipAddress), { timeout: 10_000 });
+    } catch {
+      // non-fatal: /wake may not work if the NIC couldn't be armed
     }
   }
 
