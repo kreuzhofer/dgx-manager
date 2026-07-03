@@ -40,16 +40,78 @@ afterEach(async () => {
   await prisma.node.deleteMany();
 });
 
-function makeApp(sshExec: any) {
+// Default agent OFFLINE so these SSH-path assertions exercise the fallback.
+// Agent-primary behavior is covered by the dedicated "agent channel" tests.
+function makeApp(
+  sshExec: any,
+  opts: { online?: boolean; sendToAgent?: any } = {},
+) {
+  const online = opts.online ?? false;
+  const sendToAgent = opts.sendToAgent ?? vi.fn();
   const app = express();
   app.use(express.json());
-  app.set("agentHub", { isAgentOnline: () => true, sendToAgent: () => {} });
+  app.set("agentHub", { isAgentOnline: () => online, sendToAgent });
   app.set("sshExec", sshExec);
   app.use("/api/nodes", nodesRouter);
   return app;
 }
 
 describe("POST /api/nodes/:id/power", () => {
+  it("agent online: dispatches cmd:power over the WS and does not touch SSH", async () => {
+    const node = await prisma.node.create({
+      data: { name: "spark-test", ipAddress: "192.168.44.41" },
+    });
+    const sshExec = vi.fn();
+    const sendToAgent = vi.fn();
+    const app = makeApp(sshExec, { online: true, sendToAgent });
+
+    const res = await request(app)
+      .post(`/api/nodes/${node.id}/power`)
+      .send({ action: "reboot" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ powerState: "rebooting", via: "agent" });
+    expect(sendToAgent).toHaveBeenCalledWith(node.id, {
+      type: "cmd:power",
+      payload: { action: "reboot", force: false },
+    });
+    expect(sshExec).not.toHaveBeenCalled();
+    const after = await prisma.node.findUnique({ where: { id: node.id } });
+    expect(after?.powerState).toBe("rebooting");
+  });
+
+  it("agent online: carries force + maps shutdown to powerState=off", async () => {
+    const node = await prisma.node.create({
+      data: { name: "spark-test", ipAddress: "192.168.44.41" },
+    });
+    const sendToAgent = vi.fn();
+    const app = makeApp(vi.fn(), { online: true, sendToAgent });
+
+    const res = await request(app)
+      .post(`/api/nodes/${node.id}/power`)
+      .send({ action: "shutdown", force: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ powerState: "off", via: "agent" });
+    expect(sendToAgent).toHaveBeenCalledWith(node.id, {
+      type: "cmd:power",
+      payload: { action: "shutdown", force: true },
+    });
+  });
+
+  it("agent online: works even without an ipAddress (no SSH needed)", async () => {
+    const node = await prisma.node.create({ data: { name: "spark-test" } });
+    const sendToAgent = vi.fn();
+    const app = makeApp(vi.fn(), { online: true, sendToAgent });
+
+    const res = await request(app)
+      .post(`/api/nodes/${node.id}/power`)
+      .send({ action: "reboot" });
+
+    expect(res.status).toBe(200);
+    expect(sendToAgent).toHaveBeenCalled();
+  });
+
   it("reboot: runs the systemd reboot command and sets powerState=rebooting", async () => {
     const node = await prisma.node.create({
       data: { name: "spark-test", ipAddress: "192.168.44.41" },

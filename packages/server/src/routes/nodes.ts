@@ -442,26 +442,40 @@ nodesRouter.post("/:id/update-agent", async (req, res) => {
   res.json({ status: "updating", version, bundleUrl });
 });
 
-// POST /api/nodes/:id/power — reboot / shutdown / sleep a node over SSH.
+// POST /api/nodes/:id/power — reboot / shutdown / sleep a node.
 // powerState transitions: reboot -> "rebooting", shutdown -> "off", sleep -> "asleep".
-// MAC is captured (best-effort) before a shutdown/sleep so the node can be woken later.
+// Hybrid channel: when the agent is online we send the command over its existing
+// WebSocket (fast, no SSH setup, and the agent arms WOL + reports its MAC). When
+// the agent is offline — including a hung node whose agent has already dropped —
+// we fall back to SSH, which also handles MAC capture + WOL arming. `force` maps
+// to an immediate --force --force reset for a wedged node on either channel.
 nodesRouter.post("/:id/power", async (req, res) => {
   const action = req.body?.action as PowerAction;
   if (action !== "reboot" && action !== "shutdown" && action !== "sleep") {
     return res.status(400).json({ error: `Invalid action: ${action}` });
   }
-  // Force applies only to reboot — a hard reboot(2) for a wedged node whose
-  // graceful reboot would hang. Ignored for shutdown/sleep.
   const force = req.body?.force === true;
   const node = await prisma.node.findUnique({ where: { id: req.params.id } });
   if (!node) return res.status(404).json({ error: "Node not found" });
-  if (!node.ipAddress) return res.status(400).json({ error: "Node has no ipAddress" });
 
-  // Injected so tests can stub it; defaults to the real ssh2-backed exec.
+  const powerState = action === "reboot" ? "rebooting" : action === "sleep" ? "asleep" : "off";
+  const agentHub: AgentHub = req.app.get("agentHub");
+
+  // Primary path: dispatch over the agent's WS when it's connected. The agent
+  // acks with its MAC (persisted via agent:power:accepted) and arms WOL itself.
+  if (agentHub?.isAgentOnline(node.id)) {
+    agentHub.sendToAgent(node.id, { type: "cmd:power", payload: { action, force } });
+    await prisma.node.update({ where: { id: node.id }, data: { powerState } });
+    sseBroadcast({ type: "node:status", payload: { nodeId: node.id, powerState } });
+    return res.json({ status: "ok", powerState, via: "agent" });
+  }
+
+  // Fallback path: SSH. Needs a reachable address.
+  if (!node.ipAddress) return res.status(400).json({ error: "Node has no ipAddress" });
   const sshExec = (req.app.get("sshExec") || defaultSshExec) as typeof defaultSshExec;
 
-  // Best-effort MAC capture while the node is still reachable (skip for reboot —
-  // it comes right back; capture for shutdown/sleep where we may need WOL).
+  // Best-effort MAC capture + WOL arm while the node is still reachable (skip for
+  // reboot — it comes right back; do it for shutdown/sleep where we need WOL).
   let macAddress = node.macAddress;
   if (action !== "reboot") {
     try {
@@ -471,9 +485,6 @@ nodesRouter.post("/:id/power", async (req, res) => {
     } catch {
       // non-fatal: WOL just won't be available if we never captured a MAC
     }
-    // Arm Wake-on-LAN on the NIC while we still have SSH. NICs often ship with
-    // WOL off and the setting doesn't survive a reboot, so arming here is what
-    // makes a later /wake actually reach the interface. Best-effort.
     try {
       await sshExec(node.ipAddress, wolArmCmd(node.ipAddress), { timeout: 10_000 });
     } catch {
@@ -498,14 +509,13 @@ nodesRouter.post("/:id/power", async (req, res) => {
     }
   }
 
-  const powerState = action === "reboot" ? "rebooting" : action === "sleep" ? "asleep" : "off";
   await prisma.node.update({
     where: { id: node.id },
     data: { powerState, ...(macAddress ? { macAddress } : {}) },
   });
   sseBroadcast({ type: "node:status", payload: { nodeId: node.id, powerState } });
 
-  res.json({ status: "ok", powerState });
+  res.json({ status: "ok", powerState, via: "ssh" });
 });
 
 // POST /api/nodes/:id/wake — send a Wake-on-LAN magic packet to a powered-off node.

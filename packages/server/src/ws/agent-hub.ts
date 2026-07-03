@@ -8,6 +8,7 @@ import type { HfCacheNodeInventory } from "../hf-cache/grouping.js";
 import { resolveNodeIp, isValidIpv4 } from "./node-ip.js";
 import { scheduleDebouncedReseed } from "../ssh/known-hosts-trigger.js";
 import { pushRegistriesToAgent } from "../registries/push.js";
+import { normalizeMac } from "../nodes/power.js";
 
 export interface OllamaModelInfo {
   name: string;
@@ -334,6 +335,30 @@ export class AgentHub {
           case "agent:update-status": {
             console.log(`Agent ${nodeId} update: ${msg.payload.status} (v${msg.payload.version || "?"})`);
             sseBroadcast({ type: "node:update-status", payload: { nodeId, ...msg.payload } });
+            break;
+          }
+
+          case "agent:power:accepted": {
+            if (!nodeId) break;
+            // The agent accepted a cmd:power and is about to go down. Persist the
+            // MAC it reported so a later /wake works even if the node was never
+            // SSH-audited. powerState was already set optimistically by /power.
+            const mac = normalizeMac(String(msg.payload.mac ?? ""));
+            console.log(`Agent ${nodeId} power ${msg.payload.action} accepted${mac ? ` (mac ${mac})` : ""}`);
+            if (mac) {
+              await prisma.node.update({ where: { id: nodeId }, data: { macAddress: mac } }).catch(() => {});
+            }
+            break;
+          }
+
+          case "agent:power:error": {
+            if (!nodeId) break;
+            // The agent could not run the power command (e.g. invalid action). The
+            // node is still up, so undo the optimistic powerState so the card
+            // doesn't stay stuck as off/rebooting.
+            console.error(`Agent ${nodeId} power error: ${msg.payload.error}`);
+            await prisma.node.update({ where: { id: nodeId }, data: { powerState: "on" } }).catch(() => {});
+            sseBroadcast({ type: "node:status", payload: { nodeId, powerState: "on" } });
             break;
           }
 
