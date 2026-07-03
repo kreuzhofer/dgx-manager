@@ -3,8 +3,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.server
-    ports:
-      - "4000:4000"
+    # host networking so Wake-on-LAN magic packets reach the physical LAN.
+    # On a Docker bridge network, the L2/limited broadcast never leaves the
+    # bridge, so /wake silently fails. Host mode shares the host's eth0 so the
+    # server binds directly on host:4000 (the `ports:` mapping is redundant/ignored).
+    network_mode: host
     environment:
       - DATABASE_URL=file:/app/data/dev.db
       - PORT=4000
