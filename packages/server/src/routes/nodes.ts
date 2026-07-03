@@ -450,6 +450,9 @@ nodesRouter.post("/:id/power", async (req, res) => {
   if (action !== "reboot" && action !== "shutdown" && action !== "sleep") {
     return res.status(400).json({ error: `Invalid action: ${action}` });
   }
+  // Force applies only to reboot — a hard reboot(2) for a wedged node whose
+  // graceful reboot would hang. Ignored for shutdown/sleep.
+  const force = req.body?.force === true;
   const node = await prisma.node.findUnique({ where: { id: req.params.id } });
   if (!node) return res.status(404).json({ error: "Node not found" });
   if (!node.ipAddress) return res.status(400).json({ error: "Node has no ipAddress" });
@@ -479,9 +482,20 @@ nodesRouter.post("/:id/power", async (req, res) => {
   }
 
   try {
-    await sshExec(node.ipAddress, powerCommand(action), { timeout: 15_000 });
+    await sshExec(node.ipAddress, powerCommand(action, { force }), {
+      timeout: force ? 8_000 : 15_000,
+    });
   } catch (err) {
-    return res.status(502).json({ error: `Power command failed: ${String(err)}` });
+    // A forced reboot/shutdown issues an immediate reset that severs the SSH
+    // connection before the command can return cleanly, so a timeout / dropped
+    // connection is the expected success signal — not a failure. A fast, definite
+    // error (e.g. sudo needs a password) does not look like a severed connection
+    // and still surfaces as 502 so we never silently report a no-op as success.
+    const msg = String(err);
+    const severed = /timed out|econnreset|econnaborted|closed|disconnect|not connected/i.test(msg);
+    if (!(force && severed)) {
+      return res.status(502).json({ error: `Power command failed: ${msg}` });
+    }
   }
 
   const powerState = action === "reboot" ? "rebooting" : action === "sleep" ? "asleep" : "off";

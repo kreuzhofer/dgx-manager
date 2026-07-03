@@ -11,7 +11,16 @@ const COMMANDS: Record<PowerAction, string> = {
   sleep: "sudo systemctl suspend",
 };
 
-export function powerCommand(action: PowerAction): string {
+export function powerCommand(action: PowerAction, opts?: { force?: boolean }): string {
+  // Force applies to reboot and shutdown: the graceful --no-block variants ask
+  // systemd to stop all services first, which can itself hang on a wedged node.
+  // Double --force skips service shutdown AND unmounting and issues the
+  // reboot(2) syscall at once — the hardest reset achievable over SSH (still
+  // needs sshd to be answering). Not meaningful for suspend, so ignored there.
+  if (opts?.force && (action === "reboot" || action === "shutdown")) {
+    const verb = action === "reboot" ? "reboot" : "poweroff";
+    return `sudo systemctl --force --force ${verb}`;
+  }
   const cmd = COMMANDS[action];
   if (!cmd) throw new Error(`Unknown power action: ${action}`);
   return cmd;

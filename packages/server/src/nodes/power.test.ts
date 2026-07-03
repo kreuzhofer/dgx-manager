@@ -17,6 +17,27 @@ describe("powerCommand", () => {
     // @ts-expect-error invalid action
     expect(() => powerCommand("explode")).toThrow();
   });
+  // A hung node may never complete a graceful --no-block reboot (systemd itself
+  // can be stuck), so force reboot issues reboot(2) immediately without stopping
+  // services or unmounting (double --force).
+  it("maps a forced reboot to an immediate --force --force reboot", () => {
+    expect(powerCommand("reboot", { force: true })).toBe(
+      "sudo systemctl --force --force reboot",
+    );
+  });
+  it("maps a forced shutdown to an immediate --force --force poweroff", () => {
+    expect(powerCommand("shutdown", { force: true })).toBe(
+      "sudo systemctl --force --force poweroff",
+    );
+  });
+  it("ignores force for suspend", () => {
+    expect(powerCommand("sleep", { force: true })).toBe("sudo systemctl suspend");
+  });
+  it("reboot without force stays graceful", () => {
+    expect(powerCommand("reboot", { force: false })).toBe(
+      "sudo systemctl --no-block reboot",
+    );
+  });
 });
 
 describe("macCaptureCmd", () => {

@@ -125,10 +125,21 @@ export function NodeCard({
     if (!window.confirm(`${verb} node "${node.name}"? This runs sudo on the machine and will drop its agent.`)) {
       return;
     }
+    // Second prompt asks whether to force. Force = immediate hard reset that
+    // skips the clean service shutdown (double --force on the node); only for a
+    // hung node where the graceful action would itself hang. OK = force,
+    // Cancel = normal graceful action (either way the first confirm already
+    // committed to the action).
+    const force = window.confirm(
+      `Force ${verb.toLowerCase()} "${node.name}"?\n\n` +
+        `OK = FORCE: immediate hard ${action} for a hung/unresponsive node ` +
+        `(skips clean shutdown — unsaved state on the node is lost).\n\n` +
+        `Cancel = normal graceful ${verb.toLowerCase()}.`,
+    );
     try {
       await apiFetch<unknown>(`/api/nodes/${node.id}/power`, {
         method: "POST",
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({ action, force }),
       });
     } catch (e) {
       window.alert(`Power action failed: ${e instanceof Error ? e.message : String(e)}`);

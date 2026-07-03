@@ -120,6 +120,82 @@ describe("POST /api/nodes/:id/power", () => {
     expect(res.body.powerState).toBe("off");
   });
 
+  it("force reboot: issues an immediate --force --force reboot", async () => {
+    const node = await prisma.node.create({
+      data: { name: "spark-test", ipAddress: "192.168.44.41" },
+    });
+    const sshExec = vi.fn().mockResolvedValue({ code: 0, stdout: "", stderr: "" });
+    const app = makeApp(sshExec);
+
+    const res = await request(app)
+      .post(`/api/nodes/${node.id}/power`)
+      .send({ action: "reboot", force: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.powerState).toBe("rebooting");
+    const lastCall = sshExec.mock.calls.at(-1)!;
+    expect(lastCall[0]).toBe("192.168.44.41");
+    expect(lastCall[1]).toBe("sudo systemctl --force --force reboot");
+  });
+
+  it("force shutdown: issues an immediate --force --force poweroff", async () => {
+    const node = await prisma.node.create({
+      data: { name: "spark-test", ipAddress: "192.168.44.41" },
+    });
+    const sshExec = vi
+      .fn()
+      .mockResolvedValueOnce({ code: 0, stdout: "AA:BB:CC:DD:EE:FF", stderr: "" })
+      .mockResolvedValue({ code: 0, stdout: "", stderr: "" });
+    const app = makeApp(sshExec);
+
+    const res = await request(app)
+      .post(`/api/nodes/${node.id}/power`)
+      .send({ action: "shutdown", force: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.powerState).toBe("off");
+    const cmds = sshExec.mock.calls.map((c) => c[1] as string);
+    expect(cmds).toContain("sudo systemctl --force --force poweroff");
+  });
+
+  it("force reboot: a severed SSH connection (hard reset) is treated as success", async () => {
+    const node = await prisma.node.create({
+      data: { name: "spark-test", ipAddress: "192.168.44.41" },
+    });
+    // A --force --force reboot kills the connection before the exec returns, so
+    // the executor rejects with a timeout — that must NOT be a 502 for a force
+    // action, and powerState must still advance to "rebooting".
+    const sshExec = vi
+      .fn()
+      .mockRejectedValue(new Error("SSH command timed out after 8000ms"));
+    const app = makeApp(sshExec);
+
+    const res = await request(app)
+      .post(`/api/nodes/${node.id}/power`)
+      .send({ action: "reboot", force: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.powerState).toBe("rebooting");
+    const after = await prisma.node.findUnique({ where: { id: node.id } });
+    expect(after?.powerState).toBe("rebooting");
+  });
+
+  it("force reboot: a fast real error (sudo password) still returns 502", async () => {
+    const node = await prisma.node.create({
+      data: { name: "spark-test", ipAddress: "192.168.44.41" },
+    });
+    const sshExec = vi
+      .fn()
+      .mockRejectedValue(new Error("permission denied (sudo password required)"));
+    const app = makeApp(sshExec);
+
+    const res = await request(app)
+      .post(`/api/nodes/${node.id}/power`)
+      .send({ action: "reboot", force: true });
+
+    expect(res.status).toBe(502);
+  });
+
   it("returns 404 for an unknown node", async () => {
     const app = makeApp(vi.fn());
     const res = await request(app).post(`/api/nodes/nope/power`).send({ action: "reboot" });
