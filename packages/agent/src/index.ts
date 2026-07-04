@@ -20,7 +20,7 @@ import { startFinetuneJob, stopFinetuneJob, mergeLoraAdapter, reattachFinetuneJo
 import { quantizeMergedToFp8 } from "./runtime/finetune-quantize.js";
 import { selfAudit } from "./self-audit.js";
 import { applyOllamaFirewall } from "./firewall.js";
-import { powerCommand, type PowerAction } from "./runtime/power.js";
+import { powerCommand, powerUnitName, powerLaunchCommand, type PowerAction } from "./runtime/power.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_DIR = join(__dirname, "..");
@@ -1166,23 +1166,23 @@ rm -f /tmp/dgx-deprovision.sh
         console.error(`[power] WOL arm / MAC read failed (non-fatal): ${err}`);
       }
 
-      // Ack before we go down so the server can persist the MAC and knows the
-      // agent accepted (the node dropping + reconnecting is the success signal).
-      sendMsg("agent:power:accepted", { action, force: isForce, mac });
-
-      // Run the power command detached in a transient systemd unit so it (a)
-      // escapes dgx-agent.service's cgroup and survives our own teardown during
-      // shutdown, and (b) fires after a brief delay so the ack above flushes.
-      // Mirrors cmd:deprovision.
+      // Launch the power command in a transient systemd unit that (a) runs in
+      // system.slice so it escapes dgx-agent.service's cgroup and survives our
+      // teardown during shutdown, and (b) sleeps briefly so the accept ack can
+      // flush before the node goes down. We run systemd-run SYNCHRONOUSLY and
+      // ack ONLY after it returns 0 — a fork-starved node (or any launch
+      // failure) throws here and is reported as an error instead of being
+      // masked by an ack sent before the reboot ever launched. A unique unit
+      // name avoids a "Unit dgx-power.service already exists" collision on retry.
       try {
         const cmd = powerCommand(action as PowerAction, { force: isForce });
         writeFileSync("/tmp/dgx-power.sh", `#!/bin/bash\nset +e\nsleep 1\n${cmd}\n`, { mode: 0o755 });
-        const child = spawn(
-          "sudo",
-          ["systemd-run", "--unit=dgx-power", "--slice=system.slice", "--collect", "bash", "/tmp/dgx-power.sh"],
-          { detached: true, stdio: "ignore" },
-        );
-        child.unref();
+        execSync(powerLaunchCommand(powerUnitName(Date.now()), "/tmp/dgx-power.sh"), {
+          timeout: 10_000,
+          stdio: "ignore",
+        });
+        // Ack only after the power command actually launched.
+        sendMsg("agent:power:accepted", { action, force: isForce, mac });
       } catch (err) {
         console.error(`[power] failed to launch power command: ${err}`);
         sendMsg("agent:power:error", { action, error: String(err) });

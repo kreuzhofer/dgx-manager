@@ -26,3 +26,22 @@ export function powerCommand(action: PowerAction, opts?: { force?: boolean }): s
       throw new Error(`Unknown power action: ${action}`);
   }
 }
+
+/**
+ * A unique transient-unit name for a power command. Using a fresh name per
+ * invocation avoids a `systemd-run: Unit dgx-power.service already exists`
+ * failure when a retry lands while a prior attempt's unit is still lingering.
+ */
+export function powerUnitName(now: number): string {
+  return `dgx-power-${now}`;
+}
+
+/**
+ * The `systemd-run` invocation that launches the power script in a transient
+ * unit. It runs in `system.slice` so it escapes dgx-agent.service's cgroup and
+ * survives the agent's own teardown during a reboot/shutdown. Run this
+ * SYNCHRONOUSLY so a fork-starved node fails before the caller acks success.
+ */
+export function powerLaunchCommand(unit: string, scriptPath: string): string {
+  return `sudo systemd-run --unit=${unit} --slice=system.slice --collect bash ${scriptPath}`;
+}
