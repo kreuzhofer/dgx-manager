@@ -69,6 +69,12 @@ export default function NodesPage() {
   const [renameError, setRenameError] = useState<string | null>(null);
   const [savingRename, setSavingRename] = useState(false);
   const [reseeding, setReseeding] = useState(false);
+  // Offboarding modal state. `offboarding` holds the node being removed;
+  // `offboardPhase` drives the modal UI (spinner vs. the timed-out "remove
+  // anyhow" prompt); `offboardError` surfaces an unexpected failure.
+  const [offboarding, setOffboarding] = useState<Node | null>(null);
+  const [offboardPhase, setOffboardPhase] = useState<"working" | "timed-out">("working");
+  const [offboardError, setOffboardError] = useState<string | null>(null);
   const serverHost = getServerHost();
 
   const startRename = (node: Node) => {
@@ -249,7 +255,15 @@ export default function NodesPage() {
     await apiFetch(`/api/nodes/${nodeId}/provision`, { method: "POST" });
   };
 
-  const deleteNode = async (nodeId: string) => {
+  type OffboardResult = {
+    deleted: boolean;
+    offboarded?: boolean;
+    forced?: boolean;
+    timedOut?: boolean;
+    reason?: string;
+  };
+
+  const deleteNode = async (node: Node) => {
     if (
       !confirm(
         "Delete this node?\n\n" +
@@ -260,8 +274,45 @@ export default function NodesPage() {
       )
     )
       return;
-    await apiFetch(`/api/nodes/${nodeId}`, { method: "DELETE" });
-    setNodes((prev) => prev.filter((n) => n.id !== nodeId));
+    setOffboarding(node);
+    setOffboardPhase("working");
+    setOffboardError(null);
+    try {
+      const result = await apiFetch<OffboardResult>(`/api/nodes/${node.id}`, {
+        method: "DELETE",
+      });
+      if (result.deleted) {
+        setNodes((prev) => prev.filter((n) => n.id !== node.id));
+        setOffboarding(null);
+        loadNodes();
+      } else if (result.timedOut) {
+        setOffboardPhase("timed-out");
+      } else {
+        setOffboardError("Offboarding did not complete. Try 'Remove anyhow'.");
+        setOffboardPhase("timed-out");
+      }
+    } catch (err) {
+      setOffboardError(err instanceof Error ? err.message : String(err));
+      setOffboardPhase("timed-out");
+    }
+  };
+
+  const removeAnyhow = async () => {
+    if (!offboarding) return;
+    const node = offboarding;
+    setOffboardPhase("working");
+    setOffboardError(null);
+    try {
+      await apiFetch<OffboardResult>(`/api/nodes/${node.id}?force=true`, {
+        method: "DELETE",
+      });
+      setNodes((prev) => prev.filter((n) => n.id !== node.id));
+      setOffboarding(null);
+      loadNodes();
+    } catch (err) {
+      setOffboardError(err instanceof Error ? err.message : String(err));
+      setOffboardPhase("timed-out");
+    }
   };
 
   const getReport = (node: Node): ProvisionReport | null => {
@@ -307,6 +358,16 @@ export default function NodesPage() {
         <OnboardingDialog
           serverHost={serverHost}
           onClose={() => setShowOnboarding(false)}
+        />
+      )}
+
+      {offboarding && (
+        <OffboardingDialog
+          node={offboarding}
+          phase={offboardPhase}
+          error={offboardError}
+          onRemoveAnyhow={removeAnyhow}
+          onClose={() => setOffboarding(null)}
         />
       )}
 
@@ -445,7 +506,7 @@ export default function NodesPage() {
                       </button>
                     )}
                   <button
-                    onClick={() => deleteNode(node.id)}
+                    onClick={() => deleteNode(node)}
                     className="bg-red-800/60 hover:bg-red-700 text-red-300 px-3 py-1 rounded text-xs font-medium transition-colors"
                   >
                     Delete
@@ -506,6 +567,71 @@ export default function NodesPage() {
           <p>No nodes yet. Add a DGX Spark above to get started.</p>
         </div>
       )}
+    </div>
+  );
+}
+
+function OffboardingDialog({
+  node,
+  phase,
+  error,
+  onRemoveAnyhow,
+  onClose,
+}: {
+  node: Node;
+  phase: "working" | "timed-out";
+  error: string | null;
+  onRemoveAnyhow: () => void;
+  onClose: () => void;
+}) {
+  const working = phase === "working";
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="bg-gray-900 border border-gray-800 rounded-lg p-6 max-w-md w-full shadow-xl">
+        <div className="flex items-center gap-3 mb-3">
+          {working && (
+            <span className="w-5 h-5 rounded-full border-2 border-gray-600 border-t-green-400 animate-spin" />
+          )}
+          <h2 className="text-lg font-semibold">
+            {working ? "Offboarding" : "Offboarding stalled"} {node.name}
+            {working ? "…" : ""}
+          </h2>
+        </div>
+
+        {working ? (
+          <p className="text-sm text-gray-400">
+            Stopping deployments and waiting for the agent to uninstall itself
+            (up to 30s). This can take a moment on a busy or unreachable node.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            <p className="text-sm text-gray-300">
+              {error
+                ? error
+                : "Offboarding didn't respond after 30s. The node may be powered off or factory-reset."}
+            </p>
+            <p className="text-sm text-gray-400">
+              You can remove the node record anyhow. Any agent still running on the
+              machine won&apos;t be uninstalled remotely, but the record here will be
+              deleted.
+            </p>
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                onClick={onClose}
+                className="bg-gray-700 hover:bg-gray-600 text-gray-300 px-4 py-2 rounded text-sm font-medium transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={onRemoveAnyhow}
+                className="bg-red-700 hover:bg-red-600 text-white px-4 py-2 rounded text-sm font-medium transition-colors"
+              >
+                Remove anyhow
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

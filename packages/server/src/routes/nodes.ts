@@ -14,6 +14,52 @@ import { triggerClusterReseed } from "../ssh/known-hosts-trigger.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// How long a graceful offboard waits for the agent to tear itself down and go
+// offline before giving up. Overridable per-app via app.set("offboardDeadlineMs")
+// (used by tests so they don't actually wait 30s).
+export const OFFBOARD_DEADLINE_MS = 30_000;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Delete every DB record that transitively FK-references a node, children
+ * before parents, so the final `node.delete()` can never violate a foreign key.
+ *
+ * FK map (from prisma/schema.prisma):
+ *   - MetricSnapshot.nodeId            -> Node          (Restrict: manual)
+ *   - ClusterNode.nodeId               -> Node          (Restrict: manual)
+ *   - ClusterNode.deploymentId         -> Deployment    (Restrict: manual)
+ *   - LoadBalancerEndpoint.deploymentId-> Deployment    (Restrict: manual)
+ *   - FineTuneClusterNode.nodeId       -> Node          (Restrict: manual)  <-- the bug
+ *   - FineTuneClusterNode.jobId        -> FineTuneJob   (Cascade, but delete explicitly too)
+ *   - Deployment.nodeId                -> Node          (Restrict: manual)
+ *   - FineTuneJob.nodeId               -> Node          (Restrict: manual)
+ *   - TrainingMetric.jobId             -> FineTuneJob   (Cascade: auto on job delete)
+ *   - Model.finetuneJobId              -> FineTuneJob   (Cascade: auto on job delete)
+ *   - BenchmarkRun.deploymentId        -> Deployment    (SetNull: auto, history preserved)
+ * A node can be a *worker* in a job/deployment headed by another node, so we
+ * must clear FineTuneClusterNode/ClusterNode rows keyed on this node's id even
+ * when the parent job/deployment lives on a different node.
+ */
+async function deleteNodeRecords(nodeId: string): Promise<void> {
+  await prisma.metricSnapshot.deleteMany({ where: { nodeId } });
+  // Load-balancer endpoints pointing at this node's deployments.
+  await prisma.loadBalancerEndpoint.deleteMany({ where: { deployment: { nodeId } } });
+  // Cluster memberships: this node as a worker elsewhere, and members of this
+  // node's own deployments.
+  await prisma.clusterNode.deleteMany({ where: { nodeId } });
+  await prisma.clusterNode.deleteMany({ where: { deployment: { nodeId } } });
+  // Fine-tune cluster memberships: this node as a worker in someone else's job,
+  // and members of this node's own jobs (the latter also cascades on job delete).
+  await prisma.fineTuneClusterNode.deleteMany({ where: { nodeId } });
+  await prisma.fineTuneClusterNode.deleteMany({ where: { job: { nodeId } } });
+  // Deployments on this node (BenchmarkRun.deploymentId is SetNull, so runs survive).
+  await prisma.deployment.deleteMany({ where: { nodeId } });
+  // Fine-tune jobs on this node (cascades TrainingMetric, FineTuneClusterNode, Model).
+  await prisma.fineTuneJob.deleteMany({ where: { nodeId } });
+  await prisma.node.delete({ where: { id: nodeId } });
+}
+
 function getExpectedAgentVersion(): string {
   // Baked into the server container at build time — this is the minimum
   // acceptable agent version. Agents reporting >= this are fine.
@@ -548,25 +594,47 @@ nodesRouter.post("/:id/wake", async (req, res) => {
  * /api/nodes/{id}:
  *   delete:
  *     tags: [Nodes]
- *     summary: Remove a node and clean up all associated resources
+ *     summary: Offboard/remove a node (graceful with timeout, or forced)
  *     description: >
- *       Stops all active deployments on the node (via `cmd:undeploy`), cancels any
- *       running fine-tune jobs, tells the agent to uninstall itself (`cmd:deprovision`
- *       if online), then deletes the node row and all related DB records (metrics,
+ *       Removes a node and every DB record that FK-references it (metrics,
  *       deployments, fine-tune jobs, cluster memberships, load-balancer endpoints).
  *       Installed software on the machine (Docker, Ollama, etc.) is NOT removed.
+ *
+ *
+ *       Graceful (default): stops active deployments/fine-tunes, tells the agent to
+ *       uninstall itself (`cmd:deprovision`), then waits up to 30s for the agent to
+ *       go offline. If it does, the DB records are deleted (`offboarded: true`). If
+ *       the agent was already offline, it deletes immediately
+ *       (`reason: "agent-offline"`). If 30s elapses with the agent still online, it
+ *       does NOT delete and responds `{ deleted: false, timedOut: true }` so the UI
+ *       can offer "remove anyhow".
+ *
+ *
+ *       Force (`?force=true` or `{ force: true }`): skips the agent entirely and
+ *       deletes the DB records immediately (`forced: true`). Use this for a
+ *       dead/factory-reset node whose agent will never respond.
  *     parameters:
  *       - in: path
  *         name: id
  *         required: true
  *         schema: { type: string }
+ *       - in: query
+ *         name: force
+ *         required: false
+ *         schema: { type: boolean }
+ *         description: Skip the agent and delete DB records immediately.
  *     responses:
  *       '200':
- *         description: Node deleted; returns { deleted, stoppedDeployments }
+ *         description: >
+ *           One of: { deleted: true, forced: true } | { deleted: true, offboarded: true } |
+ *           { deleted: true, offboarded: false, reason: "agent-offline" } |
+ *           { deleted: false, offboarded: false, timedOut: true }
  *       '404':
  *         description: Node not found
  */
 nodesRouter.delete("/:id", async (req, res) => {
+  const force = req.query.force === "true" || req.body?.force === true;
+
   const node = await prisma.node.findUnique({
     where: { id: req.params.id },
     include: {
@@ -578,47 +646,85 @@ nodesRouter.delete("/:id", async (req, res) => {
 
   const agentHub: AgentHub = req.app.get("agentHub");
 
-  // Stop all active deployments
-  for (const deployment of node.deployments) {
-    if (["pending", "running", "starting", "restarting"].includes(deployment.status)) {
-      agentHub.sendToAgent(node.id, {
-        type: "cmd:undeploy",
-        payload: { deploymentId: deployment.id },
-      });
-    }
+  // Force: don't touch the agent (it may be dead/factory-reset — any send could
+  // block or throw on a stale socket). Just tear down the DB records.
+  if (force) {
+    await deleteNodeRecords(node.id);
+    metricsBuffer.remove(node.id);
+    return res.json({ deleted: true, forced: true, stoppedDeployments: node.deployments.length });
   }
 
-  // Cancel running fine-tune jobs
+  // Graceful path. Every agent interaction is best-effort: a dead/stale socket
+  // must never throw and block the offboard.
+  const trySend = (message: unknown) => {
+    try {
+      agentHub.sendToAgent(node.id, message as never);
+    } catch (err) {
+      console.error(`offboard: sendToAgent failed for ${node.id}: ${String(err)}`);
+    }
+  };
+
+  // Stop active deployments.
+  for (const deployment of node.deployments) {
+    if (["pending", "running", "starting", "restarting"].includes(deployment.status)) {
+      trySend({ type: "cmd:undeploy", payload: { deploymentId: deployment.id } });
+    }
+  }
+  // Cancel running fine-tune jobs.
   for (const job of node.finetuneJobs) {
-    agentHub.sendToAgent(node.id, {
-      type: "cmd:finetune:cancel",
-      payload: { jobId: job.id },
+    trySend({ type: "cmd:finetune:cancel", payload: { jobId: job.id } });
+  }
+
+  let agentOnline = false;
+  try {
+    agentOnline = agentHub.isAgentOnline(node.id);
+  } catch {
+    agentOnline = false;
+  }
+
+  // Agent already offline: nothing to wait for, delete immediately.
+  if (!agentOnline) {
+    await deleteNodeRecords(node.id);
+    metricsBuffer.remove(node.id);
+    return res.json({
+      deleted: true,
+      offboarded: false,
+      reason: "agent-offline",
+      stoppedDeployments: node.deployments.length,
     });
   }
 
-  // Tell the agent to uninstall itself if it's online. The agent spawns a
-  // detached cleanup script (systemctl stop/disable, rm /opt/dgx-agent, drop
-  // the systemd unit and sudoers entry) and closes the WebSocket. Installed
-  // software (Docker, Ollama, etc.) stays on the machine.
-  if (agentHub.isAgentOnline(node.id)) {
-    agentHub.sendToAgent(node.id, { type: "cmd:deprovision", payload: {} });
-    // Small grace window so the agent can ack + launch its cleanup before we
-    // drop its DB record (prevents a spurious reconnect attempt with a now-
-    // deleted nodeId).
-    await new Promise((resolve) => setTimeout(resolve, 500));
+  // Agent online: ask it to uninstall itself, then wait for it to go offline.
+  // The agent's cmd:deprovision handler tears itself down and closes the WS.
+  trySend({ type: "cmd:deprovision", payload: {} });
+
+  const deadlineMs =
+    (req.app.get("offboardDeadlineMs") as number | undefined) ?? OFFBOARD_DEADLINE_MS;
+  const pollMs = Math.min(1000, Math.max(10, deadlineMs));
+  const start = Date.now();
+  let wentOffline = false;
+  while (Date.now() - start < deadlineMs) {
+    let stillOnline = true;
+    try {
+      stillOnline = agentHub.isAgentOnline(node.id);
+    } catch {
+      stillOnline = false;
+    }
+    if (!stillOnline) {
+      wentOffline = true;
+      break;
+    }
+    await sleep(Math.min(pollMs, deadlineMs - (Date.now() - start)));
   }
 
-  // Clean up DB: delete related records then the node
-  await prisma.metricSnapshot.deleteMany({ where: { nodeId: node.id } });
-  await prisma.clusterNode.deleteMany({ where: { nodeId: node.id } });
-  await prisma.loadBalancerEndpoint.deleteMany({
-    where: { deployment: { nodeId: node.id } },
-  });
-  await prisma.clusterNode.deleteMany({ where: { deployment: { nodeId: node.id } } });
-  await prisma.deployment.deleteMany({ where: { nodeId: node.id } });
-  await prisma.fineTuneJob.deleteMany({ where: { nodeId: node.id } });
-  await prisma.node.delete({ where: { id: node.id } });
-  metricsBuffer.remove(node.id);
+  // Timed out: the agent never went offline. Don't delete — let the UI offer
+  // "remove anyhow" (force). The status:"online" field is a known-unreliable
+  // signal for an abruptly-dead node, which is exactly why this timeout exists.
+  if (!wentOffline) {
+    return res.json({ deleted: false, offboarded: false, timedOut: true });
+  }
 
-  res.json({ deleted: true, stoppedDeployments: node.deployments.length });
+  await deleteNodeRecords(node.id);
+  metricsBuffer.remove(node.id);
+  res.json({ deleted: true, offboarded: true, stoppedDeployments: node.deployments.length });
 });
