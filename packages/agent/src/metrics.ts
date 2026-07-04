@@ -1,5 +1,6 @@
 import { execSync } from "child_process";
 import { readFileSync, readdirSync } from "fs";
+import { totalmem } from "os";
 
 export interface NetInterface {
   name: string;
@@ -94,7 +95,9 @@ export async function collectMetrics(): Promise<GpuMetrics> {
   } catch {
     return {
       gpuModel: "Unknown (nvidia-smi unavailable)",
-      vramTotal: 0,
+      // Still report the unified-memory pool size (GB10 shares system RAM) even
+      // when nvidia-smi is momentarily unavailable, so vramTotal never regresses to 0.
+      vramTotal: getSystemMemoryMB(),
       gpuUtil: 0,
       vramUsed: 0,
       temperature: null,
@@ -268,6 +271,14 @@ function getProcessGpuMemory(): number {
 
 /** Get total system RAM in MB (for GB10 shared memory architecture). */
 function getSystemMemoryMB(): number {
+  // os.totalmem() is a locale-free kernel syscall — no PATH, no `free` output
+  // parsing (which breaks under some node LANG/number-format settings; observed
+  // on a freshly re-onboarded node returning 0 while os.totalmem gave the right
+  // value). Fall back to `free -m` only if the syscall somehow yields nothing.
+  try {
+    const mb = Math.round(totalmem() / 1024 / 1024);
+    if (mb > 0) return mb;
+  } catch { /* fall through to free */ }
   try {
     const output = execSync("free -m", { timeout: 3000, encoding: "utf-8" });
     const match = output.match(/Mem:\s+(\d+)/);
