@@ -201,13 +201,9 @@ function connect() {
     reattachFinetuneJobs(sendMsg);
 
     // Self-audit: report local prereq status so the dashboard can render the
-    // same checklist we'd get from an SSH audit. Runs once per connection.
-    try {
-      const audit = selfAudit();
-      sendMsg("agent:self-audit", { systemInfo: audit.systemInfo, checks: audit.checks });
-    } catch (err) {
-      console.error("Self-audit failed:", err);
-    }
+    // same checklist we'd get from an SSH audit. Runs once per connection;
+    // also re-sent when the fire-and-forget firewall apply finishes (below).
+    sendSelfAudit();
 
     // Discover and report available vLLM recipes
     const recipes = discoverRecipes();
@@ -438,6 +434,22 @@ function detectPhase(line: string): string | null {
 function sendMsg(type: string, payload: Record<string, unknown>) {
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type, payload }));
+  }
+}
+
+/**
+ * Report local prereq status (incl. the Ollama firewall state) so the
+ * dashboard can render the same checklist as an SSH audit. Safe to call any
+ * time: sendMsg no-ops when the socket isn't open. Sent once per WS connect,
+ * and again when the fire-and-forget firewall apply settles — so a stable
+ * agent that never reconnects still clears the transient "in progress".
+ */
+function sendSelfAudit() {
+  try {
+    const audit = selfAudit();
+    sendMsg("agent:self-audit", { systemInfo: audit.systemInfo, checks: audit.checks });
+  } catch (err) {
+    console.error("Self-audit failed:", err);
   }
 }
 
@@ -1199,6 +1211,13 @@ rm -f /tmp/dgx-deprovision.sh
 // Fire-and-forget at boot: never blocks the WS connect, and a firewall
 // failure must not take down metrics/deploy duties — applyOllamaFirewall
 // logs loudly to the journal instead of throwing.
-void applyOllamaFirewall(MANAGER_URL);
+void applyOllamaFirewall(MANAGER_URL).finally(() => {
+  // Firewall state is final now (applied/failed). Re-send the self-audit so a
+  // connected dashboard clears the transient "Startup apply still in progress"
+  // without waiting for a reconnect. If the apply finished BEFORE the WS
+  // connected, the connect handler's own audit already saw the final state;
+  // if the socket isn't open, sendSelfAudit no-ops harmlessly.
+  sendSelfAudit();
+});
 
 connect();
