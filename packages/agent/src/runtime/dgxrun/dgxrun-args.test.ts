@@ -191,3 +191,23 @@ describe("buildDgxrunDockerArgs — overrides + validation", () => {
     },
   );
 });
+
+describe("buildDgxrunDockerArgs — HF cache defaults", () => {
+  // dgxrun owns the /cache/huggingface bind-mount, so it must default HF_HOME
+  // there + offline; else a recipe that omits them (like the registry recipe,
+  // which relies on sparkrun) re-downloads the weights from the HF Hub.
+  it("defaults HF_HOME=/cache/huggingface and HF_HUB_OFFLINE=1 when the recipe omits them", () => {
+    const s = buildDgxrunDockerArgs(glmRecipe, { ...baseOpts, rank: 0 }).join(" ");
+    expect(s).toContain("-e HF_HOME=/cache/huggingface");
+    expect(s).toContain("-e HF_HUB_OFFLINE=1");
+  });
+
+  it("lets a recipe env override the HF default (recipe value comes after → docker uses it)", () => {
+    const r: DgxrunRecipe = { ...glmRecipe, env: { ...glmRecipe.env, HF_HOME: "/custom/hf" } };
+    const argv = buildDgxrunDockerArgs(r, { ...baseOpts, rank: 0 });
+    const defIdx = argv.findIndex((x, i) => argv[i - 1] === "-e" && x === "HF_HOME=/cache/huggingface");
+    const ovrIdx = argv.findIndex((x, i) => argv[i - 1] === "-e" && x === "HF_HOME=/custom/hf");
+    expect(defIdx).toBeGreaterThanOrEqual(0);
+    expect(ovrIdx).toBeGreaterThan(defIdx);
+  });
+});

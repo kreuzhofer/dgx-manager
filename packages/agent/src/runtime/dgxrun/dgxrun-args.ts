@@ -188,6 +188,19 @@ export function buildDgxrunDockerArgs(recipe: DgxrunRecipe, opts: DgxrunLaunchOp
     "-v", `${opts.weightsDir}:/cache/huggingface`,
   ];
 
+  // dgxrun OWNS the `/cache/huggingface` bind-mount (weightsDir), so default HF
+  // there and go offline — cluster weights are pre-staged on NFS. Pushed BEFORE
+  // the recipe env so a recipe can still override (docker uses the last -e for a
+  // repeated key). Without this, a recipe that omits HF_HOME (e.g. the registry
+  // recipe, which relies on sparkrun to set it) re-downloads from the HF Hub
+  // instead of using the mounted cache.
+  const hfDefaults: Record<string, string> = {
+    HF_HOME: "/cache/huggingface",
+    HF_HUB_OFFLINE: "1",
+  };
+  for (const [k, v] of Object.entries(hfDefaults)) {
+    args.push("-e", `${k}=${v}`);
+  }
   for (const [k, v] of Object.entries(recipe.env ?? {})) {
     args.push("-e", `${k}=${String(v)}`);
   }
