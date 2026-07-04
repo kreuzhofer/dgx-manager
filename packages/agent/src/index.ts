@@ -12,6 +12,9 @@ import { classifyDeadContainer, reconcileDeployStatus } from "./runtime/deploy-s
 import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe, resolveHfHome } from "./runtime/sparkrun.js";
 import { buildInventory, deleteCachedRepo, type RepoKind } from "./runtime/hf-cache.js";
 import { checkSparkrunDeployments, sparkrunRunningStatus, parseLoadingShards } from "./runtime/sparkrun-metrics.js";
+import { launchDgxrun, stopDgxrun, isDgxrunRunning } from "./runtime/dgxrun/dgxrun.js";
+import { checkDgxrunDeployments } from "./runtime/dgxrun/dgxrun-metrics.js";
+import type { DgxrunRecipe } from "./runtime/dgxrun/dgxrun-args.js";
 import { loadDeployments, saveDeployment } from "./runtime/deployment-store.js";
 import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth } from "./runtime/ollama.js";
 import { discoverTrainingRecipes } from "./training-recipes.js";
@@ -197,6 +200,34 @@ function connect() {
       }
     }
 
+    // Reconcile dgxrun deployments — each agent re-checks ITS OWN rank
+    // container via `docker inspect` (no cross-node liveness; the manager
+    // aggregates head health). A dead rank reports failed → manager tears the
+    // whole mp cluster down.
+    const dgxrunDeployments = loadDeployments().filter((d) => d.kind === "dgxrun");
+    if (dgxrunDeployments.length > 0) {
+      console.log(`Reconciling ${dgxrunDeployments.length} dgxrun deployment(s)`);
+      for (const d of dgxrunDeployments) {
+        const running = isDgxrunRunning(d.deploymentId);
+        const isHead = (d.rank ?? 0) === 0;
+        const status = running ? (isHead ? "starting" : "running") : "failed";
+        console.log(`[reconcile-dgxrun] ${d.deploymentId}: rank=${d.rank ?? 0} running=${running} → ${status}`);
+        // Head reports "starting" and lets the health loop promote to running
+        // once /metrics binds; workers report "running" on container liveness.
+        // Any rank that isn't running is a failure the manager must act on.
+        if (!running || !isHead) {
+          sendMsg("agent:deployment:status", {
+            deploymentId: d.deploymentId,
+            status,
+            port: running && isHead ? d.port : undefined,
+            error: running ? undefined : "dgxrun rank not running after agent restart",
+          });
+        } else {
+          sendMsg("agent:deployment:status", { deploymentId: d.deploymentId, status: "starting" });
+        }
+      }
+    }
+
     // Reattach to any running finetune containers (survives agent restart)
     reattachFinetuneJobs(sendMsg);
 
@@ -325,6 +356,49 @@ function connect() {
             });
           }
         }
+
+        // dgxrun health: each agent reports ONLY its own rank container. Head
+        // (rank 0) drives running/starting; workers stay quiet unless they die
+        // (a dead rank hangs the whole mp cluster → manager coordinates teardown).
+        try {
+          const dgxStatuses = await checkDgxrunDeployments();
+          for (const status of dgxStatuses) {
+            const isHead = (status.rank ?? 0) === 0;
+            if (!status.containerRunning && !status.alive) {
+              if (status.capturedLog || status.crashLoop) {
+                const head = status.crashLoop
+                  ? `[agent] dgxrun rank ${status.rank ?? 0} crash-looping (restart #${status.restartCount}) — container output:`
+                  : `[agent] dgxrun rank ${status.rank ?? 0} exited — container output:`;
+                sendMsg("agent:deployment:log", { deploymentId: status.deploymentId, log: `${head}\n${status.capturedLog ?? ""}\n` });
+              }
+              // Report failure from ANY rank so the manager tears down all ranks.
+              sendMsg("agent:deployment:status", {
+                deploymentId: status.deploymentId,
+                status: "failed",
+                error: status.error ?? `dgxrun rank ${status.rank ?? 0} died`,
+              });
+              // Stop the local container (cancel restart loop) + untrack.
+              try { stopDgxrun(status.deploymentId); } catch { /* best effort */ }
+            } else if (status.containerRunning && isHead) {
+              const deployStatus = sparkrunRunningStatus(status);
+              const m = await collectMetrics();
+              if (m.vramUsed > 0) {
+                const prevVram = vllmLastVram.get(status.deploymentId);
+                const changed = !prevVram || Math.abs(m.vramUsed - prevVram) > prevVram * 0.01;
+                if (changed) {
+                  vllmLastVram.set(status.deploymentId, m.vramUsed);
+                  sendMsg("agent:deployment:status", {
+                    deploymentId: status.deploymentId,
+                    status: deployStatus,
+                    port: deployStatus === "running" ? status.port : undefined,
+                    vramActual: m.vramUsed,
+                  });
+                }
+              }
+            }
+            // Running workers stay silent — the head's status is the sole gate.
+          }
+        } catch { /* ignore */ }
 
         // Report all Ollama loaded models — server matches to deployments
         try {
@@ -572,6 +646,70 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
         servedModelName?: string;
       };
 
+      // dgxrun deployment — our own mp multi-node runner. The manager fans a
+      // cmd:deploy to EACH cluster node with its rank; this node launches only
+      // its own rank's container locally (no SSH, no cross-node orchestration).
+      const dgxrunPayload = msg.payload as {
+        kind?: string;
+        recipe?: DgxrunRecipe;
+        rank?: number;
+        nnodes?: number;
+        masterAddr?: string;
+        masterPort?: number;
+        headless?: boolean;
+        params?: Record<string, string | number | undefined>;
+      };
+      if (dgxrunPayload.kind === "dgxrun") {
+        const { recipe, rank, nnodes, masterAddr, masterPort, params } = dgxrunPayload;
+        if (!recipe || rank == null || !nnodes || !masterAddr || masterPort == null) {
+          sendMsg("agent:deployment:status", {
+            deploymentId, status: "failed",
+            error: "dgxrun deploy missing recipe/rank/nnodes/masterAddr/masterPort",
+          });
+          break;
+        }
+        // Only the head drives lifecycle status; workers are silent unless they fail.
+        if (rank === 0) sendMsg("agent:deployment:status", { deploymentId, status: "starting" });
+        // Port override arrives via params (server folds config into params for
+        // dgxrun); fall back to the recipe's default port.
+        const deployPort = Number(params?.port ?? recipe.defaults?.port ?? 8000);
+        let lastPhase = "starting";
+        try {
+          launchDgxrun(
+            deploymentId,
+            { recipe, rank, nnodes, masterAddr, masterPort, port: deployPort, params },
+            (line) => {
+              const cleaned = collapseCarriageReturns(line);
+              sendMsg("agent:deployment:log", { deploymentId, log: cleaned });
+              const loadProgress = parseLoadingShards(line);
+              if (loadProgress && rank === 0) emitDeploymentProgress(deploymentId, "loading", loadProgress);
+              const phase = detectPhase(line);
+              if (phase && phase !== lastPhase && rank === 0) {
+                lastPhase = phase;
+                sendMsg("agent:deployment:status", {
+                  deploymentId, status: phase,
+                  port: phase === "running" ? deployPort : undefined,
+                });
+              }
+            },
+            (code) => {
+              // docker run -d returns after the container starts. 0 = launched
+              // (health loop confirms serving); non-zero = launch failure, which
+              // the manager treats as a dead rank → coordinated teardown.
+              if (code !== 0) {
+                sendMsg("agent:deployment:status", {
+                  deploymentId, status: "failed",
+                  error: `dgxrun rank ${rank} launch failed (exit ${code})`,
+                });
+              }
+            },
+          );
+        } catch (err) {
+          sendMsg("agent:deployment:status", { deploymentId, status: "failed", error: String(err) });
+        }
+        break;
+      }
+
       // Ollama deployment
       if (runtime === "ollama" && modelName) {
         // Reset health-check state machine so the first tick after a
@@ -730,8 +868,22 @@ function handleCommand(msg: { type: string; payload: Record<string, unknown> }) 
             return;
           }
 
-          // sparkrun deployment — identified by presence in the deployment store
+          // sparkrun/dgxrun deployment — identified by presence in the deployment store
           const stored = loadDeployments().find((d) => d.deploymentId === deploymentId);
+          if (stored != null && stored.kind === "dgxrun") {
+            sendMsg("agent:deployment:log", {
+              deploymentId,
+              log: "\n=== Stop requested — tearing down local dgxrun rank container ===\n",
+            });
+            // Mark stopping so a racing health tick doesn't classify this as a crash.
+            saveDeployment({ ...stored, stopping: true });
+            try { stopDgxrun(deploymentId); }
+            catch (stopErr) { console.warn(`[undeploy] dgxrun stop error (continuing): ${stopErr}`); }
+            sendMsg("agent:deployment:status", {
+              deploymentId, status: "stopped", deleteAfter: deleteAfter || false,
+            });
+            return;
+          }
           if (stored != null) {
             sendMsg("agent:deployment:log", {
               deploymentId,

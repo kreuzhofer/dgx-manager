@@ -16,6 +16,8 @@ import { deploymentRepoKeys } from "../hf-cache/grouping.js";
 import { recordRepoDeployment } from "../hf-cache/repo-deployment.js";
 import { maxOutMemoryForDeploy } from "../deployments/maxoutmem.js";
 import { sshExec } from "../ssh/executor.js";
+import { resolveDgxrunRecipe, type DgxrunResolvedRecipe } from "../deployments/dgxrun-recipe.js";
+import { buildDgxrunDeploys, DEFAULT_MASTER_PORT } from "../deployments/dgxrun-dispatch.js";
 
 export const deploymentsRouter = Router();
 
@@ -167,6 +169,29 @@ deploymentsRouter.post("/", async (req, res) => {
     }
   }
 
+  // Resolve dgxrun runner (our own mp multi-node launcher) from recipe YAML the
+  // manager can read: inline recipeYaml, or a recipePath file on shared storage.
+  // A recipe without `runner: dgxrun` leaves isDgxrun=false → existing sparkrun
+  // path unchanged. Registry-ref (recipeFile) dgxrun is a v1 follow-up (its raw
+  // YAML lives only in the agent's sparkrun cache, not on the manager).
+  let dgxrunRecipe: DgxrunResolvedRecipe | undefined;
+  if (!isOllama) {
+    let recipeText: string | undefined;
+    if (inlineRecipeYaml) {
+      recipeText = inlineRecipeYaml;
+    } else if (recipePath && recipeRef) {
+      try { recipeText = readFileSync(recipeRef, "utf8"); } catch { /* agent will read the file */ }
+    }
+    if (recipeText) {
+      const resolved = resolveDgxrunRecipe(recipeText);
+      if (resolved.isDgxrun && resolved.error) {
+        return res.status(400).json({ error: resolved.error });
+      }
+      dgxrunRecipe = resolved.recipe;
+    }
+  }
+  const isDgxrun = dgxrunRecipe != null;
+
   // Normalize + uniqueness-check displayName up front. 400 on bad chars,
   // 409 on duplicate among active deployments. Ollama deploys ignore the
   // field (runtime doesn't honor it); we still reject malformed values so
@@ -217,8 +242,11 @@ deploymentsRouter.post("/", async (req, res) => {
       const recipe = agentHub.getRecipes().find((r) => r.file === recipeFile);
       const recipeDefaults = recipe?.defaults || {};
 
-      const tp = (config?.tensorParallel as number) || (recipeDefaults.tensor_parallel as number) || 1;
-      const pp = (config?.pipelineParallel as number) || (recipeDefaults.pipeline_parallel as number) || 1;
+      // dgxrun recipes carry their own resolved defaults (inline/path recipes
+      // aren't in the lossy agent catalog), so size the cluster from those.
+      const dgxDefaults = dgxrunRecipe?.defaults ?? {};
+      const tp = (config?.tensorParallel as number) || (dgxDefaults.tensor_parallel as number) || (recipeDefaults.tensor_parallel as number) || 1;
+      const pp = (config?.pipelineParallel as number) || (dgxDefaults.pipeline_parallel as number) || (recipeDefaults.pipeline_parallel as number) || 1;
       const needed = tp * pp;
 
       if (needed > idleNodes.length) {
@@ -332,7 +360,7 @@ deploymentsRouter.post("/", async (req, res) => {
       }
     }
 
-    const gpuMemUtil = (config?.gpuMem as number) || (recipe?.defaults?.gpu_memory_utilization as number) || 0.85;
+    const gpuMemUtil = (config?.gpuMem as number) || (dgxrunRecipe?.defaults?.gpu_memory_utilization as number) || (recipe?.defaults?.gpu_memory_utilization as number) || 0.85;
     const shortfalls = await checkVllmVramAdmission(checkNodeIds, gpuMemUtil);
     if (shortfalls.length > 0) {
       return res.status(409).json({
@@ -365,31 +393,44 @@ deploymentsRouter.post("/", async (req, res) => {
     });
   }
 
+  // dgxrun's rendezvous port (torch TCPStore). Config override wins.
+  const masterPort = isDgxrun ? ((config?.masterPort as number) || DEFAULT_MASTER_PORT) : undefined;
+
   // Create deployment
   const deployment = await prisma.deployment.create({
     data: {
       modelId: model.id,
       nodeId: headNodeId,
-      clusterMode: isCluster,
+      // dgxrun is multi-node by nature; mark clusterMode so teardown fans out.
+      clusterMode: isCluster || isDgxrun,
       vramEstimate: vramEstimate || null,
       displayName,
       config: JSON.stringify(isOllama
         ? { runtime: "ollama", modelName, modelType: modelType || "chat", ...config }
-        : { recipeFile, ...config }),
+        // `runner: "dgxrun"` marks the deployment so DELETE/status handlers fan
+        // undeploy to every rank. The resolved recipe is persisted so a future
+        // restart can re-fan without re-reading the source.
+        : { recipeFile, ...(isDgxrun ? { runner: "dgxrun", masterPort, dgxrunRecipe } : {}), ...config }),
     },
   });
 
-  // For cluster, create ClusterNode records and resolve IPs
+  // For cluster (and dgxrun, incl. single-node) create ClusterNode records and
+  // resolve IPs. dgxrun always records its node set so teardown can fan out to
+  // every rank's agent.
   let clusterNodeIps: string[] | undefined;
   let clusterNodeFastIps: (string | null)[] | undefined;
-  if (isCluster) {
+  // Ordered node ids, head first. For a solo dgxrun deploy this is just [head].
+  const recordNodeIds: string[] = (Array.isArray(nodeIds) && nodeIds.length > 0)
+    ? (nodeIds as string[])
+    : [headNodeId];
+  if (isCluster || isDgxrun) {
     const nodes = await prisma.node.findMany({
-      where: { id: { in: nodeIds } },
+      where: { id: { in: recordNodeIds } },
     });
     const nodeMap = new Map(nodes.map((n) => [n.id, n]));
 
-    for (let i = 0; i < nodeIds.length; i++) {
-      const nid = nodeIds[i];
+    for (let i = 0; i < recordNodeIds.length; i++) {
+      const nid = recordNodeIds[i];
       await prisma.clusterNode.create({
         data: {
           deploymentId: deployment.id,
@@ -401,11 +442,11 @@ deploymentsRouter.post("/", async (req, res) => {
     }
 
     // Ordered: head first, then workers. clusterNodeIps stays the
-    // management network (used for Ray inter-node and as default for ssh);
-    // clusterNodeFastIps is the per-node fast-fabric IP when known so the
+    // management network (used for Ray/dgxrun inter-node and as default for
+    // ssh); clusterNodeFastIps is the per-node fast-fabric IP when known so the
     // agent can route bulk transfers (image sync, etc.) over it.
-    clusterNodeIps = nodeIds.map((id: string) => nodeMap.get(id)?.ipAddress).filter(Boolean);
-    clusterNodeFastIps = nodeIds.map((id: string) => nodeMap.get(id)?.fastIpAddress ?? null);
+    clusterNodeIps = recordNodeIds.map((id: string) => nodeMap.get(id)?.ipAddress).filter(Boolean) as string[];
+    clusterNodeFastIps = recordNodeIds.map((id: string) => nodeMap.get(id)?.fastIpAddress ?? null);
   }
 
   // Send deploy command to head agent
@@ -459,26 +500,48 @@ deploymentsRouter.post("/", async (req, res) => {
     }
   }
 
-  agentHub.sendToAgent(headNodeId, {
-    type: "cmd:deploy",
-    payload: {
+  if (isDgxrun && dgxrunRecipe) {
+    // dgxrun: fan a per-rank cmd:deploy to EVERY cluster node's agent (head =
+    // rank 0), each with the head's mgmt IP as masterAddr. NOT a single head
+    // deploy — each agent launches only its own rank's container.
+    const params: Record<string, string | number> = {};
+    for (const [k, v] of Object.entries(config || {})) {
+      if (typeof v === "string" || typeof v === "number") params[k] = v;
+    }
+    if (displayName) params.servedModelName = displayName;
+    const deploys = buildDgxrunDeploys({
       deploymentId: deployment.id,
-      runtime: isOllama ? "ollama" : "vllm",
-      modelName: isOllama ? modelName : undefined,
-      modelType: isOllama ? (modelType || "chat") : undefined,
-      recipeFile: isOllama ? undefined : recipeFile,
-      // Sparkrun recipe sources (D5/D7): agent branch triggers on these.
-      recipeRef: isOllama ? undefined : recipeRef,
-      inlineRecipeYaml: isOllama ? undefined : inlineRecipeYaml,
-      // Per-deploy custom name → vLLM's --served-model-name. Undefined when
-      // the user didn't set displayName, so the agent falls back to the
-      // recipe's authored defaults.served_model_name.
-      servedModelName: displayName ?? undefined,
-      config: config || {},
-      clusterNodes: clusterNodeIps,
-      clusterNodeFastIps,
-    },
-  });
+      recipe: dgxrunRecipe,
+      clusterNodeIds: recordNodeIds,
+      clusterNodeIps: clusterNodeIps ?? [],
+      masterPort,
+      params,
+    });
+    for (const d of deploys) {
+      agentHub.sendToAgent(d.nodeId, { type: "cmd:deploy", payload: d.payload });
+    }
+  } else {
+    agentHub.sendToAgent(headNodeId, {
+      type: "cmd:deploy",
+      payload: {
+        deploymentId: deployment.id,
+        runtime: isOllama ? "ollama" : "vllm",
+        modelName: isOllama ? modelName : undefined,
+        modelType: isOllama ? (modelType || "chat") : undefined,
+        recipeFile: isOllama ? undefined : recipeFile,
+        // Sparkrun recipe sources (D5/D7): agent branch triggers on these.
+        recipeRef: isOllama ? undefined : recipeRef,
+        inlineRecipeYaml: isOllama ? undefined : inlineRecipeYaml,
+        // Per-deploy custom name → vLLM's --served-model-name. Undefined when
+        // the user didn't set displayName, so the agent falls back to the
+        // recipe's authored defaults.served_model_name.
+        servedModelName: displayName ?? undefined,
+        config: config || {},
+        clusterNodes: clusterNodeIps,
+        clusterNodeFastIps,
+      },
+    });
+  }
 
   // Return with cluster info
   const result = await prisma.deployment.findUnique({
@@ -538,6 +601,14 @@ deploymentsRouter.delete("/:id", async (req, res) => {
 
   const deployConfig = deployment.config ? JSON.parse(deployment.config) : {};
 
+  // dgxrun: each agent owns its OWN rank container, so undeploy must reach every
+  // cluster node, not just the head. For all other runtimes the single head
+  // agent tears down its (possibly clustered) workload.
+  const isDgxrunDeploy = deployConfig.runner === "dgxrun";
+  const undeployTargets: string[] = isDgxrunDeploy && deployment.clusterNodes.length > 0
+    ? deployment.clusterNodes.map((cn) => cn.node.id)
+    : [deployment.nodeId];
+
   // Fast path: deployment is already in a terminal state. There's nothing
   // live to stop, so don't go through the agent round-trip — if the agent
   // can't reach its cluster nodes (common after a failed launch) it reports
@@ -546,17 +617,20 @@ deploymentsRouter.delete("/:id", async (req, res) => {
   // drop any stale tracking state.
   const terminalStatuses = ["stopped", "failed", "evicted"];
   if (wantDelete && terminalStatuses.includes(deployment.status)) {
-    if (agentHub.isAgentOnline(deployment.nodeId)) {
-      agentHub.sendToAgent(deployment.nodeId, {
-        type: "cmd:undeploy",
-        payload: {
-          deploymentId: deployment.id,
-          deleteAfter: false,
-          clusterNodes: clusterNodeIps,
-          runtime: deployConfig.runtime || "vllm",
-          modelName: deployConfig.modelName,
-        },
-      });
+    for (const target of undeployTargets) {
+      if (agentHub.isAgentOnline(target)) {
+        agentHub.sendToAgent(target, {
+          type: "cmd:undeploy",
+          payload: {
+            deploymentId: deployment.id,
+            deleteAfter: false,
+            clusterNodes: clusterNodeIps,
+            runtime: deployConfig.runtime || "vllm",
+            modelName: deployConfig.modelName,
+            ...(isDgxrunDeploy ? { kind: "dgxrun" } : {}),
+          },
+        });
+      }
     }
     await prisma.clusterNode.deleteMany({ where: { deploymentId: deployment.id } });
     await prisma.loadBalancerEndpoint.deleteMany({ where: { deploymentId: deployment.id } });
@@ -565,16 +639,19 @@ deploymentsRouter.delete("/:id", async (req, res) => {
     return res.json({ status: "deleted" });
   }
 
-  agentHub.sendToAgent(deployment.nodeId, {
-    type: "cmd:undeploy",
-    payload: {
-      deploymentId: deployment.id,
-      deleteAfter: wantDelete,
-      clusterNodes: clusterNodeIps,
-      runtime: deployConfig.runtime || "vllm",
-      modelName: deployConfig.modelName,
-    },
-  });
+  for (const target of undeployTargets) {
+    agentHub.sendToAgent(target, {
+      type: "cmd:undeploy",
+      payload: {
+        deploymentId: deployment.id,
+        deleteAfter: wantDelete,
+        clusterNodes: clusterNodeIps,
+        runtime: deployConfig.runtime || "vllm",
+        modelName: deployConfig.modelName,
+        ...(isDgxrunDeploy ? { kind: "dgxrun" } : {}),
+      },
+    });
+  }
 
   await prisma.deployment.update({
     where: { id: req.params.id },

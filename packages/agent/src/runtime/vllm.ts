@@ -17,6 +17,8 @@ export interface VllmStatus {
   crashLoop?: boolean;
   restartCount?: number;
   capturedLog?: string;
+  /** dgxrun only — the reporting node's rank (0 = head). Undefined for sparkrun. */
+  rank?: number;
 }
 
 interface VllmInstance {

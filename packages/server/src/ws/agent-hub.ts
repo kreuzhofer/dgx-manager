@@ -9,6 +9,7 @@ import { resolveNodeIp, isValidIpv4 } from "./node-ip.js";
 import { scheduleDebouncedReseed } from "../ssh/known-hosts-trigger.js";
 import { pushRegistriesToAgent } from "../registries/push.js";
 import { normalizeMac } from "../nodes/power.js";
+import { coordinatedDgxrunTeardown } from "../deployments/dgxrun-teardown.js";
 
 export interface OllamaModelInfo {
   name: string;
@@ -517,6 +518,15 @@ export class AgentHub {
                 where: { deploymentId },
                 data: { status },
               }).catch(() => {});
+            }
+
+            // dgxrun coordinated teardown: the mp executor has no recovery, so
+            // ONE dead rank hangs the whole cluster. When any rank reports
+            // failed, tear down every rank. No-op for non-dgxrun deployments.
+            if (status === "failed") {
+              await coordinatedDgxrunTeardown(this, deploymentId).catch((err) =>
+                console.error(`[dgxrun] teardown failed for ${deploymentId}:`, err),
+              );
             }
 
             // Auto-delete record after confirmed stop

@@ -12,7 +12,13 @@ export interface TrackedDeployment {
   clusterId?: string;
   tp?: number;
   /** Discriminates deployment kind so each reconcile loop only processes its own entries. */
-  kind?: "sparkrun" | "vllm";
+  kind?: "sparkrun" | "vllm" | "dgxrun";
+  /** dgxrun only — this node's rank in the mp cluster (0 = head). */
+  rank?: number;
+  /** dgxrun only — head node's management IP (torch TCPStore rendezvous). */
+  masterAddr?: string;
+  /** dgxrun only — torch TCPStore rendezvous port. */
+  masterPort?: number;
   /**
    * Set to `true` by the cmd:undeploy handler BEFORE calling stopSparkrun so
    * that checkSparkrunDeployments can distinguish an intentional stop from a
