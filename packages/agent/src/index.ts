@@ -271,6 +271,16 @@ function connect() {
           activeRequests = active.reduce((sum, s) => sum + (s.requestsRunning ?? 0) + (s.requestsWaiting ?? 0), 0);
           tps = active.reduce((sum, s) => sum + (s.tps ?? 0), 0) || null;
         }
+        // Fold in dgxrun deployments too — otherwise a dgxrun (mp) model reports
+        // no throughput. Only the head rank scrapes /metrics (workers return
+        // null tps), so its tps/active-requests belong in this node's metrics.
+        const dgx = (await checkDgxrunDeployments()).filter((s) => s.containerRunning);
+        if (dgx.length > 0) {
+          activeRequests = (activeRequests ?? 0) +
+            dgx.reduce((sum, s) => sum + (s.requestsRunning ?? 0) + (s.requestsWaiting ?? 0), 0);
+          const dgxTps = dgx.reduce((sum, s) => sum + (s.tps ?? 0), 0);
+          if (dgxTps > 0) tps = (tps ?? 0) + dgxTps;
+        }
       } catch { /* ignore */ }
 
       ws.send(JSON.stringify({
@@ -278,6 +288,9 @@ function connect() {
         payload: {
           gpuUtil: m.gpuUtil,
           vramUsed: m.vramUsed,
+          // Carried on every tick so a stale/zero register-time vramTotal
+          // self-heals (the metrics path has the GB10 system-RAM fallback).
+          vramTotal: m.vramTotal,
           tps,
           activeRequests,
           temp: m.temperature,

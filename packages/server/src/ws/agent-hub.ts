@@ -471,6 +471,14 @@ export class AgentHub {
               data: {
                 lastSeen: new Date(),
                 ...(resolvedTickIp ? { ipAddress: resolvedTickIp } : {}),
+                // Self-heal vramTotal from the live metric tick (the metrics path
+                // has the GB10 system-RAM fallback). vramTotal is otherwise only
+                // set at register, so a node that registered with a transient 0
+                // (e.g. a freshly re-onboarded node) would never recover and its
+                // used/free memory can't render. Only overwrite with a real value.
+                ...(typeof msg.payload.vramTotal === "number" && msg.payload.vramTotal > 0
+                  ? { vramTotal: msg.payload.vramTotal }
+                  : {}),
               },
             });
             const now = Date.now();
