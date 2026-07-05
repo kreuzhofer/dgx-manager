@@ -1,6 +1,12 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync, statSync } from "node:fs";
 import { execSync, execFileSync } from "node:child_process";
 import { setTimeout as sleepP } from "node:timers/promises";
+import { basename } from "node:path";
+
+/** True when this process was spawned as the copied detached updater (/tmp/dgx-updater-*.js). */
+export function isUpdaterEntrypoint(argv1: string | undefined): boolean {
+  return !!argv1 && basename(argv1).startsWith("dgx-updater-");
+}
 
 export interface VerifyResult { ok: boolean; reason?: string; }
 
@@ -121,7 +127,7 @@ function realDeps(nodeIdFile: string): UpdateDeps {
     download: async (url, dest) => { execFileSync("curl", ["-sfL", "-o", dest, url], { timeout: 600_000 }); },
     extract: async (tarball, destDir) => {
       execSync(`sudo rm -rf "${destDir}" && sudo mkdir -p "${destDir}"`, { timeout: 15_000 });
-      execSync(`sudo tar -xzf "${tarball}" -C "${destDir}/"`, { timeout: 300_000 });
+      execFileSync("sudo", ["tar", "-xzf", tarball, "-C", `${destDir}/`], { timeout: 300_000 });
     },
     verify: (dir, version) => verifyExtractedBundle(dir, version),
     preserveNodeId: () => { if (existsSync(nodeIdFile)) execSync(`sudo cp "${nodeIdFile}" ${NEW_DIR}/node-id`, { timeout: 5_000 }); },
@@ -136,8 +142,11 @@ function realDeps(nodeIdFile: string): UpdateDeps {
   };
 }
 
-// Entrypoint: `node updater.js <bundleUrl> <version> <nodeIdFile>`
-if (process.argv[1] && process.argv[1].endsWith("updater.js")) {
+// Entrypoint: `node <copied-updater> <bundleUrl> <version> <nodeIdFile>`
+// The handler copies this module to /tmp/dgx-updater-<ts>.js before spawning it
+// detached (so it survives the parent agent process being restarted); the guard
+// must match THAT name, not the source `updater.js` filename.
+if (isUpdaterEntrypoint(process.argv[1])) {
   const [, , bundleUrl, version, nodeIdFile] = process.argv;
   const releaseLock = () => { try { execSync(`rm -f ${LOCK}`); } catch { /* */ } };
   runUpdate({ bundleUrl, version }, realDeps(nodeIdFile || "/opt/dgx-agent/node-id"))

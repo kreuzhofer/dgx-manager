@@ -136,6 +136,11 @@ function connect() {
     try {
       execSync("mkdir -p /run/dgx-agent && touch /run/dgx-agent/connected");
     } catch { /* marker best-effort */ }
+    // A connected agent proves no update is legitimately in flight — every
+    // update path (success, rollback, or a killed/crashed updater that never
+    // even wrote a result) ends in a restart. Clear the lock unconditionally
+    // so a killed updater can never wedge future cmd:update calls forever.
+    try { execSync("rm -f /run/dgx-agent/updating"); } catch { /* best-effort stale-lock clear */ }
     // Report the outcome of a just-completed self-update (written by the detached
     // updater), so a rollback/failure is visible instead of silent. Success needs
     // no report — the new version shows up in metrics.
@@ -146,7 +151,7 @@ function connect() {
         if (r.outcome !== "success") {
           sendMsg("agent:update-status", { status: "failed", version: r.version, error: `${r.outcome}: ${r.error ?? ""}` });
         }
-        execSync(`rm -f ${rp} /run/dgx-agent/updating`); // clear result + release any lock
+        execSync(`rm -f ${rp}`);
       }
     } catch { /* result report best-effort */ }
 

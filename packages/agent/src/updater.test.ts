@@ -1,5 +1,20 @@
 import { describe, it, expect } from "vitest";
-import { verifyExtractedBundle, healthCheckPasses, runUpdate, atomicSwap, atomicRollback, type UpdateDeps } from "./updater.js";
+import { verifyExtractedBundle, healthCheckPasses, runUpdate, atomicSwap, atomicRollback, isUpdaterEntrypoint, type UpdateDeps } from "./updater.js";
+
+describe("isUpdaterEntrypoint", () => {
+  it("true for the copied detached updater path", () => {
+    expect(isUpdaterEntrypoint("/tmp/dgx-updater-1783277042030.js")).toBe(true);
+  });
+  it("false for the agent's own index.js", () => {
+    expect(isUpdaterEntrypoint("/opt/dgx-agent/dist/index.js")).toBe(false);
+  });
+  it("false for the source updater.js itself (importing, not running, this module)", () => {
+    expect(isUpdaterEntrypoint("/opt/dgx-agent/dist/updater.js")).toBe(false);
+  });
+  it("false when argv[1] is undefined", () => {
+    expect(isUpdaterEntrypoint(undefined)).toBe(false);
+  });
+});
 
 describe("verifyExtractedBundle", () => {
   it("ok when package.json version matches", () => {
