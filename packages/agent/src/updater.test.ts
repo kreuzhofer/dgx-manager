@@ -54,6 +54,16 @@ describe("atomicSwap", () => {
       "sudo mv /opt/dgx-agent-old /opt/dgx-agent",
     ]);
   });
+
+  it("when both the install mv AND the restore mv fail, rethrows a truthful double-failure message", () => {
+    const calls: string[] = [];
+    const run = (cmd: string) => {
+      calls.push(cmd);
+      if (cmd === "sudo mv /opt/dgx-agent-new /opt/dgx-agent") throw new Error("mv: no such file");
+      if (cmd === "sudo mv /opt/dgx-agent-old /opt/dgx-agent") throw new Error("mv: old is gone too");
+    };
+    expect(() => atomicSwap(run)).toThrow(/swap failed AND restore failed.*may be missing/);
+  });
 });
 
 describe("atomicRollback", () => {
@@ -115,5 +125,18 @@ describe("runUpdate", () => {
     await runUpdate({ bundleUrl: "u", version: "1.0.0" }, h.deps);
     expect(h.calls).not.toContain("swap");
     expect(h.result.outcome).toBe("failed");
+  });
+  it("health fail + rollback itself throws -> outcome is rollback-failed (not rolled-back), writeResult called once", async () => {
+    let writeResultCalls = 0;
+    const h = makeDeps({
+      checkConnected: () => null, // never connects
+      rollback: () => { throw new Error("mv: old agent gone"); },
+    });
+    const origWriteResult = h.deps.writeResult;
+    h.deps.writeResult = (r) => { writeResultCalls++; origWriteResult(r); };
+    await runUpdate({ bundleUrl: "u", version: "1.0.0" }, h.deps);
+    expect(h.result.outcome).toBe("rollback-failed");
+    expect(h.result.outcome).not.toBe("rolled-back");
+    expect(writeResultCalls).toBe(1);
   });
 });

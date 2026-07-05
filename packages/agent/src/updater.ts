@@ -28,8 +28,11 @@ export function atomicSwap(run: (cmd: string) => void): void {
   try {
     run("sudo mv /opt/dgx-agent-new /opt/dgx-agent");      // install new
   } catch (e) {
-    try { run("sudo mv /opt/dgx-agent-old /opt/dgx-agent"); } catch { /* double-failure: leave for manual recovery */ }
-    throw new Error(`swap failed, restored previous agent: ${(e as Error).message}`);
+    let restored = false;
+    try { run("sudo mv /opt/dgx-agent-old /opt/dgx-agent"); restored = true; } catch { /* double-failure: leave for manual recovery */ }
+    throw new Error(restored
+      ? `swap failed, restored previous agent: ${(e as Error).message}`
+      : `swap failed AND restore failed — /opt/dgx-agent may be missing: ${(e as Error).message}`);
   }
 }
 
@@ -83,12 +86,27 @@ export async function runUpdate(args: { bundleUrl: string; version: string }, de
       }
     }
     deps.log("[updater] new agent did not reconnect in 90s — rolling back");
-    deps.rollback();
-    deps.writeResult({ version, outcome: "rolled-back", error: "new agent did not reconnect within 90s" });
+    try {
+      deps.rollback();
+      deps.writeResult({ version, outcome: "rolled-back", error: "new agent did not reconnect within 90s" });
+    } catch (rbErr) {
+      deps.log(`[updater] ROLLBACK FAILED — node may be without an agent: ${(rbErr as Error).message}`);
+      deps.writeResult({ version, outcome: "rollback-failed", error: `rollback failed after health timeout: ${(rbErr as Error).message}` });
+    }
   } catch (e) {
     const err = (e as Error).message;
-    if (swapped) { try { deps.rollback(); } catch { /* */ } deps.log(`[updater] post-swap failure, rolled back: ${err}`); deps.writeResult({ version, outcome: "rolled-back", error: err }); }
-    else { deps.log(`[updater] pre-swap failure (agent untouched): ${err}`); deps.writeResult({ version, outcome: "failed", error: err }); }
+    if (swapped) {
+      try {
+        deps.rollback();
+        deps.log(`[updater] post-swap failure, rolled back: ${err}`);
+        deps.writeResult({ version, outcome: "rolled-back", error: err });
+      } catch (rbErr) {
+        deps.log(`[updater] post-swap failure AND rollback failed — node may be without an agent: ${(rbErr as Error).message}`);
+        deps.writeResult({ version, outcome: "rollback-failed", error: `${err}; rollback also failed: ${(rbErr as Error).message}` });
+      }
+    } else {
+      deps.log(`[updater] pre-swap failure (agent untouched): ${err}`); deps.writeResult({ version, outcome: "failed", error: err });
+    }
   }
 }
 
