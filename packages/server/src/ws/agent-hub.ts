@@ -522,6 +522,19 @@ export class AgentHub {
             // source on every metric tick — same pattern as line 110.
             const remoteIp = (ws as unknown as { _socket?: { remoteAddress?: string } })._socket?.remoteAddress?.replace("::ffff:", "");
             const resolvedTickIp = resolveNodeIp(advertiseIp, remoteIp);
+            // Self-heal the live agents map: sweepStale() may have deleted this
+            // node's entry while its socket stayed half-open (heartbeat stalled
+            // >STALE_THRESHOLD_MS without the TCP connection dropping). A live
+            // metrics message proves the socket is still this node, so
+            // re-assert the map entry — otherwise the DB status:"online"
+            // self-heal below would be a lie: isAgentOnline/sendToAgent read
+            // `this.agents`, not the DB, so a recovered node would stay
+            // silently unreachable (cmd:deploy/undeploy, power, hf-cache,
+            // registry, CapClient diag/exec all no-op with no error) until a
+            // real TCP reconnect. Idempotent — matches the shape agent:register
+            // sets at line 199 — and safe because a genuinely dead node simply
+            // never sends another agent:metrics to re-add itself.
+            this.agents.set(nodeId, { ws, nodeId });
             await prisma.node.update({
               where: { id: nodeId },
               data: {
