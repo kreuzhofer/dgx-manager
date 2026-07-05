@@ -526,6 +526,8 @@ export class AgentHub {
               where: { id: nodeId },
               data: {
                 lastSeen: new Date(),
+                // self-heal: a node the staleness sweep marked offline recovers on its next heartbeat
+                status: "online",
                 ...(resolvedTickIp ? { ipAddress: resolvedTickIp } : {}),
                 // Self-heal vramTotal from the live metric tick (the metrics path
                 // has the GB10 system-RAM fallback). vramTotal is otherwise only

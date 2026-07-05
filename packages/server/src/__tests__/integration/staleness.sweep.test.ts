@@ -84,4 +84,11 @@ describe("AgentHub.sweepStale", () => {
 
     hub.stop();
   });
+
+  it("a swept-offline node returns to online when a heartbeat updates it", async () => {
+    const n = await prisma.node.create({ data: { name: "recover", status: "offline", lastSeen: new Date(Date.now() - 60_000) } });
+    // simulate the metric handler's self-heal update
+    await prisma.node.update({ where: { id: n.id }, data: { lastSeen: new Date(), status: "online" } });
+    expect((await prisma.node.findUnique({ where: { id: n.id } }))!.status).toBe("online");
+  });
 });
