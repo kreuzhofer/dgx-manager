@@ -24,6 +24,10 @@ import { quantizeMergedToFp8 } from "./runtime/finetune-quantize.js";
 import { selfAudit } from "./self-audit.js";
 import { applyOllamaFirewall } from "./firewall.js";
 import { powerCommand, powerUnitName, powerLaunchCommand, type PowerAction } from "./runtime/power.js";
+import { CapRegistry } from "./caps/registry.js";
+import { makeExecCap } from "./caps/exec-cap.js";
+import { collectDiag } from "./sysinfo/diag.js";
+import { readSysInfo } from "./sysinfo/proc-read.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_DIR = join(__dirname, "..");
@@ -113,6 +117,10 @@ let healthTimer: ReturnType<typeof setInterval> | null = null;
 const ollamaLastState = new Map<string, string>(); // deploymentId → last reported state
 const ollamaLastVram = new Map<string, number>(); // deploymentId → last reported vramActual
 const vllmLastVram = new Map<string, number>(); // deploymentId → last reported vramActual
+
+const caps = new CapRegistry();
+caps.register({ name: "diag.collect", handle: async () => collectDiag() });
+caps.register(makeExecCap(undefined, (a) => sendMsg("agent:audit", { cap: "exec", ...a })));
 
 function connect() {
   console.log(`Connecting to ${MANAGER_URL}...`);
@@ -299,6 +307,7 @@ function connect() {
           diskDevices: m.diskDevices,
           memory: m.memory,
           pressure: m.pressure,
+          sysinfo: readSysInfo(),
         },
       }));
     }, METRICS_INTERVAL);
@@ -483,7 +492,7 @@ function connect() {
         return;
       }
 
-      handleCommand(msg);
+      void handleCommand(msg).catch((err) => console.error("handleCommand error:", err));
     } catch (err) {
       console.error("Message parse error:", err);
     }
@@ -641,7 +650,7 @@ function emitDeploymentProgress(
   });
 }
 
-function handleCommand(msg: { type: string; payload: Record<string, unknown> }) {
+async function handleCommand(msg: { type: string; payload: Record<string, unknown> }) {
   switch (msg.type) {
     case "cmd:deploy": {
       const { deploymentId, recipeFile, config, clusterNodes, clusterNodeFastIps, runtime, modelName, modelType, servedModelName } = msg.payload as {
@@ -1364,6 +1373,14 @@ rm -f /tmp/dgx-deprovision.sh
         console.error(`[power] failed to launch power command: ${err}`);
         sendMsg("agent:power:error", { action, error: String(err) });
       }
+      break;
+    }
+
+    case "agent:cap:request": {
+      const { id, name, input } = msg.payload as { id: string; name: string; input: unknown };
+      const ctx = { emitChunk: (stream: "stdout" | "stderr", data: string) => sendMsg("agent:cap:chunk", { id, stream, data }) };
+      const result = await caps.dispatch(name, input, ctx);
+      sendMsg("agent:cap:result", { id, ...result });
       break;
     }
 
