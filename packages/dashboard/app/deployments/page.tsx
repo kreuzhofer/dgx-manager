@@ -1398,7 +1398,7 @@ export default function DeploymentsPage() {
                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-500">worker</span>
                     )}
                     {isHead && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-900/40 text-indigo-300">head</span>
+                      <span title="Head node (rank 0) — serves the API, scrapes tps" className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-900/40 text-yellow-300">★ head</span>
                     )}
                     {!isWorker && (
                       <>
