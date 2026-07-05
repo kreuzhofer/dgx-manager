@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseMeminfo, parsePressure } from "./proc-parse.js";
+import { parseMeminfo, parsePressure, parseLoadavg, parseFileNr } from "./proc-parse.js";
 
 describe("parseMeminfo", () => {
   it("converts kB fields to MB", () => {
@@ -35,5 +35,19 @@ describe("parsePressure", () => {
   });
   it("cpu pressure has no full line", () => {
     expect(parsePressure("some avg10=0 avg60=0 avg300=0 total=0").full).toBeNull();
+  });
+});
+
+describe("parseLoadavg", () => {
+  it("parses loads + proc counts", () => {
+    const l = parseLoadavg("2.15 1.80 1.44 3/1234 99999");
+    expect(l.load1).toBe(2.15); expect(l.runnable).toBe(3); expect(l.totalProcs).toBe(1234);
+  });
+});
+
+describe("parseFileNr", () => {
+  it("parses allocated and max", () => {
+    const f = parseFileNr("12800\t0\t9223372");
+    expect(f.allocated).toBe(12800); expect(f.max).toBe(9223372);
   });
 });

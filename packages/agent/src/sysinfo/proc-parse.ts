@@ -28,3 +28,17 @@ function psiLine(text: string, kind: "some" | "full"): PsiLine | null {
 export function parsePressure(text: string): Pressure {
   return { some: psiLine(text, "some") ?? { avg10: 0, avg60: 0, avg300: 0, total: 0 }, full: psiLine(text, "full") };
 }
+
+export interface LoadInfo { load1: number; load5: number; load15: number; runnable: number; totalProcs: number; }
+export function parseLoadavg(text: string): LoadInfo {
+  const p = text.trim().split(/\s+/);
+  const [run, total] = (p[3] ?? "0/0").split("/");
+  return { load1: parseFloat(p[0]) || 0, load5: parseFloat(p[1]) || 0, load15: parseFloat(p[2]) || 0,
+           runnable: parseInt(run, 10) || 0, totalProcs: parseInt(total, 10) || 0 };
+}
+
+export interface FdInfo { allocated: number; max: number; }
+export function parseFileNr(text: string): FdInfo {
+  const p = text.trim().split(/\s+/);
+  return { allocated: parseInt(p[0], 10) || 0, max: parseInt(p[2], 10) || 0 };
+}
