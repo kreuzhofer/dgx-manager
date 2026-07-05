@@ -11,6 +11,10 @@ import { pushRegistriesToAgent } from "../registries/push.js";
 import { normalizeMac } from "../nodes/power.js";
 import { coordinatedDgxrunTeardown } from "../deployments/dgxrun-teardown.js";
 import { CapClient } from "../caps/cap-client.js";
+import { selectStaleNodes } from "./staleness.js";
+
+const STALE_THRESHOLD_MS = 30_000;
+const SWEEP_INTERVAL_MS = 10_000;
 
 export interface OllamaModelInfo {
   name: string;
@@ -129,11 +133,13 @@ export class AgentHub {
    *  (diag.collect, exec). Routed to the target node's WS via sendToAgent;
    *  results/chunks come back through the agent:cap:result/chunk cases below. */
   readonly capClient: CapClient;
+  private sweepTimer: ReturnType<typeof setInterval>;
 
   constructor() {
     this.wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
     this.wss.on("connection", (ws) => this.handleConnection(ws));
     this.capClient = new CapClient((nodeId, msg) => this.sendToAgent(nodeId, msg as Record<string, unknown>));
+    this.sweepTimer = setInterval(() => { void this.sweepStale(); }, SWEEP_INTERVAL_MS);
   }
 
   handleUpgrade(request: import("http").IncomingMessage, socket: import("stream").Duplex, head: Buffer) {
@@ -830,4 +836,25 @@ export class AgentHub {
   getConnectedNodeIds(): string[] {
     return Array.from(this.agents.keys());
   }
+
+  /** Mark online nodes whose lastSeen is stale as offline (the WS 'close' event
+   *  can lag 76+ min on a half-open socket). Also drops them from the live agents
+   *  map so isAgentOnline/diag/exec report them offline. Called by the interval. */
+  async sweepStale(): Promise<void> {
+    try {
+      const nodes = await prisma.node.findMany({ where: { status: "online" }, select: { id: true, status: true, lastSeen: true } });
+      const stale = selectStaleNodes(nodes, Date.now(), STALE_THRESHOLD_MS);
+      for (const id of stale) {
+        await prisma.node.update({ where: { id }, data: { status: "offline" } }).catch(() => {});
+        this.agents.delete(id);
+        sseBroadcast({ type: "node:status", payload: { nodeId: id, status: "offline" } });
+        console.log(`[staleness] node ${id} marked offline (no heartbeat > ${STALE_THRESHOLD_MS}ms)`);
+      }
+    } catch (err) {
+      console.error("[staleness] sweep error:", err);
+    }
+  }
+
+  /** Stop the staleness sweep (test teardown / shutdown). */
+  stop(): void { clearInterval(this.sweepTimer); }
 }
