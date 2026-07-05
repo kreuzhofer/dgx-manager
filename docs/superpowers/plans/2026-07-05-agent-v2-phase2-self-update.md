@@ -341,7 +341,7 @@ export function launchUpdater(d: LaunchDeps): "launched" | "in-flight" {
 ```ts
     case "cmd:update": {
       const { bundleUrl, version } = msg.payload as { bundleUrl: string; version: string };
-      const updaterPath = join(AGENT_DIR, "updater.js"); // shipped in the bundle next to index.js's dir
+      const updaterPath = join(__dirname, "updater.js"); // dist/updater.js — same dir as index.js (verified: tsc outDir=dist, ExecStart runs /opt/dgx-agent/dist/index.js)
       const tmpPath = `/tmp/dgx-updater-${Date.now()}.js`;
       const RUN_DIR = "/run/dgx-agent";
       const outcome = launchUpdater({
@@ -356,7 +356,7 @@ export function launchUpdater(d: LaunchDeps): "launched" | "in-flight" {
       break;
     }
 ```
-Add `import { launchUpdater } from "./update-launch.js";`. Confirm `join`, `spawn`, `execSync`, `existsSync`, `AGENT_DIR`, `NODE_ID_FILE` are already imported in `index.ts` (they are). Verify `updater.js` lands at `AGENT_DIR/updater.js` in the built bundle — if the build emits it elsewhere (e.g. `dist/`), set `updaterPath` to the actual emitted location; check with `./scripts/build-agent-bundles.sh` output or the tsconfig `outDir`. **If the emitted path differs, that is the one correctness-critical thing to get right.**
+Add `import { launchUpdater } from "./update-launch.js";`. Confirm `join`, `spawn`, `execSync`, `existsSync`, `__dirname`, `NODE_ID_FILE` are already imported/defined in `index.ts` (they are — `__dirname` at line 32). **Path RESOLVED:** `tsc` has `outDir: dist`, the bundle ships `dist/`, and systemd runs `/opt/dgx-agent/dist/index.js`, so `__dirname = /opt/dgx-agent/dist` and `join(__dirname, "updater.js")` = `/opt/dgx-agent/dist/updater.js` — the correct location (do NOT use `AGENT_DIR`, which is one level too high).
 
 - [ ] **Step 6: Verify.** `npx tsc --noEmit -p packages/agent/tsconfig.json` clean; `npm test` green.
 - [ ] **Step 7: Commit** — `git add -A && git commit -m "feat(self-update): non-blocking cmd:update via detached updater"`
