@@ -170,6 +170,28 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 - [ ] **VRAM admission guard** — compare `recipe.vram_required` against `node.vramTotal` at deploy time and reject with a clear error, to prevent wasting a build cycle on models that can't fit.
 - [ ] **Heterogeneous cluster guard** — scheduler refuses to form multi-node training/vLLM clusters that mix arches or GPU classes.
 
+## Phase 3.7: Agent v2 — Management Plane over the Agent (in progress)
+
+**Goal:** Make SSH optional for node management. The agent becomes a management plane — deep observation + safe remote execution — that keeps working when a node is degraded (wedged sshd, fork-starved), because the agent WS stays alive when SSH dies.
+
+**Motivation (July 2026):** During the GLM-5.2 work, nodes' sshd repeatedly wedged under SSH connection load while the agent WS kept heartbeating — but the WS couldn't diagnose or manage anything, so we were blind exactly when we needed sight. The head node's wedge is most likely unified-memory pressure starving `fork()` (unconfirmed — no non-SSH channel existed to prove it), which also breaks any shell-based management path. Hence: **fork-free** observation as the foundation.
+
+### Phase 1 — Incident-Response Core (in progress)
+
+- Fork-free `/proc`+`/sys` diagnostics (`diag.collect`): memory, PSI pressure (cpu/mem/io), load, pid/fd counts, **sshd `:22` connections by TCP state** (distinguishes MaxStartups pre-auth pileup from fork-starvation), thermals, kmsg tail — read in-process so it works when `fork()` is failing
+- Rich streaming metrics: the same fields on every tick, self-healing (fixes the `null` memory/PSI we hit)
+- Audited, reason-required `exec` break-glass capability (streamed output + `AuditEvent`)
+- A capability registry (typed WS request/result/chunk with correlation IDs) as the extensible foundation Phases 2-4 build on
+- Server surface: `POST /api/nodes/:id/diag`, `POST /api/nodes/:id/exec`, audit table
+- Spec + plan: `docs/superpowers/specs/2026-07-05-agent-v2-phase1-incident-response-design.md` (executing via subagent-driven TDD; parsers + registry + exec landed, WS wiring / server / Prisma in progress)
+
+### Later phases (specs TBD)
+
+- [ ] **Phase 2** — robust self-update (atomic + health-check + auto-rollback + peer-pull) + container-image transfer over the fast fabric (fixes flaky WS `cmd:update` + manual `docker save|load`)
+- [ ] **Phase 3** — declarative node provision/restore (netplan/fabric/NFS/docker-`default-shm-size`/sudoers) + manager heartbeat-staleness sweep (fixes factory-reset-restore-by-hand + stale `online` status)
+- [ ] **Phase 4** — fold dgxrun deploy management onto the capability registry
+- [ ] mTLS + per-node `exec` arming (Phase 1 ships token auth + audit)
+
 ## Phase 4: Dataset Management (in progress)
 
 **Goal:** First-class support for training data throughout the fine-tuning workflow.
@@ -236,6 +258,16 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 
 ---
 
+## Recent work (July 2026)
+
+- **GLM-5.2 multi-node via the new `dgxrun` runner** — the Ray executor is genuinely broken on this vLLM build (`AttributeError: 'ShmRingBuffer' object has no attribute 'buf'`, even with 61 GB /dev/shm), so sparkrun (Ray-only for multi-node) cannot serve it. Built **dgxrun**: our own agent-per-node `mp`-executor fan-out driven by the manager (`runner: dgxrun` in the recipe, driven by `recipeYaml`/`recipePath`). GLM-5.2-AWQ-INT4 (15pct) validated end-to-end: 85K context @ 0.88 util, **23.7 tok/s warm** with MTP speculative decoding + dual-rail RoCE RDMA (NET/IB). sm12x DSA Triton fallback kernels JIT-compile on first inference (~6 min, memory-heavy, persist to NFS cache). See spec `docs/superpowers/plans/2026-07-04-dgxrun-runner.md` + memory `glm52-shm-and-jit-findings`.
+- **Power control** — agent-primary reboot/shutdown/suspend with SSH fallback (version-gated), force variants for hung nodes, Wake-on-LAN arming before shutdown; compose switched to host networking so WoL packets reach the LAN (memory `wol-broken-docker-bridge`)
+- **Node offboarding** — graceful + force offboarding with a 30s timeout, complete FK cleanup on delete
+- **Ollama governance** — startup firewall restricts `:11434` to manager + loopback; install without autostart; on-demand service start for Ollama deploys; firewall state reported via self-audit
+- **`maxoutmem` recipe flag** — reclaim node memory (stop gdm) before a deploy that needs the full unified-memory budget
+- **Metrics fixes** — dgxrun tps folded into node metrics; `vramTotal` now self-heals from every tick via `os.totalmem()` (was a register-only `free -m` parse that returned 0 on a re-onboarded node)
+- **Agent v2 kickoff** — incident-response core under construction (see Phase 3.7)
+
 ## Recent work (May–June 2026)
 
 - **Sparkrun deploy backend** — replaced the eugr `run-recipe.sh` path with [sparkrun](https://github.com/spark-arena/sparkrun) (agent-side; head-node runs `sparkrun run`). Recipe catalog from `sparkrun list` registries; inline-`recipeYaml` deploy API (remote-dev, no cluster-fs access); OpenAPI 3 spec + Swagger UI (`/api/openapi.json`, `/api/docs`); live vLLM model-loading logs via a `sparkrun logs` follower; provisioner installs + sets up sparkrun
@@ -254,6 +286,9 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 |------|--------|-------|-----------|----------|
 | Nodes & Metrics | ✅ | ✅ | ✅ | ✅ |
 | Deployments | ✅ | ✅ | ✅ | ✅ |
+| Multi-node (dgxrun mp) | ✅ | ✅ | ✅ | ✅ |
+| Power Control (reboot/WoL) | ✅ | ✅ | ✅ | ✅ |
+| Agent v2 (mgmt plane) | 🚧 | 🚧 | — | 🚧 |
 | Load Balancer | ✅* | — | placeholder | ✅ |
 | Models | ✅ | — | placeholder | ✅ |
 | Fine-Tuning (single) | ✅ | ✅ | ✅ | ✅ |
@@ -277,4 +312,4 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 
 ---
 
-*Last updated: June 12, 2026*
+*Last updated: July 5, 2026*
