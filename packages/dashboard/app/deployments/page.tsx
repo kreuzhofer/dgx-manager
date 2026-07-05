@@ -4,6 +4,7 @@ import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { toast } from "sonner";
 import { apiFetch } from "@/lib/api";
 import { useSSE, type SseEvent } from "@/lib/sse";
+import { buildClusterNodeIds } from "@/lib/cluster-nodes";
 import { LogViewer } from "@/components/log-viewer";
 import { BenchmarkFormModal } from "@/components/benchmark-form-modal";
 
@@ -159,6 +160,7 @@ export default function DeploymentsPage() {
   // auto-pick that ignores VRAM availability and forces the user back onto
   // already-busy nodes.
   const [selectedClusterNodes, setSelectedClusterNodes] = useState<Set<string>>(new Set());
+  const [clusterHeadId, setClusterHeadId] = useState<string>("");
   const [port, setPort] = useState("8000");
   const [maxModelLen, setMaxModelLen] = useState("");
   const [tensorParallel, setTensorParallel] = useState("");
@@ -469,7 +471,7 @@ export default function DeploymentsPage() {
         if (!needsClusterFt && !selectedNode) return;
 
         const ftBody: Record<string, unknown> = { config };
-        if (needsClusterFt) ftBody.nodeIds = Array.from(selectedClusterNodes);
+        if (needsClusterFt) ftBody.nodeIds = buildClusterNodeIds(clusterHeadId, selectedClusterNodes);
         else ftBody.nodeId = selectedNode;
         if (finetuneArtifactVariant) ftBody.artifactVariant = finetuneArtifactVariant;
         if (trimmedDisplayName) ftBody.displayName = trimmedDisplayName;
@@ -494,6 +496,7 @@ export default function DeploymentsPage() {
         // node picks + TP/PP/memory overrides, which surprised users.
         setSelectedNode("");
         setSelectedClusterNodes(new Set());
+        setClusterHeadId("");
         setTensorParallel("");
         setPipelineParallel("");
         setMaxModelLen("");
@@ -528,7 +531,7 @@ export default function DeploymentsPage() {
           ? {
               // Explicit list lets the user override which N nodes to use
               // (the dashboard pre-picks by free VRAM; the user can toggle).
-              nodeIds: Array.from(selectedClusterNodes),
+              nodeIds: buildClusterNodeIds(clusterHeadId, selectedClusterNodes),
               recipeFile: selectedRecipe,
               config: configOverrides,
               ...(trimmedDisplayName ? { displayName: trimmedDisplayName } : {}),
@@ -560,6 +563,7 @@ export default function DeploymentsPage() {
       setPort("8000");
       setSelectedNode("");
       setSelectedClusterNodes(new Set());
+      setClusterHeadId("");
       setCustomDisplayName("");
       setViewingLogs(deployment.id);
       // Immediately remove consumed nodes from idle list
@@ -815,6 +819,15 @@ export default function DeploymentsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [needsCluster, requiredNodes, selectedRecipe, nodes.length]);
 
+  // Keep the chosen head valid: default to the first selected node; if the
+  // current head is deselected, fall back to the new first selected.
+  useEffect(() => {
+    const ids = Array.from(selectedClusterNodes);
+    if (ids.length === 0) { if (clusterHeadId) setClusterHeadId(""); return; }
+    if (!clusterHeadId || !selectedClusterNodes.has(clusterHeadId)) setClusterHeadId(ids[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedClusterNodes]);
+
   const canDeploy = needsCluster
     ? selectedClusterNodes.size === requiredNodes
     : !!selectedNode || idleNodes.length >= 1;
@@ -988,6 +1001,16 @@ export default function DeploymentsPage() {
                               className="accent-green-500"
                             />
                             <span className="font-medium">{n.name}</span>
+                            {checked && (
+                              <button
+                                type="button"
+                                title={clusterHeadId === n.id ? "Head node (rank 0)" : "Make head node"}
+                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); setClusterHeadId(n.id); }}
+                                className={`text-xs leading-none ${clusterHeadId === n.id ? "text-yellow-400" : "text-gray-600 hover:text-yellow-500"}`}
+                              >
+                                {clusterHeadId === n.id ? "★ head" : "☆"}
+                              </button>
+                            )}
                             <span className="text-gray-500 ml-auto tabular-nums">
                               {freeGB}/{totalGB} GB free
                               {usedPct > 0 && <span className="text-yellow-500 ml-1">({usedPct}% used)</span>}
