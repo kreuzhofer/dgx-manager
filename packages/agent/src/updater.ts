@@ -1,5 +1,5 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync, statSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import { setTimeout as sleepP } from "node:timers/promises";
 
 export interface VerifyResult { ok: boolean; reason?: string; }
@@ -18,6 +18,27 @@ export function verifyExtractedBundle(
 /** New agent is healthy iff it wrote the connected marker AFTER the restart. */
 export function healthCheckPasses(markerMtimeMs: number | null, restartMs: number, _windowMs: number): boolean {
   return markerMtimeMs != null && markerMtimeMs >= restartMs;
+}
+
+/** Move current -> old, then new -> current. If installing the new dir fails,
+ *  restore the previous agent from old so the node is never left without one. */
+export function atomicSwap(run: (cmd: string) => void): void {
+  run("sudo rm -rf /opt/dgx-agent-old");
+  run("sudo mv /opt/dgx-agent /opt/dgx-agent-old");        // current moved away
+  try {
+    run("sudo mv /opt/dgx-agent-new /opt/dgx-agent");      // install new
+  } catch (e) {
+    try { run("sudo mv /opt/dgx-agent-old /opt/dgx-agent"); } catch { /* double-failure: leave for manual recovery */ }
+    throw new Error(`swap failed, restored previous agent: ${(e as Error).message}`);
+  }
+}
+
+/** Restore the previous agent: stash the bad current as -failed, move old back, restart. */
+export function atomicRollback(run: (cmd: string) => void): void {
+  run("sudo rm -rf /opt/dgx-agent-failed");
+  run("sudo mv /opt/dgx-agent /opt/dgx-agent-failed");     // stash the bad new (keep for post-mortem)
+  run("sudo mv /opt/dgx-agent-old /opt/dgx-agent");        // restore the good previous agent
+  run("sudo systemctl restart dgx-agent");
 }
 
 export interface UpdateDeps {
@@ -43,8 +64,8 @@ export async function runUpdate(args: { bundleUrl: string; version: string }, de
   const { bundleUrl, version } = args;
   const tarball = `/tmp/agent-bundle-${version}.tar.gz`;
   let swapped = false;
-  deps.log(`[updater] starting update to v${version}`);
   try {
+    deps.log(`[updater] starting update to v${version}`);
     await deps.download(bundleUrl, tarball);
     await deps.extract(tarball, NEW_DIR);
     const v = deps.verify(NEW_DIR, version);
@@ -77,18 +98,19 @@ const RESULT = `${RUN_DIR}/update-result.json`;
 const LOCK = `${RUN_DIR}/updating`;
 
 function realDeps(nodeIdFile: string): UpdateDeps {
+  const run = (cmd: string) => { execSync(cmd, { timeout: 20_000 }); };
   return {
-    download: async (url, dest) => { execSync(`curl -sfL -o "${dest}" "${url}"`, { timeout: 600_000 }); },
+    download: async (url, dest) => { execFileSync("curl", ["-sfL", "-o", dest, url], { timeout: 600_000 }); },
     extract: async (tarball, destDir) => {
       execSync(`sudo rm -rf "${destDir}" && sudo mkdir -p "${destDir}"`, { timeout: 15_000 });
       execSync(`sudo tar -xzf "${tarball}" -C "${destDir}/"`, { timeout: 300_000 });
     },
     verify: (dir, version) => verifyExtractedBundle(dir, version),
     preserveNodeId: () => { if (existsSync(nodeIdFile)) execSync(`sudo cp "${nodeIdFile}" ${NEW_DIR}/node-id`, { timeout: 5_000 }); },
-    swap: () => { execSync("sudo rm -rf /opt/dgx-agent-old && sudo mv /opt/dgx-agent /opt/dgx-agent-old && sudo mv /opt/dgx-agent-new /opt/dgx-agent", { timeout: 15_000 }); },
+    swap: () => atomicSwap(run),
     restart: () => { execSync("sudo systemctl restart dgx-agent", { timeout: 15_000 }); },
     checkConnected: () => { try { return statSync(MARKER).mtimeMs; } catch { return null; } },
-    rollback: () => { execSync("sudo rm -rf /opt/dgx-agent-failed && sudo mv /opt/dgx-agent /opt/dgx-agent-failed && sudo mv /opt/dgx-agent-old /opt/dgx-agent && sudo systemctl restart dgx-agent", { timeout: 20_000 }); },
+    rollback: () => atomicRollback(run),
     writeResult: (r) => { try { mkdirSync(RUN_DIR, { recursive: true }); writeFileSync(RESULT, JSON.stringify(r)); } catch { /* */ } },
     log: (m) => { try { execSync(`logger -t dgx-updater ${JSON.stringify(m)}`); } catch { /* */ } console.log(m); },
     now: () => Date.now(),

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { verifyExtractedBundle, healthCheckPasses, runUpdate, type UpdateDeps } from "./updater.js";
+import { verifyExtractedBundle, healthCheckPasses, runUpdate, atomicSwap, atomicRollback, type UpdateDeps } from "./updater.js";
 
 describe("verifyExtractedBundle", () => {
   it("ok when package.json version matches", () => {
@@ -26,6 +26,46 @@ describe("healthCheckPasses", () => {
   });
   it("false when marker is stale (pre-restart)", () => {
     expect(healthCheckPasses(500, 1000, 90000)).toBe(false);
+  });
+});
+
+describe("atomicSwap", () => {
+  it("happy path: runs the 3 commands in order, no restore", () => {
+    const calls: string[] = [];
+    atomicSwap((cmd) => { calls.push(cmd); });
+    expect(calls).toEqual([
+      "sudo rm -rf /opt/dgx-agent-old",
+      "sudo mv /opt/dgx-agent /opt/dgx-agent-old",
+      "sudo mv /opt/dgx-agent-new /opt/dgx-agent",
+    ]);
+  });
+
+  it("when installing the new dir fails, restores old -> current and rethrows", () => {
+    const calls: string[] = [];
+    const run = (cmd: string) => {
+      calls.push(cmd);
+      if (cmd === "sudo mv /opt/dgx-agent-new /opt/dgx-agent") throw new Error("mv: no such file");
+    };
+    expect(() => atomicSwap(run)).toThrow(/swap failed, restored previous agent/);
+    expect(calls).toEqual([
+      "sudo rm -rf /opt/dgx-agent-old",
+      "sudo mv /opt/dgx-agent /opt/dgx-agent-old",
+      "sudo mv /opt/dgx-agent-new /opt/dgx-agent",
+      "sudo mv /opt/dgx-agent-old /opt/dgx-agent",
+    ]);
+  });
+});
+
+describe("atomicRollback", () => {
+  it("stashes the bad current, restores old, then restarts, in order", () => {
+    const calls: string[] = [];
+    atomicRollback((cmd) => { calls.push(cmd); });
+    expect(calls).toEqual([
+      "sudo rm -rf /opt/dgx-agent-failed",
+      "sudo mv /opt/dgx-agent /opt/dgx-agent-failed",
+      "sudo mv /opt/dgx-agent-old /opt/dgx-agent",
+      "sudo systemctl restart dgx-agent",
+    ]);
   });
 });
 
