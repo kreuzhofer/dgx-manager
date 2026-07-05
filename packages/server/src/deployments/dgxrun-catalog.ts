@@ -69,3 +69,11 @@ export function loadDgxrunCatalog(dir: string, deps: CatalogDeps = {}): CatalogR
   }
   return out;
 }
+
+const DGXRUN_PREFIX = "@dgxrun/";
+export function resolveDgxrunRecipeFile(recipeFile: string, dir: string): string | null {
+  if (typeof recipeFile !== "string" || !recipeFile.startsWith(DGXRUN_PREFIX)) return null;
+  const name = recipeFile.slice(DGXRUN_PREFIX.length);
+  if (!name || name.includes("/") || name.includes("\\") || name.includes("..")) return null;
+  return join(dir, `${name}.yaml`);
+}

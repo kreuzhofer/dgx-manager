@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { loadDgxrunCatalog } from "./dgxrun-catalog.js";
+import { loadDgxrunCatalog, resolveDgxrunRecipeFile } from "./dgxrun-catalog.js";
 
 const VALID = `runner: dgxrun
 model: CosmicRaisins/GLM-5.2-AWQ-INT4-15pct
@@ -38,5 +38,21 @@ describe("loadDgxrunCatalog", () => {
   it("missing dir -> []", () => {
     const r = loadDgxrunCatalog("/nope", { readDir: () => { throw new Error("ENOENT"); }, readFile: () => "" });
     expect(r).toEqual([]);
+  });
+});
+
+describe("resolveDgxrunRecipeFile", () => {
+  it("maps @dgxrun/<name> to <dir>/<name>.yaml", () => {
+    expect(resolveDgxrunRecipeFile("@dgxrun/glm-5.2-awq-15pct", "/app/recipes/dgxrun"))
+      .toBe("/app/recipes/dgxrun/glm-5.2-awq-15pct.yaml");
+  });
+  it("rejects non-@dgxrun refs", () => {
+    expect(resolveDgxrunRecipeFile("@community/foo", "/d")).toBeNull();
+    expect(resolveDgxrunRecipeFile("plain", "/d")).toBeNull();
+  });
+  it("rejects path traversal / separators", () => {
+    expect(resolveDgxrunRecipeFile("@dgxrun/../../etc/passwd", "/d")).toBeNull();
+    expect(resolveDgxrunRecipeFile("@dgxrun/sub/evil", "/d")).toBeNull();
+    expect(resolveDgxrunRecipeFile("@dgxrun/", "/d")).toBeNull();
   });
 });
