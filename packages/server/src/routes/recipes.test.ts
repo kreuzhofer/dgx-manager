@@ -16,6 +16,11 @@ import request from "supertest";
 const TMP_DIR = mkdtempSync(join(tmpdir(), "dgx-test-"));
 const DB_PATH = join(TMP_DIR, "test.db");
 process.env.DATABASE_URL = `file:${DB_PATH}`;
+// Point the in-repo @dgxrun catalog at a directory that doesn't exist so this
+// suite's hand-built CATALOG (via the stub agentHub) is the only thing GET
+// /api/recipes returns — the catalog merge itself is covered by
+// __tests__/integration/dgxrun-catalog.test.ts.
+process.env.DGXRUN_RECIPES_DIR = join(TMP_DIR, "no-dgxrun-recipes-here");
 
 let prisma: typeof import("../prisma.js").prisma;
 let recipesRouter: typeof import("./recipes.js").recipesRouter;

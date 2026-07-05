@@ -1,6 +1,7 @@
 import { Router } from "express";
 import type { AgentHub } from "../ws/agent-hub.js";
 import { prisma } from "../prisma.js";
+import { getDgxrunCatalog, refreshDgxrunCatalog } from "../deployments/dgxrun-catalog.js";
 
 export const recipesRouter = Router();
 
@@ -33,7 +34,7 @@ export const recipesRouter = Router();
  */
 recipesRouter.get("/", async (req, res) => {
   const agentHub: AgentHub = req.app.get("agentHub");
-  const recipes = agentHub.getRecipes();
+  const recipes = [...getDgxrunCatalog(), ...agentHub.getRecipes()];
 
   const nodeId = typeof req.query.nodeId === "string" ? req.query.nodeId : undefined;
   if (!nodeId) {
@@ -92,6 +93,7 @@ recipesRouter.get("/ollama-models", (req, res) => {
  */
 recipesRouter.post("/refresh", (req, res) => {
   const agentHub: AgentHub = req.app.get("agentHub");
+  refreshDgxrunCatalog();
   const nodeIds = agentHub.getConnectedNodeIds();
   for (const nodeId of nodeIds) {
     agentHub.sendToAgent(nodeId, { type: "cmd:rescan-recipes", payload: {} });

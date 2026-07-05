@@ -47,6 +47,9 @@ COPY packages/agent/package.json ./packages/agent/package.json
 # Build them first with scripts/build-agent-bundles.sh (requires docker buildx).
 COPY packages/server/agent-bundles/ ./packages/server/agent-bundles/
 
+# Copy the in-repo dgxrun recipe catalog (served by GET /api/recipes).
+COPY recipes/ ./recipes/
+
 # Generate Prisma client
 ENV DATABASE_URL="file:/app/data/dev.db"
 RUN npx prisma generate

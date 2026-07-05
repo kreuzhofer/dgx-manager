@@ -77,3 +77,23 @@ export function resolveDgxrunRecipeFile(recipeFile: string, dir: string): string
   if (!name || name.includes("/") || name.includes("\\") || name.includes("..")) return null;
   return join(dir, `${name}.yaml`);
 }
+
+/**
+ * Directory the in-repo dgxrun recipe catalog is loaded from. Overridable via
+ * env for tests (point at a temp fixture dir) and for deployments where the
+ * working directory isn't the repo root.
+ */
+export const DGXRUN_RECIPES_DIR = process.env.DGXRUN_RECIPES_DIR || join(process.cwd(), "recipes/dgxrun");
+
+let _cache: CatalogRecipe[] | null = null;
+
+/** Memoized catalog read — call refreshDgxrunCatalog() to invalidate. */
+export function getDgxrunCatalog(): CatalogRecipe[] {
+  if (_cache == null) _cache = loadDgxrunCatalog(DGXRUN_RECIPES_DIR);
+  return _cache;
+}
+
+/** Clears the memoized catalog so the next getDgxrunCatalog() call re-reads disk. */
+export function refreshDgxrunCatalog(): void {
+  _cache = null;
+}

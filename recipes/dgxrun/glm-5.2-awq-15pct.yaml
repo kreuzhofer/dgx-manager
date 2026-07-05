@@ -1,0 +1,72 @@
+# @dgxrun/glm-5.2-awq-15pct — in-repo dgxrun catalog (supersedes the community-registry copy for dgxrun deploys).
+recipe_version: "2"
+runner: dgxrun   # use OUR mp multi-node runner (not sparkrun/Ray)
+# dgx-manager reads this to free node memory (stop gdm) before deploy so
+# large-context KV fits. Plain sparkrun ignores the key.
+maxoutmem: true
+model: CosmicRaisins/GLM-5.2-AWQ-INT4-15pct
+runtime: vllm
+container: vllm-node-tf5-glm52-b12x:probe
+cluster_only: true
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 4
+  gpu_memory_utilization: 0.88   # floor for 85K: 0.85 starves KV below one 87040 seq
+  # Validated 2026-07-04 on the 4-node GB10 cluster: 85K (87040) @ 0.88 serves at
+  # ~23 tok/s (MTP on). Higher contexts OOM GB10's unified memory — 100K @ 0.88
+  # OOMs the HEAD (scheduler+detokenizer+MTP+rank0) during CUDA-graph capture or the
+  # first-generation sm12x Triton JIT (only ~5 GiB physical headroom at 85K). The old
+  # "128K arithmetic fit" did NOT survive real generation. Push past 85K only with a
+  # pre-warmed Triton cache (persists at TRITON_CACHE_DIR on NFS) and/or trimmed MTP.
+  max_model_len: 87040
+  served_model_name: glm-5.2
+env:
+  HF_HOME: /cache/huggingface
+  HF_HUB_OFFLINE: "1"
+  LD_PRELOAD: /cache/huggingface/nccl-2.30.4/libnccl.so.2
+  # 5400 (was 1800): NFS-contended 4-rank load takes ~30 min for the straggler;
+  # the load_model collective rides this timeout — 1800 killed two deploys at
+  # exactly start+30min (shm queue torn down mid-wait). Local-NVMe setups can
+  # use 1800; NFS-loading clusters cannot.
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "5400"
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+  VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: "256"
+  GLM52_BIND_HOST_TRITON: "1"
+  GLM52_MQA_LOGITS_TRITON: "1"
+  GLM52_PAGED_MQA_TRITON: "1"
+  GLM52_PAGED_MQA_TOPK_CHUNK_SIZE: "8192"
+  GLM52_B12X_MLA: "1"
+  # --- NCCL/RDMA stanza from CosmicRaisins/glm-5.2-gb10 (same NIC/HCA names
+  # on our Sparks: verified rocep1s0f0/roceP2p1s0f0 + enp1s0f0np0/enP2p1s0f0np0).
+  # Without NCCL_NET=IB + HCA + GID index, NCCL can silently fall back to TCP
+  # (~12 vs 30+ tok/s per the reference launch.sh).
+  NCCL_NET: IB
+  NCCL_IB_DISABLE: "0"
+  NCCL_IB_HCA: "rocep1s0f0,roceP2p1s0f0"
+  NCCL_SOCKET_IFNAME: "enP7s7,enp1s0f0np0,enP2p1s0f0np0"
+  GLOO_SOCKET_IFNAME: enp1s0f0np0
+  NCCL_IB_GID_INDEX: "3"
+  NCCL_CROSS_NIC: "1"
+  NCCL_CUMEM_ENABLE: "0"
+  NCCL_IGNORE_CPU_AFFINITY: "1"
+  # INFO for the validation deploy so transport selection is visible in logs
+  # (grep "NET/IB"). Flip to WARN once RDMA is confirmed.
+  NCCL_DEBUG: INFO
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+# !! EXECUTOR — this recipe does NOT deploy via sparkrun / the manager as-is. !!
+# Validated end-to-end 2026-07-04 on the 4-node GB10 cluster:
+#  * `ray` executor FAILS at init on this vLLM build:
+#      AttributeError: 'ShmRingBuffer' object has no attribute 'buf'  (ray_executor_v2.py)
+#    This happens with 61 GB /dev/shm, so it is NOT a shm-size problem — the Ray
+#    executor's ShmRingBuffer path is broken on this build. (An earlier belief that
+#    "the crash was just /dev/shm, not Ray" was WRONG — corrected here.)
+#  * `mp` executor WORKS (multiproc_executor.py) → 85K @ 0.88 serves at ~23 tok/s.
+#    BUT mp multi-node needs --nnodes/--node-rank/--master-addr per host, which
+#    sparkrun does not pass (sparkrun orchestrates multi-node only via Ray).
+# NET: deploy this model with a direct mp launcher (mp + --ipc host + per-node
+# --node-rank), NOT `sparkrun run`. `mp` is set below so only the per-node
+# orchestration args are missing. Fixing the manager path needs either sparkrun
+# mp-multi-node support or the manager invoking the mp docker path directly.
+command: |
+  vllm serve {model} --served-model-name {served_model_name} --host {host} --port {port} --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --enable-prefix-caching --speculative-config '{"model":"CosmicRaisins/GLM-5.2-MTP-INT4-aligned","method":"mtp","num_speculative_tokens":3,"attention_backend":"FLASHMLA_SPARSE"}' -tp {tensor_parallel} --pipeline-parallel-size 1 --distributed-executor-backend mp --max-model-len {max_model_len} --max-num-seqs 1 --max-num-batched-tokens 4096 --gpu-memory-utilization {gpu_memory_utilization} --kv-cache-dtype fp8_ds_mla --compilation-config '{"cudagraph_mode":"FULL"}'
