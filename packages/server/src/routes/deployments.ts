@@ -18,6 +18,7 @@ import { maxOutMemoryForDeploy } from "../deployments/maxoutmem.js";
 import { sshExec } from "../ssh/executor.js";
 import { resolveDgxrunRecipe, type DgxrunResolvedRecipe } from "../deployments/dgxrun-recipe.js";
 import { buildDgxrunDeploys, DEFAULT_MASTER_PORT } from "../deployments/dgxrun-dispatch.js";
+import { resolveDgxrunRecipeFile, DGXRUN_RECIPES_DIR } from "../deployments/dgxrun-catalog.js";
 
 export const deploymentsRouter = Router();
 
@@ -170,10 +171,13 @@ deploymentsRouter.post("/", async (req, res) => {
   }
 
   // Resolve dgxrun runner (our own mp multi-node launcher) from recipe YAML the
-  // manager can read: inline recipeYaml, or a recipePath file on shared storage.
-  // A recipe without `runner: dgxrun` leaves isDgxrun=false → existing sparkrun
-  // path unchanged. Registry-ref (recipeFile) dgxrun is a v1 follow-up (its raw
-  // YAML lives only in the agent's sparkrun cache, not on the manager).
+  // manager can read: inline recipeYaml, a recipePath file on shared storage,
+  // or an `@dgxrun/`-prefixed recipeFile resolved against the in-repo catalog
+  // (packages/server/src/deployments/dgxrun-catalog.ts). A recipe without
+  // `runner: dgxrun` leaves isDgxrun=false → existing sparkrun path unchanged.
+  // A non-`@dgxrun/` recipeFile isn't resolvable here (its raw YAML lives only
+  // in the agent's sparkrun cache, not on the manager) and falls through
+  // unchanged to the sparkrun path.
   let dgxrunRecipe: DgxrunResolvedRecipe | undefined;
   if (!isOllama) {
     let recipeText: string | undefined;
@@ -181,6 +185,12 @@ deploymentsRouter.post("/", async (req, res) => {
       recipeText = inlineRecipeYaml;
     } else if (recipePath && recipeRef) {
       try { recipeText = readFileSync(recipeRef, "utf8"); } catch { /* agent will read the file */ }
+    } else if (recipeFile) {
+      const p = resolveDgxrunRecipeFile(recipeFile, DGXRUN_RECIPES_DIR);
+      if (p) {
+        try { recipeText = readFileSync(p, "utf8"); }
+        catch { return res.status(404).json({ error: `dgxrun recipe not found: ${recipeFile}` }); }
+      }
     }
     if (recipeText) {
       const resolved = resolveDgxrunRecipe(recipeText);
