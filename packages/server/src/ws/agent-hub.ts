@@ -472,8 +472,13 @@ export class AgentHub {
             // sysinfo has no dedicated process-count field (that only exists on
             // the on-demand diag.collect capability's readdir-based count) — use
             // /proc/loadavg's totalProcs as the best available live-tick proxy.
+            // Exclude LISTEN: sshd's listening socket is always present whenever
+            // sshd is running, so summing all states would make sshdConns never
+            // read 0 and mask the always-on baseline. The signal this field
+            // exists to detect is active + pre-auth connection pileup
+            // (ESTABLISHED + SYN_RECV), not the passive listener.
             const sshdConns = sysinfo?.sshd
-              ? Object.values(sysinfo.sshd).reduce((a, b) => a + b, 0)
+              ? Object.entries(sysinfo.sshd).reduce((n, [state, c]) => n + (state === "LISTEN" ? 0 : c), 0)
               : null;
             const tempC = sysinfo?.thermalsC?.length ? Math.max(...sysinfo.thermalsC) : null;
             await prisma.metricSnapshot.create({
@@ -725,7 +730,7 @@ export class AgentHub {
                 reason: msg.payload.reason,
                 code: msg.payload.code,
               },
-            }).catch(() => {});
+            }).catch((e) => console.error("agent:audit persist failed:", e));
             break;
           }
         }
