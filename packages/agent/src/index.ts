@@ -133,6 +133,23 @@ function connect() {
     console.log("Connected to manager");
     reconnectDelay = RECONNECT_BASE;
 
+    try {
+      execSync("mkdir -p /run/dgx-agent && touch /run/dgx-agent/connected");
+    } catch { /* marker best-effort */ }
+    // Report the outcome of a just-completed self-update (written by the detached
+    // updater), so a rollback/failure is visible instead of silent. Success needs
+    // no report — the new version shows up in metrics.
+    try {
+      const rp = "/run/dgx-agent/update-result.json";
+      if (existsSync(rp)) {
+        const r = JSON.parse(readFileSync(rp, "utf-8")) as { version: string; outcome: string; error?: string };
+        if (r.outcome !== "success") {
+          sendMsg("agent:update-status", { status: "failed", version: r.version, error: `${r.outcome}: ${r.error ?? ""}` });
+        }
+        execSync(`rm -f ${rp} /run/dgx-agent/updating`); // clear result + release any lock
+      }
+    } catch { /* result report best-effort */ }
+
     // Register — use token flow if no nodeId persisted
     const metrics = await collectMetrics();
     const fastIpAddress = detectFastIp();
