@@ -18,6 +18,9 @@ interface Recipe {
   defaults: Record<string, unknown>;
   // Target CPU arch the recipe runs on; "any" = arch-agnostic (e.g. Ollama).
   arch?: "amd64" | "arm64" | "any";
+  // Present ("dgxrun") for multi-node recipes from the dgxrun catalog;
+  // absent for hand-curated sparkrun recipes. Drives dropdown grouping.
+  source?: "sparkrun" | "dgxrun";
   // Training recipes carry a separate `deploy:` block describing inference
   // defaults (max_model_len, gpu_memory_utilization, …). Optional because
   // hand-curated vLLM recipes don't have one. Used by the fine-tune Deploy
@@ -681,6 +684,37 @@ export default function DeploymentsPage() {
   const selectedRecipeData = recipes.find((r) => r.file === selectedRecipe);
   const isClusterRecipe = selectedRecipeData?.cluster_only;
 
+  // Recipes eligible for the vLLM recipe dropdown, after the existing
+  // finetune-artifact and platform filters. Split by `source` so the
+  // dropdown can group dgxrun (multi-node) recipes above sparkrun ones.
+  const visibleRecipes = useMemo(() => {
+    return recipes
+      // Auto-generated fine-tune recipes (finetune-<12hex>) are internal
+      // artifacts of the /finetune → Deploy flow, not hand-curated recipes
+      // for direct selection. Hide them from the dropdown so the list stays
+      // clean. Hand-named ones (e.g. finetune-qwen3.6-50step) don't match
+      // the pattern and stay visible.
+      .filter((r) => !/^recipes\/finetune-[a-z0-9]{12}\.yaml$/.test(r.file))
+      // Platform filter: missing arch is treated as arm64; "any" recipes
+      // show everywhere; show all if no platform picked.
+      .filter((r) => { const a = r.arch ?? "arm64"; return a === "any" || a === selectedPlatform || !selectedPlatform; });
+  }, [recipes, selectedPlatform]);
+  const dgxrunRecipes = useMemo(() => visibleRecipes.filter((r) => r.source === "dgxrun"), [visibleRecipes]);
+  const sparkRecipes = useMemo(() => visibleRecipes.filter((r) => r.source !== "dgxrun"), [visibleRecipes]);
+  const renderRecipeOption = (r: Recipe) => {
+    const tp = r.defaults?.tensor_parallel as number | undefined;
+    const pp = r.defaults?.pipeline_parallel as number | undefined;
+    const suffix = [
+      pp ? `PP=${pp}` : tp && tp > 1 ? `TP=${tp}` : null,
+      r.solo_only ? "solo" : null,
+    ].filter(Boolean).join(", ");
+    return (
+      <option key={r.file} value={r.file}>
+        {r.name}{suffix ? ` [${suffix}]` : ""}
+      </option>
+    );
+  };
+
   // Suggest a sensible default for the deploy's Display name input: stock
   // vLLM uses the recipe's `name` field; fine-tune deploys use the FT's
   // friendly name (or Model.name fallback). Sanitized to the same character
@@ -875,30 +909,14 @@ export default function DeploymentsPage() {
                   className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
                 >
                   <option value="">Select a recipe...</option>
-                  {recipes
-                    // Auto-generated fine-tune recipes (finetune-<12hex>) are
-                    // internal artifacts of the /finetune → Deploy flow, not
-                    // hand-curated recipes for direct selection. Hide them
-                    // from the dropdown so the list stays clean. Hand-named
-                    // ones (e.g. finetune-qwen3.6-50step) don't match the
-                    // pattern and stay visible.
-                    .filter((r) => !/^recipes\/finetune-[a-z0-9]{12}\.yaml$/.test(r.file))
-                    // Platform filter: missing arch is treated as arm64; "any"
-                    // recipes show everywhere; show all if no platform picked.
-                    .filter((r) => { const a = r.arch ?? "arm64"; return a === "any" || a === selectedPlatform || !selectedPlatform; })
-                    .map((r) => {
-                    const tp = r.defaults?.tensor_parallel as number | undefined;
-                    const pp = r.defaults?.pipeline_parallel as number | undefined;
-                    const suffix = [
-                      pp ? `PP=${pp}` : tp && tp > 1 ? `TP=${tp}` : null,
-                      r.solo_only ? "solo" : null,
-                    ].filter(Boolean).join(", ");
-                    return (
-                      <option key={r.file} value={r.file}>
-                        {r.name}{suffix ? ` [${suffix}]` : ""}
-                      </option>
-                    );
-                  })}
+                  {dgxrunRecipes.length > 0 && (
+                    <optgroup label="dgxrun (multi-node)">
+                      {dgxrunRecipes.map(renderRecipeOption)}
+                    </optgroup>
+                  )}
+                  <optgroup label="sparkrun">
+                    {sparkRecipes.map(renderRecipeOption)}
+                  </optgroup>
                 </select>
               </>
             ) : (
