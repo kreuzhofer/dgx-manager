@@ -10,6 +10,7 @@ import { scheduleDebouncedReseed } from "../ssh/known-hosts-trigger.js";
 import { pushRegistriesToAgent } from "../registries/push.js";
 import { normalizeMac } from "../nodes/power.js";
 import { coordinatedDgxrunTeardown } from "../deployments/dgxrun-teardown.js";
+import { CapClient } from "../caps/cap-client.js";
 
 export interface OllamaModelInfo {
   name: string;
@@ -70,6 +71,22 @@ interface AgentConnection {
   nodeId: string;
 }
 
+/**
+ * Shape of the `sysinfo` blob Agent v2 attaches to `agent:metrics` payloads
+ * (packages/agent/src/sysinfo/proc-read.ts::readSysInfo). Only the fields the
+ * hub reads to populate MetricSnapshot summary columns are declared here —
+ * the full blob is passed through to dashboards untouched via the existing
+ * `...msg.payload` spread in the `node:metrics` SSE broadcast. Older agents
+ * omit this field entirely, so every access below must be optional-chained.
+ */
+interface AgentSysInfo {
+  pressure?: { memory?: { some?: { avg10?: number } } };
+  load?: { totalProcs?: number };
+  fds?: { allocated?: number };
+  sshd?: Record<string, number>;
+  thermalsC?: number[];
+}
+
 export interface OllamaPullProgressMsg {
   deploymentId: string;
   status: string;
@@ -108,10 +125,15 @@ export class AgentHub {
   private onMetrics?: (nodeId: string, metrics: Record<string, unknown>) => void;
   private onRecipes?: (recipes: VllmRecipe[]) => void;
   private onTrainingRecipes?: (recipes: TrainingRecipe[]) => void;
+  /** Request/response + streaming bridge for Agent v2 capability invocations
+   *  (diag.collect, exec). Routed to the target node's WS via sendToAgent;
+   *  results/chunks come back through the agent:cap:result/chunk cases below. */
+  readonly capClient: CapClient;
 
   constructor() {
     this.wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
     this.wss.on("connection", (ws) => this.handleConnection(ws));
+    this.capClient = new CapClient((nodeId, msg) => this.sendToAgent(nodeId, msg as Record<string, unknown>));
   }
 
   handleUpgrade(request: import("http").IncomingMessage, socket: import("stream").Duplex, head: Buffer) {
@@ -442,6 +464,18 @@ export class AgentHub {
             if (!nodeId) break;
             const mem = msg.payload.memory ?? null;
             const psi = msg.payload.pressure ?? null;
+            // Agent v2 sysinfo diagnostics (packages/agent/src/sysinfo/proc-read.ts).
+            // Older agents don't send this field at all — every read below is
+            // optional-chained so a missing/partial blob just leaves the
+            // corresponding column null rather than throwing.
+            const sysinfo = msg.payload.sysinfo as AgentSysInfo | undefined;
+            // sysinfo has no dedicated process-count field (that only exists on
+            // the on-demand diag.collect capability's readdir-based count) — use
+            // /proc/loadavg's totalProcs as the best available live-tick proxy.
+            const sshdConns = sysinfo?.sshd
+              ? Object.values(sysinfo.sshd).reduce((a, b) => a + b, 0)
+              : null;
+            const tempC = sysinfo?.thermalsC?.length ? Math.max(...sysinfo.thermalsC) : null;
             await prisma.metricSnapshot.create({
               data: {
                 nodeId,
@@ -458,6 +492,11 @@ export class AgentHub {
                 pressureMemoryAvg10: psi?.memorySomeAvg10 ?? null,
                 pressureIoAvg10: psi?.ioSomeAvg10 ?? null,
                 pressureCpuAvg10: psi?.cpuSomeAvg10 ?? null,
+                psiMemSome10: sysinfo?.pressure?.memory?.some?.avg10 ?? null,
+                pidCount: sysinfo?.load?.totalProcs ?? null,
+                fdAllocated: sysinfo?.fds?.allocated ?? null,
+                sshdConns,
+                tempC,
               },
             });
             // Self-heal stale ipAddress: agent:register only fires on WS
@@ -665,6 +704,30 @@ export class AgentHub {
           case "agent:finetune:quantize-complete":
             await this.dispatchFinetuneQuantizeMessage(msg);
             break;
+
+          case "agent:cap:result": {
+            this.capClient.onResult(msg.payload as { id: string; ok: boolean; data?: unknown; error?: string });
+            break;
+          }
+
+          case "agent:cap:chunk": {
+            this.capClient.onChunk(msg.payload as { id: string; stream: string; data: string });
+            break;
+          }
+
+          case "agent:audit": {
+            if (!nodeId) break;
+            await prisma.auditEvent.create({
+              data: {
+                nodeId,
+                cap: msg.payload.cap,
+                cmd: msg.payload.cmd,
+                reason: msg.payload.reason,
+                code: msg.payload.code,
+              },
+            }).catch(() => {});
+            break;
+          }
         }
       } catch (err) {
         console.error("Agent message error:", err);

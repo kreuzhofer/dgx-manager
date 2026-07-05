@@ -51,6 +51,7 @@ server.on("upgrade", (request, socket, head) => {
 
 // Make hubs available to routes
 app.set("agentHub", agentHub);
+app.set("capClient", agentHub.capClient);
 app.set("dashboardHub", dashboardHub);
 app.set("sshExec", sshExec);
 app.set("wolSend", sendMagicPacket);

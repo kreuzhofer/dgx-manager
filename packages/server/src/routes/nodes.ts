@@ -183,6 +183,94 @@ nodesRouter.get("/:id/metrics/history", (req, res) => {
   res.json(metricsBuffer.getHistory(req.params.id));
 });
 
+/** Shape of the server-side CapClient (packages/server/src/caps/cap-client.ts),
+ *  as seen through `req.app.get("capClient")`. */
+interface CapClientLike {
+  invoke: (
+    nodeId: string,
+    name: string,
+    input: unknown,
+  ) => Promise<{ ok: boolean; data?: unknown; error?: string }>;
+}
+
+/**
+ * @openapi
+ * /api/nodes/{id}/diag:
+ *   post:
+ *     tags: [Nodes]
+ *     summary: Collect an on-demand diagnostics bundle from a node's agent
+ *     description: >
+ *       Invokes the Agent v2 `diag.collect` capability over the agent's WebSocket
+ *       (via CapClient) and returns its result. This is a live, on-demand snapshot —
+ *       distinct from the periodic MetricSnapshot history — used for troubleshooting
+ *       a specific node (memory/PSI/fd/sshd/thermal readings, kernel log tail, GPU state).
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Node ID
+ *     responses:
+ *       '200':
+ *         description: '{ ok: true, data: <diag bundle> }'
+ *       '502':
+ *         description: Capability invocation failed (agent offline, timeout, or error)
+ */
+nodesRouter.post("/:id/diag", async (req, res) => {
+  const capClient = req.app.get("capClient") as CapClientLike;
+  const r = await capClient.invoke(req.params.id, "diag.collect", null);
+  if (!r.ok) return res.status(502).json({ error: r.error ?? "diag failed" });
+  res.json({ ok: true, data: r.data });
+});
+
+/**
+ * @openapi
+ * /api/nodes/{id}/exec:
+ *   post:
+ *     tags: [Nodes]
+ *     summary: Run an audited one-off command on a node via the agent
+ *     description: >
+ *       Invokes the Agent v2 `exec` capability over the agent's WebSocket (via
+ *       CapClient). Requires a non-blank `reason` — every invocation is recorded
+ *       by the agent as an `agent:audit` event (persisted to the AuditEvent table)
+ *       so exec usage is always attributable and traceable.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Node ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [reason]
+ *             properties:
+ *               cmd: { type: string, description: "Command to run." }
+ *               args: { type: array, items: { type: string }, description: "Command arguments." }
+ *               reason: { type: string, description: "Why this command is being run (audited)." }
+ *               timeoutMs: { type: number, description: "Optional invocation timeout." }
+ *     responses:
+ *       '200':
+ *         description: '{ ok: true, result: <exec output> }'
+ *       '400':
+ *         description: reason is missing or blank
+ *       '502':
+ *         description: Capability invocation failed (agent offline, timeout, or error)
+ */
+nodesRouter.post("/:id/exec", async (req, res) => {
+  const { cmd, args, reason, timeoutMs } = req.body ?? {};
+  if (!reason || !String(reason).trim()) {
+    return res.status(400).json({ error: "reason required (audited)" });
+  }
+  const capClient = req.app.get("capClient") as CapClientLike;
+  const r = await capClient.invoke(req.params.id, "exec", { cmd, args, reason, timeoutMs });
+  if (!r.ok) return res.status(502).json({ error: r.error ?? "exec failed" });
+  res.json({ ok: true, result: r.data });
+});
+
 /**
  * @openapi
  * /api/nodes/{id}:
