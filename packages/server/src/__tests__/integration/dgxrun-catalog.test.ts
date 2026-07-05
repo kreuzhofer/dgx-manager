@@ -189,4 +189,19 @@ describe("POST /api/deployments with @dgxrun recipeFile", () => {
     const created = await prisma.deployment.findUnique({ where: { id: res.body.id } });
     expect(JSON.parse(created!.config!).runner).toBeUndefined();
   });
+
+  it("returns 404 for an @dgxrun/ recipeFile that doesn't exist in the catalog", async () => {
+    await wipeAll();
+    const ids = await seedCluster(4);
+
+    const { hub } = makeStubDeployHub();
+    const app = makeDeployApp(hub);
+
+    const res = await request(app)
+      .post("/api/deployments")
+      .send({ nodeIds: ids, recipeFile: "@dgxrun/does-not-exist-xyz" });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toMatch(/does-not-exist-xyz/);
+  });
 });

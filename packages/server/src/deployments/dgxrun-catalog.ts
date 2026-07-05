@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync } from "fs";
-import { join } from "path";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
 import { parse } from "yaml";
 
 /** Local structural interface compatible with agent's Recipe type (avoids cross-package rootDir issue). */
@@ -82,8 +83,14 @@ export function resolveDgxrunRecipeFile(recipeFile: string, dir: string): string
  * Directory the in-repo dgxrun recipe catalog is loaded from. Overridable via
  * env for tests (point at a temp fixture dir) and for deployments where the
  * working directory isn't the repo root.
+ *
+ * Resolved relative to this module (not process.cwd()) so it works both in
+ * `npm run dev:server` (cwd = packages/server) and in the container (cwd =
+ * /app): from packages/server/src/deployments/, four levels up is the repo
+ * root, giving <repo>/recipes/dgxrun (container: /app/recipes/dgxrun).
  */
-export const DGXRUN_RECIPES_DIR = process.env.DGXRUN_RECIPES_DIR || join(process.cwd(), "recipes/dgxrun");
+const _here = dirname(fileURLToPath(import.meta.url));
+export const DGXRUN_RECIPES_DIR = process.env.DGXRUN_RECIPES_DIR || join(_here, "../../../../recipes/dgxrun");
 
 let _cache: CatalogRecipe[] | null = null;
 
