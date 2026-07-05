@@ -29,6 +29,7 @@ import { CapRegistry } from "./caps/registry.js";
 import { makeExecCap } from "./caps/exec-cap.js";
 import { collectDiag } from "./sysinfo/diag.js";
 import { readSysInfo } from "./sysinfo/proc-read.js";
+import { launchUpdater } from "./update-launch.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_DIR = join(__dirname, "..");
@@ -1236,46 +1237,18 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
 
     case "cmd:update": {
       const { bundleUrl, version } = msg.payload as { bundleUrl: string; version: string };
-      console.log(`[update] Updating agent to v${version} from ${bundleUrl}`);
-      sendMsg("agent:update-status", { status: "downloading", version });
-
-      try {
-        // Download bundle
-        execSync(`curl -sL -o /tmp/agent-bundle.tar.gz "${bundleUrl}"`, { timeout: 120_000 });
-
-        // /opt/dgx-agent* paths require root. Agent runs as a non-root systemd
-        // user, so all writes under /opt must go through sudo (configured
-        // NOPASSWD in the install script).
-        execSync("sudo rm -rf /opt/dgx-agent-new && sudo mkdir -p /opt/dgx-agent-new", { timeout: 10_000 });
-        execSync("sudo tar -xzf /tmp/agent-bundle.tar.gz -C /opt/dgx-agent-new/", { timeout: 30_000 });
-
-        // Preserve node-id file
-        if (existsSync(NODE_ID_FILE)) {
-          execSync(`sudo cp "${NODE_ID_FILE}" /opt/dgx-agent-new/node-id`, { timeout: 5_000 });
-        }
-
-        // Atomic swap
-        execSync("sudo rm -rf /opt/dgx-agent-old", { timeout: 5_000 });
-        execSync("sudo mv /opt/dgx-agent /opt/dgx-agent-old && sudo mv /opt/dgx-agent-new /opt/dgx-agent", { timeout: 10_000 });
-        execSync("rm -f /tmp/agent-bundle.tar.gz", { timeout: 5_000 });
-
-        sendMsg("agent:update-status", { status: "restarting", version });
-        console.log(`[update] Agent updated to v${version}, restarting...`);
-
-        // Restart the systemd service (agent will reconnect with new version)
-        setTimeout(() => {
-          try {
-            execSync("sudo systemctl restart dgx-agent", { timeout: 10_000 });
-          } catch (err) {
-            console.error(`[update] Failed to restart service: ${err}`);
-          }
-        }, 500);
-      } catch (err) {
-        console.error(`[update] Update failed: ${err}`);
-        sendMsg("agent:update-status", { status: "failed", error: String(err) });
-        // Clean up staging
-        try { execSync("sudo rm -rf /opt/dgx-agent-new && rm -f /tmp/agent-bundle.tar.gz"); } catch { /* */ }
-      }
+      const updaterPath = join(__dirname, "updater.js"); // dist/updater.js — same dir as index.js (verified: tsc outDir=dist, ExecStart runs /opt/dgx-agent/dist/index.js)
+      const tmpPath = `/tmp/dgx-updater-${Date.now()}.js`;
+      const RUN_DIR = "/run/dgx-agent";
+      const outcome = launchUpdater({
+        bundleUrl, version, updaterPath, nodeIdFile: NODE_ID_FILE, tmpPath,
+        lockExists: () => existsSync(`${RUN_DIR}/updating`),
+        makeLock: () => { try { execSync(`mkdir -p ${RUN_DIR} && touch ${RUN_DIR}/updating`); } catch { /* */ } },
+        copyFile: (src, dest) => execSync(`cp "${src}" "${dest}"`),
+        spawnDetached: (cmd, cargs) => { const c = spawn(cmd, cargs, { detached: true, stdio: "ignore" }); c.unref(); },
+      });
+      console.log(`[update] ${outcome === "launched" ? `launched detached updater for v${version}` : "update already in flight — ignored"}`);
+      sendMsg("agent:update-status", { status: outcome === "launched" ? "downloading" : "in-flight", version });
       break;
     }
 
