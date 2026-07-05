@@ -36,6 +36,7 @@ app.use(express.json());
 
 // WebSocket hubs
 const agentHub = new AgentHub();
+agentHub.start();
 const dashboardHub = new DashboardHub();
 
 server.on("upgrade", (request, socket, head) => {

@@ -133,12 +133,18 @@ export class AgentHub {
    *  (diag.collect, exec). Routed to the target node's WS via sendToAgent;
    *  results/chunks come back through the agent:cap:result/chunk cases below. */
   readonly capClient: CapClient;
-  private sweepTimer: ReturnType<typeof setInterval>;
+  private sweepTimer?: ReturnType<typeof setInterval>;
 
   constructor() {
     this.wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
     this.wss.on("connection", (ws) => this.handleConnection(ws));
     this.capClient = new CapClient((nodeId, msg) => this.sendToAgent(nodeId, msg as Record<string, unknown>));
+  }
+
+  /** Begin the periodic staleness sweep. Called once from app startup (index.ts);
+   *  NOT started in the constructor so tests can `new AgentHub()` without leaking a timer. */
+  start(): void {
+    if (this.sweepTimer) return; // idempotent
     this.sweepTimer = setInterval(() => { void this.sweepStale(); }, SWEEP_INTERVAL_MS);
   }
 
@@ -845,7 +851,7 @@ export class AgentHub {
       const nodes = await prisma.node.findMany({ where: { status: "online" }, select: { id: true, status: true, lastSeen: true } });
       const stale = selectStaleNodes(nodes, Date.now(), STALE_THRESHOLD_MS);
       for (const id of stale) {
-        await prisma.node.update({ where: { id }, data: { status: "offline" } }).catch(() => {});
+        await prisma.node.update({ where: { id }, data: { status: "offline" } }).catch((e) => console.error(`[staleness] failed to mark ${id} offline:`, e));
         this.agents.delete(id);
         sseBroadcast({ type: "node:status", payload: { nodeId: id, status: "offline" } });
         console.log(`[staleness] node ${id} marked offline (no heartbeat > ${STALE_THRESHOLD_MS}ms)`);
@@ -856,5 +862,5 @@ export class AgentHub {
   }
 
   /** Stop the staleness sweep (test teardown / shutdown). */
-  stop(): void { clearInterval(this.sweepTimer); }
+  stop(): void { if (this.sweepTimer) { clearInterval(this.sweepTimer); this.sweepTimer = undefined; } }
 }
