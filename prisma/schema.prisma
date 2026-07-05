@@ -38,6 +38,7 @@ model Node {
   finetuneJobs             FineTuneJob[]
   finetuneClusterMemberships FineTuneClusterNode[]
   metrics                  MetricSnapshot[]
+  auditEvents              AuditEvent[]
 }
 
 model JoinToken {
@@ -140,10 +141,35 @@ model MetricSnapshot {
   pressureMemoryAvg10 Float?
   pressureIoAvg10     Float?
   pressureCpuAvg10    Float?
+  // Summary trend scalars from the agent's sysinfo diagnostics, added for
+  // Agent v2. The full sysinfo blob is broadcast live via SSE; only these
+  // summary fields are persisted here for historical trends.
+  // (memAvailableMb already exists above from the 2026-05-09 addition.)
+  psiMemSome10 Float?
+  pidCount     Int?
+  fdAllocated  Int?
+  sshdConns    Int?
+  tempC        Int?
   timestamp      DateTime @default(now())
   node           Node     @relation(fields: [nodeId], references: [id])
 
   @@index([nodeId, timestamp(sort: Desc)])
+}
+
+// Audit trail for Agent v2 diag/exec actions run against a node — e.g. which
+// capability ("cap") was invoked, the resolved command, and its exit code.
+// `reason` records why the action was taken (e.g. operator-supplied note).
+model AuditEvent {
+  id     String   @id @default(cuid())
+  nodeId String
+  cap    String
+  cmd    String?
+  reason String?
+  code   Int?
+  ts     DateTime @default(now())
+  node   Node     @relation(fields: [nodeId], references: [id])
+
+  @@index([nodeId, ts(sort: Desc)])
 }
 
 model LoadBalancerRule {
