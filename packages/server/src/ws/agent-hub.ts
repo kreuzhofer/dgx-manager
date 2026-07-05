@@ -722,13 +722,23 @@ export class AgentHub {
 
           case "agent:audit": {
             if (!nodeId) break;
+            const { cap, cmd, args, reason, code } = msg.payload as {
+              cap: string;
+              cmd?: string;
+              args?: string[];
+              reason?: string;
+              code?: number;
+            };
             await prisma.auditEvent.create({
               data: {
                 nodeId,
-                cap: msg.payload.cap,
-                cmd: msg.payload.cmd,
-                reason: msg.payload.reason,
-                code: msg.payload.code,
+                cap,
+                // cmd is the only free-text field on AuditEvent, so fold args
+                // into it — otherwise the audit row records "bash" without
+                // its ["-c", "rm -rf /"] arguments, losing the actual invocation.
+                cmd: cmd !== undefined ? [cmd, ...(args ?? [])].join(" ") : undefined,
+                reason,
+                code,
               },
             }).catch((e) => console.error("agent:audit persist failed:", e));
             break;

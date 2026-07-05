@@ -190,6 +190,7 @@ interface CapClientLike {
     nodeId: string,
     name: string,
     input: unknown,
+    onChunk?: (c: { stream: string; data: string }) => void,
   ) => Promise<{ ok: boolean; data?: unknown; error?: string }>;
 }
 
@@ -214,9 +215,17 @@ interface CapClientLike {
  *       '200':
  *         description: '{ ok: true, data: <diag bundle> }'
  *       '502':
- *         description: Capability invocation failed (agent offline, timeout, or error)
+ *         description: Capability invocation failed (timeout or error)
+ *       '503':
+ *         description: Agent is offline — invocation would otherwise block ~30s until CapClient times out
  */
 nodesRouter.post("/:id/diag", async (req, res) => {
+  const agentHub: AgentHub = req.app.get("agentHub");
+  // Fast-path: an offline agent will never answer the cap request, so skip
+  // straight to 503 instead of blocking for the full CapClient timeout.
+  if (!agentHub.isAgentOnline(req.params.id)) {
+    return res.status(503).json({ error: "agent offline" });
+  }
   const capClient = req.app.get("capClient") as CapClientLike;
   const r = await capClient.invoke(req.params.id, "diag.collect", null);
   if (!r.ok) return res.status(502).json({ error: r.error ?? "diag failed" });
@@ -258,17 +267,37 @@ nodesRouter.post("/:id/diag", async (req, res) => {
  *       '400':
  *         description: reason is missing or blank
  *       '502':
- *         description: Capability invocation failed (agent offline, timeout, or error)
+ *         description: Capability invocation failed (timeout or error)
+ *       '503':
+ *         description: Agent is offline — invocation would otherwise block ~30s until CapClient times out
  */
 nodesRouter.post("/:id/exec", async (req, res) => {
   const { cmd, args, reason, timeoutMs } = req.body ?? {};
   if (!reason || !String(reason).trim()) {
     return res.status(400).json({ error: "reason required (audited)" });
   }
+  const agentHub: AgentHub = req.app.get("agentHub");
+  // Fast-path: an offline agent will never answer the cap request, so skip
+  // straight to 503 instead of blocking for the full CapClient timeout.
+  if (!agentHub.isAgentOnline(req.params.id)) {
+    return res.status(503).json({ error: "agent offline" });
+  }
   const capClient = req.app.get("capClient") as CapClientLike;
-  const r = await capClient.invoke(req.params.id, "exec", { cmd, args, reason, timeoutMs });
+  // The agent streams stdout/stderr as agent:cap:chunk while exec runs; buffer
+  // it here so the REST response carries the actual command output, not just
+  // the { code, timedOut } result.
+  let output = "";
+  const r = await capClient.invoke(
+    req.params.id,
+    "exec",
+    { cmd, args, reason, timeoutMs },
+    (chunk) => {
+      output += chunk.data;
+    },
+  );
   if (!r.ok) return res.status(502).json({ error: r.error ?? "exec failed" });
-  res.json({ ok: true, result: r.data });
+  const data = (r.data ?? {}) as Record<string, unknown>;
+  res.json({ ok: true, result: { ...data, output } });
 });
 
 /**
