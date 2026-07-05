@@ -5,6 +5,7 @@ import { hostname as osHostname, homedir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
+import { shouldReportStatus } from "./runtime/deploy-report.js";
 import { discoverRecipes, updateRegistries } from "./recipes.js";
 import { writeRegistriesFile, type RegistryWire } from "./registries.js";
 import { untrackDeployment } from "./runtime/vllm.js";
@@ -117,6 +118,7 @@ let healthTimer: ReturnType<typeof setInterval> | null = null;
 const ollamaLastState = new Map<string, string>(); // deploymentId → last reported state
 const ollamaLastVram = new Map<string, number>(); // deploymentId → last reported vramActual
 const vllmLastVram = new Map<string, number>(); // deploymentId → last reported vramActual
+const deployLastStatus = new Map<string, string>(); // deploymentId → last reported deploy status
 
 const caps = new CapRegistry();
 caps.register({ name: "diag.collect", handle: async () => collectDiag() });
@@ -346,24 +348,23 @@ function connect() {
             } else {
               untrackDeployment(status.deploymentId);
             }
+            deployLastStatus.delete(status.deploymentId);
           } else if (status.containerRunning) {
             // Report status for vLLM containers: "running" only once the API is
             // ready (apiReady===true), "starting" while shards are still loading.
             const deployStatus = sparkrunRunningStatus(status);
             const m = await collectMetrics();
-            if (m.vramUsed > 0) {
-              const prevVram = vllmLastVram.get(status.deploymentId);
-              const changed = !prevVram || Math.abs(m.vramUsed - prevVram) > prevVram * 0.01;
-              if (changed) {
-                vllmLastVram.set(status.deploymentId, m.vramUsed);
-                sendMsg("agent:deployment:status", {
-                  deploymentId: status.deploymentId,
-                  status: deployStatus,
-                  // Only advertise the port once the API server is actually bound.
-                  port: deployStatus === "running" ? status.port : undefined,
-                  vramActual: m.vramUsed,
-                });
-              }
+            const s = deployStatus;
+            if (shouldReportStatus({ lastStatus: deployLastStatus.get(status.deploymentId), status: s, lastVram: vllmLastVram.get(status.deploymentId), vramUsed: m.vramUsed })) {
+              deployLastStatus.set(status.deploymentId, s);
+              if (m.vramUsed > 0) vllmLastVram.set(status.deploymentId, m.vramUsed);
+              sendMsg("agent:deployment:status", {
+                deploymentId: status.deploymentId,
+                status: s,
+                // Only advertise the port once the API server is actually bound.
+                port: s === "running" ? status.port : undefined,
+                ...(m.vramUsed > 0 ? { vramActual: m.vramUsed } : {}),
+              });
             }
             if (status.error) {
               sendMsg("agent:deployment:log", {
@@ -401,21 +402,20 @@ function connect() {
               });
               // Stop the local container (cancel restart loop) + untrack.
               try { stopDgxrun(status.deploymentId); } catch { /* best effort */ }
+              deployLastStatus.delete(status.deploymentId);
             } else if (status.containerRunning && isHead) {
               const deployStatus = sparkrunRunningStatus(status);
               const m = await collectMetrics();
-              if (m.vramUsed > 0) {
-                const prevVram = vllmLastVram.get(status.deploymentId);
-                const changed = !prevVram || Math.abs(m.vramUsed - prevVram) > prevVram * 0.01;
-                if (changed) {
-                  vllmLastVram.set(status.deploymentId, m.vramUsed);
-                  sendMsg("agent:deployment:status", {
-                    deploymentId: status.deploymentId,
-                    status: deployStatus,
-                    port: deployStatus === "running" ? status.port : undefined,
-                    vramActual: m.vramUsed,
-                  });
-                }
+              const s = deployStatus;
+              if (shouldReportStatus({ lastStatus: deployLastStatus.get(status.deploymentId), status: s, lastVram: vllmLastVram.get(status.deploymentId), vramUsed: m.vramUsed })) {
+                deployLastStatus.set(status.deploymentId, s);
+                if (m.vramUsed > 0) vllmLastVram.set(status.deploymentId, m.vramUsed);
+                sendMsg("agent:deployment:status", {
+                  deploymentId: status.deploymentId,
+                  status: s,
+                  port: s === "running" ? status.port : undefined,
+                  ...(m.vramUsed > 0 ? { vramActual: m.vramUsed } : {}),
+                });
               }
             }
             // Running workers stay silent — the head's status is the sole gate.
