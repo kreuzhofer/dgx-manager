@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseMeminfo } from "./proc-parse.js";
+import { parseMeminfo, parsePressure } from "./proc-parse.js";
 
 describe("parseMeminfo", () => {
   it("converts kB fields to MB", () => {
@@ -21,5 +21,19 @@ describe("parseMeminfo", () => {
   });
   it("missing fields default to 0", () => {
     expect(parseMeminfo("MemTotal: 1024 kB").availableMb).toBe(0);
+  });
+});
+
+describe("parsePressure", () => {
+  it("parses some + full lines", () => {
+    const p = parsePressure(
+      "some avg10=1.23 avg60=4.56 avg300=7.89 total=12345\n" +
+      "full avg10=0.10 avg60=0.20 avg300=0.30 total=678\n");
+    expect(p.some.avg10).toBe(1.23);
+    expect(p.some.total).toBe(12345);
+    expect(p.full?.avg60).toBe(0.20);
+  });
+  it("cpu pressure has no full line", () => {
+    expect(parsePressure("some avg10=0 avg60=0 avg300=0 total=0").full).toBeNull();
   });
 });
