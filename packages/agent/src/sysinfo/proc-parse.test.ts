@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseMeminfo, parsePressure, parseLoadavg, parseFileNr } from "./proc-parse.js";
+import { parseMeminfo, parsePressure, parseLoadavg, parseFileNr, parseProcNetTcpByPort } from "./proc-parse.js";
 
 describe("parseMeminfo", () => {
   it("converts kB fields to MB", () => {
@@ -49,5 +49,23 @@ describe("parseFileNr", () => {
   it("parses allocated and max", () => {
     const f = parseFileNr("12800\t0\t9223372");
     expect(f.allocated).toBe(12800); expect(f.max).toBe(9223372);
+  });
+});
+
+describe("parseProcNetTcpByPort", () => {
+  // port 22 = 0x16. state 0A=LISTEN, 01=ESTABLISHED, 03=SYN_RECV.
+  const header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid\n";
+  it("tallies :22 rows by TCP state (MaxStartups pileup)", () => {
+    const rows = [
+      "0: 00000000:0016 00000000:0000 0A 0 0",           // LISTEN
+      "1: 0100007F:0016 0200007F:C000 01 0 0",           // ESTABLISHED
+      ...Array.from({length:30},(_,i)=>`${i+2}: 0100007F:0016 0300007F:${i} 03 0 0`), // 30 SYN_RECV
+    ].join("\n");
+    const t = parseProcNetTcpByPort(header + rows, 22);
+    expect(t.LISTEN).toBe(1); expect(t.ESTABLISHED).toBe(1); expect(t.SYN_RECV).toBe(30);
+  });
+  it("ignores other ports and empty input", () => {
+    const t = parseProcNetTcpByPort(header + "0: 00000000:0050 00000000:0000 0A 0 0", 22);
+    expect(t.LISTEN ?? 0).toBe(0);
   });
 });

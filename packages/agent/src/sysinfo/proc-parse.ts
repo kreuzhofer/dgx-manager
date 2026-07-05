@@ -42,3 +42,24 @@ export function parseFileNr(text: string): FdInfo {
   const p = text.trim().split(/\s+/);
   return { allocated: parseInt(p[0], 10) || 0, max: parseInt(p[2], 10) || 0 };
 }
+
+export const TCP_STATES: Record<string, string> = {
+  "01": "ESTABLISHED", "02": "SYN_SENT", "03": "SYN_RECV", "04": "FIN_WAIT1",
+  "05": "FIN_WAIT2", "06": "TIME_WAIT", "07": "CLOSE", "08": "CLOSE_WAIT",
+  "09": "LAST_ACK", "0A": "LISTEN", "0B": "CLOSING",
+};
+
+/** Count rows on `port` (local) in /proc/net/tcp[6] output, tallied by TCP state name. */
+export function parseProcNetTcpByPort(text: string, port: number): Record<string, number> {
+  const out: Record<string, number> = {};
+  const hexPort = port.toString(16).toUpperCase().padStart(4, "0");
+  for (const line of text.split("\n")) {
+    const cols = line.trim().split(/\s+/);
+    if (cols.length < 4 || !cols[1]?.includes(":")) continue;
+    const lp = cols[1].split(":")[1]?.toUpperCase();
+    if (lp !== hexPort) continue;
+    const st = TCP_STATES[cols[3].toUpperCase()] ?? cols[3];
+    out[st] = (out[st] ?? 0) + 1;
+  }
+  return out;
+}
