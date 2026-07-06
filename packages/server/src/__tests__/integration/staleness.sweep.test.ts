@@ -81,6 +81,24 @@ describe("AgentHub.sweepStale", () => {
     expect((await prisma.node.findUnique({ where: { id: stale.id } }))!.status).toBe("offline");
     expect((await prisma.node.findUnique({ where: { id: fresh.id } }))!.status).toBe("online");
     expect((hub as unknown as { agents: Map<string, unknown> }).agents.has(stale.id)).toBe(false);
+    // fast-follow: the swept node is tracked so its later recovery can be announced
+    expect((hub as unknown as { sweptOffline: Set<string> }).sweptOffline.has(stale.id)).toBe(true);
+
+    hub.stop();
+  });
+
+  it("announces a swept node's recovery exactly once (offline->online transition), then no-ops", async () => {
+    const hub = new AgentHub();
+    hub.stop();
+
+    const stale = await prisma.node.create({ data: { name: "stale", status: "online", lastSeen: new Date(Date.now() - 60_000) } });
+    await hub.sweepStale(); // marks offline + records in sweptOffline
+    const hubx = hub as unknown as { announceRecoveryIfSwept(id: string): boolean; sweptOffline: Set<string> };
+
+    expect(hubx.announceRecoveryIfSwept(stale.id)).toBe(true);   // first heartbeat after recovery -> broadcast
+    expect(hubx.sweptOffline.has(stale.id)).toBe(false);         // cleared after announcing
+    expect(hubx.announceRecoveryIfSwept(stale.id)).toBe(false);  // subsequent heartbeats -> no repeat broadcast
+    expect(hubx.announceRecoveryIfSwept("never-swept")).toBe(false); // a node never swept -> no broadcast
 
     hub.stop();
   });

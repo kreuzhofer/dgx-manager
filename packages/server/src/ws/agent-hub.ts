@@ -134,6 +134,10 @@ export class AgentHub {
    *  results/chunks come back through the agent:cap:result/chunk cases below. */
   readonly capClient: CapClient;
   private sweepTimer?: ReturnType<typeof setInterval>;
+  /** Nodes the staleness sweep marked offline, awaiting a recovery heartbeat.
+   *  Used to SSE-broadcast node:status:online exactly once on the offline->online
+   *  transition (not every metric tick), so status pages update without a reload. */
+  private sweptOffline = new Set<string>();
 
   constructor() {
     this.wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
@@ -552,6 +556,8 @@ export class AgentHub {
                   : {}),
               },
             });
+            // If the sweep had marked this node offline, announce its recovery once.
+            this.announceRecoveryIfSwept(nodeId);
             const now = Date.now();
             metricsBuffer.push(nodeId, {
               timestamp: now,
@@ -869,11 +875,22 @@ export class AgentHub {
         await prisma.node.update({ where: { id }, data: { status: "offline" } }).catch((e) => console.error(`[staleness] failed to mark ${id} offline:`, e));
         this.agents.delete(id);
         sseBroadcast({ type: "node:status", payload: { nodeId: id, status: "offline" } });
+        this.sweptOffline.add(id); // announce the recovery when it next heartbeats
         console.log(`[staleness] node ${id} marked offline (no heartbeat > ${STALE_THRESHOLD_MS}ms)`);
       }
     } catch (err) {
       console.error("[staleness] sweep error:", err);
     }
+  }
+
+  /** If this node was marked offline by the staleness sweep and is now
+   *  heartbeating again, SSE-broadcast the recovery so status pages update
+   *  without a reload. Fires once per offline->online transition (Set.delete
+   *  returns true only the first time). Returns true iff a broadcast was sent. */
+  private announceRecoveryIfSwept(nodeId: string): boolean {
+    if (!this.sweptOffline.delete(nodeId)) return false;
+    sseBroadcast({ type: "node:status", payload: { nodeId, status: "online" } });
+    return true;
   }
 
   /** Stop the staleness sweep (test teardown / shutdown). */
