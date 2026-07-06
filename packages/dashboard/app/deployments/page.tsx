@@ -7,6 +7,7 @@ import { useSSE, type SseEvent } from "@/lib/sse";
 import { buildClusterNodeIds } from "@/lib/cluster-nodes";
 import { LogViewer } from "@/components/log-viewer";
 import { BenchmarkFormModal } from "@/components/benchmark-form-modal";
+import { ClaudeLaunchModal } from "@/components/claude-launch-modal";
 
 interface Recipe {
   file: string;
@@ -197,6 +198,9 @@ export default function DeploymentsPage() {
 
   // Benchmark modal state
   const [benchmarkTarget, setBenchmarkTarget] = useState<
+    { id: string; label: string } | null
+  >(null);
+  const [claudeLaunchTarget, setClaudeLaunchTarget] = useState<
     { id: string; label: string } | null
   >(null);
   const [latestBenchmarkStatus, setLatestBenchmarkStatus] = useState<
@@ -1436,6 +1440,18 @@ export default function DeploymentsPage() {
                         {d.status === "running" && d.port && (
                           <button
                             type="button"
+                            className="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-orange-300 transition-colors"
+                            onClick={() => setClaudeLaunchTarget({
+                              id: d.id,
+                              label: `${d.displayName ?? d.model?.name ?? d.modelId} @ ${d.node?.name ?? "?"}`,
+                            })}
+                          >
+                            Claude
+                          </button>
+                        )}
+                        {d.status === "running" && d.port && (
+                          <button
+                            type="button"
                             className="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-purple-300 transition-colors"
                             onClick={() => setBenchmarkTarget({
                               id: d.id,
@@ -1693,6 +1709,14 @@ export default function DeploymentsPage() {
           deploymentLabel={benchmarkTarget.label}
           onClose={() => setBenchmarkTarget(null)}
           onStarted={() => {/* SSE will populate latestBenchmarkStatus */}}
+        />
+      )}
+
+      {claudeLaunchTarget && (
+        <ClaudeLaunchModal
+          deploymentId={claudeLaunchTarget.id}
+          deploymentLabel={claudeLaunchTarget.label}
+          onClose={() => setClaudeLaunchTarget(null)}
         />
       )}
     </div>
