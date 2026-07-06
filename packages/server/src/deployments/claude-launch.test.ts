@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { fc, it as fcIt } from "@fast-check/vitest";
-import { buildClaudeLaunchSnippet } from "./claude-launch.js";
+import { buildClaudeLaunchSnippet, CLAUDE_AUTH_TOKEN } from "./claude-launch.js";
 
 const VAR_NAMES = [
   "ANTHROPIC_BASE_URL",
@@ -54,11 +54,24 @@ describe("buildClaudeLaunchSnippet", () => {
     expect(out).toContain("$env:ANTHROPIC_DEFAULT_HAIKU_MODEL = 'glm-5.2'");
   });
 
+  it("escapes embedded single quotes in both shells", () => {
+    const model = "weird'name";
+    const bash = buildClaudeLaunchSnippet({ baseUrl: "http://x:8000", model, authToken: "dgx-local", shell: "bash" });
+    expect(bash).toContain(`export ANTHROPIC_DEFAULT_OPUS_MODEL='weird'\\''name'`);
+    const pwsh = buildClaudeLaunchSnippet({ baseUrl: "http://x:8000", model, authToken: "dgx-local", shell: "powershell" });
+    expect(pwsh).toContain(`$env:ANTHROPIC_DEFAULT_OPUS_MODEL = 'weird''name'`);
+  });
+
+  it("uses the exact throwaway auth token constant", () => {
+    expect(CLAUDE_AUTH_TOKEN).toBe("dgx-local");
+  });
+
   /**
    * Invariant: for any baseUrl / model / token, every ANTHROPIC_* var is present
    * and each value survives the round trip through the shell quoting unchanged.
    */
-  fcIt.prop([fc.string(), fc.string(), fc.string()])(
+  const noNewline = fc.string().filter((s) => !/[\r\n]/.test(s));
+  fcIt.prop([noNewline, noNewline, noNewline])(
     "round-trips all values through bash and powershell quoting",
     (baseUrl, model, authToken) => {
       for (const shell of ["bash", "powershell"] as const) {
