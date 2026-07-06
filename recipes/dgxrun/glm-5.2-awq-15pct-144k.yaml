@@ -1,0 +1,48 @@
+# @dgxrun/glm-5.2-awq-15pct-144k — big-context daily-driver variant of glm-5.2-awq-15pct.
+# Reduced sparse-MLA/indexer workspace chunks eliminate the head's capture/JIT memory spike,
+# lifting the no-DCP context ceiling from ~85K to ~159K (KV-limited at gmu 0.88). 144K here
+# leaves startup margin below that ceiling. Decode is unchanged (~25-31 on real/code content;
+# ~20 on generic prose — MTP acceptance is workload-dependent). For >159K context use DCP.
+# Verified 2026-07-06: 128K served, 160K exceeded the KV pool. Memory glm52-decode-workload-dependent.
+recipe_version: "2"
+runner: dgxrun
+maxoutmem: true
+model: CosmicRaisins/GLM-5.2-AWQ-INT4-15pct
+runtime: vllm
+container: vllm-node-tf5-glm52-b12x:probe
+cluster_only: true
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 4
+  gpu_memory_utilization: 0.88
+  max_model_len: 147456   # 144K — below the ~159K KV ceiling for startup margin
+  served_model_name: glm-5.2
+env:
+  HF_HOME: /cache/huggingface
+  HF_HUB_OFFLINE: "1"
+  LD_PRELOAD: /cache/huggingface/nccl-2.30.4/libnccl.so.2
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "5400"
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+  # reduced workspace — removes the capture/JIT spike that OOMed the head past ~85K
+  VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: "128"
+  VLLM_TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE: "128"
+  VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE: "256"
+  GLM52_BIND_HOST_TRITON: "1"
+  GLM52_MQA_LOGITS_TRITON: "1"
+  GLM52_PAGED_MQA_TRITON: "1"
+  GLM52_PAGED_MQA_TOPK_CHUNK_SIZE: "8192"
+  GLM52_B12X_MLA: "1"
+  NCCL_NET: IB
+  NCCL_IB_DISABLE: "0"
+  NCCL_IB_HCA: "rocep1s0f0,roceP2p1s0f0"
+  NCCL_SOCKET_IFNAME: "enP7s7,enp1s0f0np0,enP2p1s0f0np0"
+  GLOO_SOCKET_IFNAME: enp1s0f0np0
+  NCCL_IB_GID_INDEX: "3"
+  NCCL_CROSS_NIC: "1"
+  NCCL_CUMEM_ENABLE: "0"
+  NCCL_IGNORE_CPU_AFFINITY: "1"
+  NCCL_DEBUG: WARN
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+command: |
+  vllm serve {model} --served-model-name {served_model_name} --host {host} --port {port} --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --enable-prefix-caching --speculative-config '{"model":"CosmicRaisins/GLM-5.2-MTP-INT4-aligned","method":"mtp","num_speculative_tokens":3,"attention_backend":"FLASHMLA_SPARSE"}' -tp {tensor_parallel} --pipeline-parallel-size 1 --distributed-executor-backend mp --max-model-len {max_model_len} --max-num-seqs 1 --max-num-batched-tokens 4096 --gpu-memory-utilization {gpu_memory_utilization} --kv-cache-dtype fp8_ds_mla --compilation-config '{"cudagraph_mode":"FULL"}'
