@@ -1682,8 +1682,11 @@ export default function DeploymentsPage() {
                   </div>
                 )}
 
-                {/* Log viewer */}
-                {viewingLogs === d.id && (
+                {/* Log viewer — head/solo rows only. A cluster deployment renders
+                    one row per node sharing the same deployment.id, so without the
+                    !isWorker guard the panel would mirror onto every worker row at
+                    once (workers have no distinct log; logs are per-deployment/head). */}
+                {!isWorker && viewingLogs === d.id && (
                   <LogViewer content={logs[d.id] || "Waiting for logs..."} />
                 )}
               </div>
