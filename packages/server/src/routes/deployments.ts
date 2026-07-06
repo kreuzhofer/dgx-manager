@@ -19,6 +19,8 @@ import { sshExec } from "../ssh/executor.js";
 import { resolveDgxrunRecipe, type DgxrunResolvedRecipe } from "../deployments/dgxrun-recipe.js";
 import { buildDgxrunDeploys, DEFAULT_MASTER_PORT } from "../deployments/dgxrun-dispatch.js";
 import { resolveDgxrunRecipeFile, DGXRUN_RECIPES_DIR } from "../deployments/dgxrun-catalog.js";
+import { deploymentEndpointUrl, resolveServedModelName } from "../benchmarks/endpoint.js";
+import { buildClaudeLaunchSnippet, CLAUDE_AUTH_TOKEN } from "../deployments/claude-launch.js";
 
 export const deploymentsRouter = Router();
 
@@ -102,6 +104,58 @@ deploymentsRouter.get("/:id/logs", async (req, res) => {
   } catch {
     res.type("text/plain").send("");
   }
+});
+
+/**
+ * @openapi
+ * /api/deployments/{id}/claude-launch:
+ *   get:
+ *     tags: [Deployments]
+ *     summary: Shell snippet to launch Claude Code against this deployment
+ *     description: >
+ *       Returns bash/zsh and PowerShell export blocks that point the `claude`
+ *       CLI at this deployment's vLLM endpoint via the Anthropic Messages API
+ *       (ANTHROPIC_BASE_URL = http://<node-ip>:<port>, no /v1 suffix). The
+ *       served model name is resolved from the live `/v1/models` endpoint,
+ *       falling back to the deployment's display/catalog name if unreachable.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       '200': { description: baseUrl, resolved model, and per-shell snippets }
+ *       '404': { description: deployment not found }
+ *       '409': { description: deployment is not serving an endpoint }
+ */
+deploymentsRouter.get("/:id/claude-launch", async (req, res) => {
+  const deployment = await prisma.deployment.findUnique({
+    where: { id: req.params.id },
+    include: { node: true, model: true },
+  });
+  if (!deployment) {
+    return res.status(404).json({ error: "deployment not found" });
+  }
+  if (deployment.status !== "running" || !deployment.port || !deployment.node?.ipAddress) {
+    return res.status(409).json({
+      error: "deployment is not serving an endpoint (needs status=running, a port, and a node IP)",
+    });
+  }
+  const baseUrl = deploymentEndpointUrl(deployment);
+  const fetchImpl = (req.app.get("fetchImpl") as typeof fetch) ?? fetch;
+  const model = await resolveServedModelName(
+    `${baseUrl}/v1`,
+    deployment.displayName ?? deployment.model.name,
+    fetchImpl,
+  );
+  res.json({
+    baseUrl,
+    model,
+    shells: {
+      bash: buildClaudeLaunchSnippet({ baseUrl, model, authToken: CLAUDE_AUTH_TOKEN, shell: "bash" }),
+      powershell: buildClaudeLaunchSnippet({ baseUrl, model, authToken: CLAUDE_AUTH_TOKEN, shell: "powershell" }),
+    },
+  });
 });
 
 /**
