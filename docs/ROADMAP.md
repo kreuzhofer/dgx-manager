@@ -48,7 +48,7 @@ The server APIs for these features are complete, but the dashboard pages are sti
 
 ### Deploy status accuracy
 
-- [ ] Deployment `status: "running"` should mean vLLM is actually serving, not just that the container started. Today the manager flips to `running` when the agent reports container start (often within 60s), but for a 27B model on 2 nodes, vLLM doesn't bind port 8000 until safetensors load + Ray init + cudagraph capture finish (~5–6 min). A scripted "wait for ready" loop hits a connection-refused window even though the dashboard says "running". Options: add a `loading` sub-state until the `/v1/models` probe succeeds; or have the agent stream readiness events back over the WS and update the deployment row when the API is bound. Either way the UI should show "loading" with progress, not "running". *(June 2026 update: live vLLM model-loading logs now stream via a `sparkrun logs` follower, but `running` still fires at serve-command launch, not at `/v1/models` readiness. Also found: a crash-looping failed deploy keeps re-downloading on each docker restart while the follower narrates progress — so a failed deploy can look alive, and status can stay stale after it stops. Tracked as a status-accuracy follow-up.)*
+- [ ] Deployment `status: "running"` should mean vLLM is actually serving, not just that the container started. Today the manager flips to `running` when the agent reports container start (often within 60s), but for a 27B model on 2 nodes, vLLM doesn't bind port 8000 until safetensors load + Ray init + cudagraph capture finish (~5–6 min). A scripted "wait for ready" loop hits a connection-refused window even though the dashboard says "running". Options: add a `loading` sub-state until the `/v1/models` probe succeeds; or have the agent stream readiness events back over the WS and update the deployment row when the API is bound. Either way the UI should show "loading" with progress, not "running". *(June 2026 update: live vLLM model-loading logs now stream via a `sparkrun logs` follower, but `running` still fires at serve-command launch, not at `/v1/models` readiness. Also found: a crash-looping failed deploy keeps re-downloading on each docker restart while the follower narrates progress — so a failed deploy can look alive, and status can stay stale after it stops. Tracked as a status-accuracy follow-up.)* *(July 2026 update: the agent now gates `running` on an `apiReady` probe — dgxrun head checks `/metrics`, sparkrun checks `/v1/models` — AND a `shouldReportStatus` fix reports the `starting→running` transition past the VRAM throttle, which previously dropped it and left a serving multi-node deploy reading `starting` forever. So `running` now means the API answered. Remaining: surface an explicit `loading` sub-state + progress in the UI, and detect the crash-loop-redownload case.)*
 
 ## Phase 3: Fine-Tuning Pipeline ✅
 
@@ -176,19 +176,29 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 
 **Motivation (July 2026):** During the GLM-5.2 work, nodes' sshd repeatedly wedged under SSH connection load while the agent WS kept heartbeating — but the WS couldn't diagnose or manage anything, so we were blind exactly when we needed sight. The head node's wedge is most likely unified-memory pressure starving `fork()` (unconfirmed — no non-SSH channel existed to prove it), which also breaks any shell-based management path. Hence: **fork-free** observation as the foundation.
 
-### Phase 1 — Incident-Response Core (in progress)
+### Phase 1 — Incident-Response Core ✅
 
 - Fork-free `/proc`+`/sys` diagnostics (`diag.collect`): memory, PSI pressure (cpu/mem/io), load, pid/fd counts, **sshd `:22` connections by TCP state** (distinguishes MaxStartups pre-auth pileup from fork-starvation), thermals, kmsg tail — read in-process so it works when `fork()` is failing
 - Rich streaming metrics: the same fields on every tick, self-healing (fixes the `null` memory/PSI we hit)
 - Audited, reason-required `exec` break-glass capability (streamed output + `AuditEvent`)
 - A capability registry (typed WS request/result/chunk with correlation IDs) as the extensible foundation Phases 2-4 build on
 - Server surface: `POST /api/nodes/:id/diag`, `POST /api/nodes/:id/exec`, audit table
-- Spec + plan: `docs/superpowers/specs/2026-07-05-agent-v2-phase1-incident-response-design.md` (executing via subagent-driven TDD; parsers + registry + exec landed, WS wiring / server / Prisma in progress)
+- **Merged + deployed** (agent 0.5.738 on all 4 nodes). This is what let us pull the `.36` diagnostic journal SSH-free and root-cause the loaded-head death. Spec: `docs/superpowers/specs/2026-07-05-agent-v2-phase1-incident-response-design.md`
+
+### Phase 2 — Robust self-update ✅ (transfer pieces pending)
+
+- **Non-blocking detached updater** — `cmd:update` copies `dist/updater.js` to `/tmp` and spawns it detached+unref, so the agent keeps heartbeating through the update (fixes the blocking `execSync` chain that wedged `.36` twice — memory `agent-cmd-update-spawnsync-wedges-agent`)
+- **Atomic swap with self-restore + health-check + auto-rollback + truthful outcome** (`success`/`rolled-back`/`failed`/`rollback-failed`), reported on reconnect; entrypoint guard + unconditional stale-lock clear. Merged + deployed (0.5.738, SSH-direct for the transition since the first roll still used the old path). Spec: `docs/superpowers/specs/2026-07-05-agent-v2-phase2-self-update-design.md`
+- [ ] **Remaining:** peer-pull from sibling nodes + container-image transfer over the fast fabric (fixes manual `docker save|load`) — own spec
+
+### Phase 3 — Declarative provision/restore + staleness sweep (staleness done)
+
+- **Heartbeat-staleness sweep ✅** — `AgentHub` runs a 10 s sweep marking any `online` node whose `lastSeen` age > 30 s as `offline` + dropping it from the live agents map + SSE; self-heals to `online` (and re-asserts the agents-map entry, so it stays *reachable*) on the next heartbeat, with a one-time recovery broadcast. A dead/half-open node now reads offline in ~40 s instead of 76 min (the old close-only path). Merged + deployed + **live-verified on `.39`** via a SIGSTOP stall (0 WS close events, `[staleness] marked offline` fired). Fixes memory `node-status-online-unreliable`. Spec: `docs/superpowers/specs/2026-07-05-heartbeat-staleness-sweep-design.md`
+- [ ] **Remaining:** declarative node provision/restore (netplan/fabric/NFS/docker-`default-shm-size`/sudoers) — fixes factory-reset-restore-by-hand
+- [ ] Fast-follow: the recovery self-heal broadcasts `node:status:online`, but the *offline→online* transition still isn't reflected on the Nodes page for a node that recovered via a fresh `register` before its next metric (harmless redundant path); low priority
 
 ### Later phases (specs TBD)
 
-- [ ] **Phase 2** — robust self-update (atomic + health-check + auto-rollback + peer-pull) + container-image transfer over the fast fabric (fixes flaky WS `cmd:update` + manual `docker save|load`)
-- [ ] **Phase 3** — declarative node provision/restore (netplan/fabric/NFS/docker-`default-shm-size`/sudoers) + manager heartbeat-staleness sweep (fixes factory-reset-restore-by-hand + stale `online` status)
 - [ ] **Phase 4** — fold dgxrun deploy management onto the capability registry
 - [ ] mTLS + per-node `exec` arming (Phase 1 ships token auth + audit)
 
@@ -210,10 +220,10 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 
 ### Benchmarking (shipped)
 
-- llama-benchy benchmark runner integrated via `POST /api/benchmarks { deploymentId, presetId }`
-- Presets: `quick-smoke`, `chat-short`, `chat-long`, `code-32k`, `throughput`
+- Two benchmark `kind`s via `POST /api/benchmarks { deploymentId, presetId }`:
+  - **`throughput`** (llama-benchy): presets `quick-smoke`, `chat-short`, `chat-long`, `code-32k`, `throughput`; per-concurrency decode tok/s (decode-only `meanTps`) + TTFR to `result.json`/DB
+  - **`tool-eval`** (tool-eval-bench via `uvx`): presets `tool-eval-quick`/`-full`/`-hardmode`/`-pressure`; `toolEvalScore`/`toolEvalRating`/`toolEvalCategories`
 - Dashboard: results list, per-run detail (`/benchmarks/[id]`), and a compare view (`/benchmarks/compare`)
-- Per-concurrency throughput + TTFR captured to `result.json` and the DB
 
 - SQL evaluation script — implemented and validated on `b-mc2/sql-create-context`
   - **Gemma 4 E2B**: base 4% → fine-tuned 22% exact-match accuracy (+18pp, 5.5× ratio) on 50 examples
@@ -230,7 +240,12 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
   - [ ] Next: re-run 26B LoRA with `target_modules` restricted to attention only (`q_proj,k_proj,v_proj,o_proj`) and scoped to `model.language_model.layers` (exclude vision tower). Cheap sanity check — if ≥ base, confirms the dense-MLP adaptation drove the regression via MoE-routing drift.
   - [ ] After that: write a proper MoE-aware LoRA dispatch — wrap `experts.gate_up_proj` / `experts.down_proj` as per-expert low-rank deltas on the fused 3D tensors, leave `router.*` frozen. Standard PEFT can't do this out of the box.
   - [ ] Harden `fix_clippable_linear_keys()` in `lib/patches.py:119-172` — the "copy any missing key from base" fallback is fragile for MoE; make it log *every* overwrite so a silent expert-key mismatch can't hide.
-- [ ] Run evaluation suites (lm-eval-harness, custom benchmarks) against deployed models
+- [ ] **Accuracy-eval benchmark kind (lm-eval-harness) as a first-class GUI option** — add an `accuracy`/`lm-eval` `kind` alongside the shipped `throughput` + `tool-eval` kinds (same `POST /api/benchmarks`, deploy dropdown, and `/benchmarks/compare` view). Design decided 2026-07-06:
+  - **Curate, don't wrap all of lm-eval** (4–6 presets): **IFEval** (instruction adherence — the *known* expert-prune failure mode), **MMLU-Pro** + **GPQA** (knowledge tail), **Aider-polyglot** / LiveCodeBench (agentic coding), + the existing SQL eval.
+  - **API-mode** against the deployment `/v1` endpoint (scoring is rule-based, no GPU) — run via lm-eval **dispatched to a node** like fine-tune jobs, to keep torch/heavy deps off the Pi; stream results back. (Pi *can* run it — `python3-venv` installed 2026-07-06 — but node-dispatch is the scalable path.)
+  - **Reasoning-model handling:** per-preset toggle to strip/parse GLM-5.2 thinking tokens (scores tank otherwise).
+  - **Result schema:** reuse the `toolEvalCategories` JSON pattern for per-task/per-subject breakdown — no new columns.
+  - **Motivation:** makes the manual "deploy A → eval → deploy B → eval → compare" one-click + dashboard-comparable — directly serves the **15pct-vs-unpruned** prune-quality decision (in progress) and **fine-tune regression** checks. Validate manually first (IFEval on the 15pct), then spec→plan→build.
 - [ ] Track quality metrics over time with per-model and per-run history
 - [ ] Compare base models against fine-tuned variants in the dashboard (currently only per-job chart)
 - [ ] Dashboard views for benchmark results and regression detection
@@ -266,7 +281,12 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 - **Ollama governance** — startup firewall restricts `:11434` to manager + loopback; install without autostart; on-demand service start for Ollama deploys; firewall state reported via self-audit
 - **`maxoutmem` recipe flag** — reclaim node memory (stop gdm) before a deploy that needs the full unified-memory budget
 - **Metrics fixes** — dgxrun tps folded into node metrics; `vramTotal` now self-heals from every tick via `os.totalmem()` (was a register-only `free -m` parse that returned 0 on a re-onboarded node)
-- **Agent v2 kickoff** — incident-response core under construction (see Phase 3.7)
+- **Agent v2 Phase 1 shipped** — incident-response core (fork-free diag, audited exec, rich streaming metrics, capability registry, `POST /api/nodes/:id/{diag,exec}` + audit table); deployed on all 4 nodes (see Phase 3.7)
+- **Agent v2 Phase 2 shipped — robust self-update** — detached non-blocking updater with atomic swap + health-check + auto-rollback + truthful outcome reporting; fixes the blocking `cmd:update` that wedged `.36` twice. Deployed (0.5.738)
+- **Heartbeat-staleness sweep shipped** — node `status` reconciles against `lastSeen` every 10 s, so a dead/half-open node reads offline in ~40 s instead of 76 min; self-heal + agents-map restore on recovery. Live-verified on `.39`
+- **`@dgxrun` recipe catalog** — dgxrun recipes now live in-repo (`recipes/dgxrun/*.yaml`), auto-discovered and grouped in the deploy dropdown as `@dgxrun/…` alongside `@sparkrun/…`, so GLM-5.2 is one click (module-relative recipes dir; 404 on a missing recipe)
+- **Head-node select at launch** — crown-toggle to pick which node heads a TP=4 cluster deploy (`nodeIds` sent head-first), badged in the deployments list — no more guessing which node becomes head
+- **Deploy-status accuracy** — `running` now gates on an `apiReady` probe + reports the `starting→running` transition past the VRAM throttle (fixes serving multi-node deploys stuck reading `starting`)
 
 ## Recent work (May–June 2026)
 
@@ -288,7 +308,7 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 | Deployments | ✅ | ✅ | ✅ | ✅ |
 | Multi-node (dgxrun mp) | ✅ | ✅ | ✅ | ✅ |
 | Power Control (reboot/WoL) | ✅ | ✅ | ✅ | ✅ |
-| Agent v2 (mgmt plane) | 🚧 | 🚧 | — | 🚧 |
+| Agent v2 (mgmt plane) | ✅† | ✅† | 🚧 | ✅† |
 | Load Balancer | ✅* | — | placeholder | ✅ |
 | Models | ✅ | — | placeholder | ✅ |
 | Fine-Tuning (single) | ✅ | ✅ | ✅ | ✅ |
@@ -310,6 +330,8 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 
 *\*Load Balancer: rules/endpoints API complete; inference proxy implemented but not mounted; dashboard UI pending.*
 
+*†Agent v2: Phase 1 (fork-free diag / audited exec / rich metrics / capability registry) + Phase 2 (robust self-update) + the heartbeat-staleness sweep are shipped & deployed; declarative provision/restore, image transfer, and Phase 4 (dgxrun on the registry) pending. Dashboard surface for diag/exec still minimal.*
+
 ---
 
-*Last updated: July 5, 2026*
+*Last updated: July 6, 2026*
