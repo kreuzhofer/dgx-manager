@@ -24,13 +24,14 @@ env:
   HF_HOME: /cache/huggingface
   HF_HUB_OFFLINE: "1"
   LD_PRELOAD: /cache/huggingface/nccl-2.30.4/libnccl.so.2
-  TRITON_CACHE_DIR: /cache/huggingface/.tritoncache-dcp
-  # Persist ALL JIT caches to NFS so a -prewarm run warms them for the full run (no compile spike).
-  TORCHINDUCTOR_CACHE_DIR: /cache/huggingface/.inductorcache-dcp
-  VLLM_CACHE_ROOT: /cache/huggingface/.vllmcache-dcp        # vLLM torch.compile graphs — MUST match the -prewarm recipe
-  FLASHINFER_JIT_DIR: /cache/huggingface/.flashinfer-jit-dcp
-  FLASHINFER_WORKSPACE_DIR: /cache/huggingface/.flashinfer-dcp
-  FLASHINFER_AUTOTUNE_DIR: /cache/huggingface/.flashinfer-autotune-dcp
+  # All JIT caches under ONE subfolder on NFS (not scattered in the model root) — MUST match
+  # glm-5.2-awq-15pct-dcp2-prewarm.yaml exactly (paths + max_model_len) or the full run recompiles.
+  TRITON_CACHE_DIR: /cache/huggingface/.jit-cache-dcp/triton
+  TORCHINDUCTOR_CACHE_DIR: /cache/huggingface/.jit-cache-dcp/inductor
+  VLLM_CACHE_ROOT: /cache/huggingface/.jit-cache-dcp/vllm
+  FLASHINFER_JIT_DIR: /cache/huggingface/.jit-cache-dcp/flashinfer-jit
+  FLASHINFER_WORKSPACE_DIR: /cache/huggingface/.jit-cache-dcp/flashinfer-ws
+  FLASHINFER_AUTOTUNE_DIR: /cache/huggingface/.jit-cache-dcp/flashinfer-autotune
   FLASHINFER_AUTOTUNER_LOAD_FROM_FILE: "1"
   TORCHINDUCTOR_COMPILE_THREADS: "1"   # serialize any residual compile (cache miss) so it fits alongside weights+KV
   MAX_JOBS: "2"

@@ -25,12 +25,15 @@ env:
   HF_HOME: /cache/huggingface
   HF_HUB_OFFLINE: "1"
   LD_PRELOAD: /cache/huggingface/nccl-2.30.4/libnccl.so.2
-  TRITON_CACHE_DIR: /cache/huggingface/.tritoncache-dcp
-  TORCHINDUCTOR_CACHE_DIR: /cache/huggingface/.inductorcache-dcp
-  VLLM_CACHE_ROOT: /cache/huggingface/.vllmcache-dcp        # THE key one — vLLM's torch.compile graphs (was ephemeral /root/.cache/vllm)
-  FLASHINFER_JIT_DIR: /cache/huggingface/.flashinfer-jit-dcp # FlashInfer JIT (WORKSPACE_DIR is runtime scratch, not the cache)
-  FLASHINFER_WORKSPACE_DIR: /cache/huggingface/.flashinfer-dcp
-  FLASHINFER_AUTOTUNE_DIR: /cache/huggingface/.flashinfer-autotune-dcp
+  # ALL JIT caches under one subfolder (not scattered in the HF/model root). VLLM_CACHE_ROOT is the
+  # key one — vLLM's torch.compile graphs (default was ephemeral /root/.cache/vllm). Persisted on NFS,
+  # shared across nodes -> warm relaunch skips the ~10min compile. Must match the full recipe exactly.
+  TRITON_CACHE_DIR: /cache/huggingface/.jit-cache-dcp/triton
+  TORCHINDUCTOR_CACHE_DIR: /cache/huggingface/.jit-cache-dcp/inductor
+  VLLM_CACHE_ROOT: /cache/huggingface/.jit-cache-dcp/vllm
+  FLASHINFER_JIT_DIR: /cache/huggingface/.jit-cache-dcp/flashinfer-jit
+  FLASHINFER_WORKSPACE_DIR: /cache/huggingface/.jit-cache-dcp/flashinfer-ws
+  FLASHINFER_AUTOTUNE_DIR: /cache/huggingface/.jit-cache-dcp/flashinfer-autotune
   FLASHINFER_AUTOTUNER_LOAD_FROM_FILE: "1"
   # SERIALIZE the JIT compile so its peak fits alongside the 88GB weights (6 parallel cicc = ~25GB spike;
   # 1 at a time = ~5-10GB). This is what lets the prewarm fit at all on the 124GB unified pool.
