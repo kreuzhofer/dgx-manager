@@ -1,0 +1,47 @@
+# @dgxrun/glm-5.2-unpruned-loadtest — ISOLATION TEST (not for daily use).
+# Strips the unpruned QuantTrio to the simplest config to find where the 0/128 load death comes from:
+# NO DCP, enforce-eager (no capture/compile), 32K context, gmu 0.85. If this loads+serves, the DCP or
+# capture path was the culprit; if it dies at 0/128 the same way, the model load itself is broken.
+recipe_version: "2"
+runner: dgxrun
+maxoutmem: true
+model: QuantTrio/GLM-5.2-Int4-Int8Mix
+runtime: vllm
+container: vllm-node-tf5-glm52-b12x-dcp:probe
+cluster_only: true
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 4
+  gpu_memory_utilization: 0.85
+  max_model_len: 32768
+  served_model_name: glm-5.2
+env:
+  HF_HOME: /cache/huggingface
+  HF_HUB_OFFLINE: "1"
+  LD_PRELOAD: /cache/huggingface/nccl-2.30.4/libnccl.so.2
+  TRITON_CACHE_DIR: /cache/huggingface/.jit-cache-unpruned/triton
+  TORCHINDUCTOR_CACHE_DIR: /cache/huggingface/.jit-cache-unpruned/inductor
+  VLLM_CACHE_ROOT: /cache/huggingface/.jit-cache-unpruned/vllm
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "5400"
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+  VLLM_USE_B12X_SPARSE_INDEXER: "1"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  CUDA_LAUNCH_BLOCKING: "1"
+  TORCH_SHOW_CPP_STACKTRACES: "1"
+  PYTHONFAULTHANDLER: "1"             # dump the Python frame at the fatal signal to localize the native Marlin crash
+  TORCH_CUDA_ARCH_LIST: "12.1a"
+  GLM52_BIND_HOST_TRITON: "0"
+  NCCL_NET: IB
+  NCCL_IB_DISABLE: "0"
+  NCCL_IB_HCA: "rocep1s0f0,roceP2p1s0f0"
+  NCCL_SOCKET_IFNAME: "enP7s7,enp1s0f0np0,enP2p1s0f0np0"
+  GLOO_SOCKET_IFNAME: enp1s0f0np0
+  NCCL_IB_GID_INDEX: "3"
+  NCCL_CROSS_NIC: "1"
+  NCCL_CUMEM_ENABLE: "0"
+  NCCL_IGNORE_CPU_AFFINITY: "1"
+  NCCL_DEBUG: WARN
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+command: |
+  vllm serve {model} --served-model-name {served_model_name} --host {host} --port {port} --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --enable-prefix-caching -tp {tensor_parallel} --pipeline-parallel-size 1 --attention-backend B12X_MLA_SPARSE --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}' --max-model-len {max_model_len} --max-num-seqs 1 --max-num-batched-tokens 4096 --gpu-memory-utilization {gpu_memory_utilization} --kv-cache-dtype fp8_ds_mla --distributed-executor-backend mp --enforce-eager
