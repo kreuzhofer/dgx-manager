@@ -3,7 +3,7 @@
 ## Problem, restated with the root cause found
 The DCP stack builds and **fully initializes** (B12X_MLA_SPARSE + DCP2 + all 4 workers + KV cache), then OOMs at ~116/124 GB **during CUDA-graph capture / first-run JIT** — for both the pruned (0.90/320K) and unpruned (0.89/256K) models — wedging the nodes to ping-only (power-cycle needed).
 
-**It is NOT a recipe/tuning problem.** Our serve config already matches the community reference (cudagraph FULL, `max_cudagraph_capture_size` 10, `fp8_ds_mla`, B12X_MLA_SPARSE, `--max-num-seqs 1`, `--max-num-batched-tokens 4096`, vLLM `e232d26` + b12x). The community runs the **same or higher gmu (0.90–0.93)** and succeeds. The gap is **node-prep + a readiness timeout**, per the research (memory `glm52-dcp-stack-build`; sources in the build notes).
+**It is NOT a recipe/tuning problem.** Our serve config already matches the community reference (cudagraph FULL, `max_cudagraph_capture_size` 10, `fp8_ds_mla`, B12X_MLA_SPARSE, `--max-num-seqs 1`, `--max-num-batched-tokens 4096`, vLLM `e232d26` + b12x). The community runs the **same or higher gmu (0.90–0.93)** and succeeds. The gap is **node-prep** (a unified-memory page-cache + swap problem), per the research (memory `glm52-dcp-stack-build`; sources in the build notes).
 
 Root cause chain (GB10 unified memory — weights + KV + CUDA graphs + Linux page cache all share one ~124 GB pool):
 1. Loading the checkpoint fills the **page cache** (vLLM auto-prefetches NFS checkpoints into page cache → **NFS makes this worse than local NVMe**). vLLM's own startup guard "refuses at 0.90 gmu" if caches aren't dropped.
@@ -26,15 +26,15 @@ Run on all 4 nodes; persist via `/etc/sysctl.d/` + systemd:
 - `sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'` on **every node immediately before the deploy** — and ideally a background loop (`while true; do echo 3 > …/drop_caches; sleep 0.1; done`) **during weight load**, killed once serving.
 - Integrate into the dgxrun launch path (agent runs drop_caches before `docker run`, spawns the loop, reaps it on ready) OR a manager pre-deploy hook. Simplest first pass: run drop_caches on all nodes via the API/exec immediately before POSTing the deploy.
 
-### C. Extend the readiness timeout
-The deploy was marked `failed` at ~18 min (14 min load + ~4 min capture), but the community's capture is **"~10 min cudagraph warmup"** — we killed it mid-capture. Locate the dgxrun/manager readiness deadline (agent `runtime/dgxrun/` or server deploy-status logic) and raise it to **≥40 min** for DCP deploys (14 min load + 10–15 min capture + margin). Do not confuse with `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` (already 5400).
+### C. Readiness timeout — NO CHANGE NEEDED (verified 2026-07-07)
+Originally suspected a premature readiness deadline. Reading the agent code (`packages/agent/src/index.ts:413-423`): a dgxrun deploy is marked `failed` **only when the container dies** (`!containerRunning && !status.alive`); a still-capturing but *alive* head container just stays `"starting"` with no deadline. So the failure was **100% the OOM killing the container**, not a timeout — once node-prep prevents the OOM, the code already waits out the full ~10-min capture. (Keep the monitor's poll window ≥28 min to cover 14 min load + ~10 min capture.)
 
 ### D. Recipe — REVERT the tuning band-aids
 - gmu **0.90** (revert 0.89 → 0.90; community value), keep `cudagraph_mode: FULL`, `--max-num-seqs 1`, `--max-num-batched-tokens 4096`. Do NOT go eager (kills the tps) or lower gmu — those don't address the page cache.
 
 ## Retry order (after a power-cycle)
 1. **Node-prep**: run `scripts/dgx-node-prep.sh` on all 4 nodes; verify sysctls + `swapon --show` empty + `MemAvailable` in `/proc/meminfo` (monitor this, NOT `nvidia-smi` — it can't read GB10 memory).
-2. **Pruned 15pct + separate MTP + DCP2 @ 0.90 / 256K first** (the fast daily driver; MTP works on the pruned; unpruned MTP self-draft is a separate KeyError). Drop caches on all nodes, then deploy, with the extended timeout.
+2. **Pruned 15pct + separate MTP + DCP2 @ 0.90 / 256K first** (the fast daily driver; MTP works on the pruned; unpruned MTP self-draft is a separate KeyError). Drop caches on all nodes, then deploy — API-only monitor with a ≥28-min poll window (the agent waits out the ~10-min capture on its own; no timeout, see §C).
 3. **If it serves** → validate (needle retrieval + decode/MTP acceptance on code), then climb toward 320K. This is the DCP daily driver.
 4. **If it STILL OOMs after drop_caches** — diagnose by error string:
    - plain `NV_ERR_NO_MEMORY` / pool exhaustion during capture → page cache still winning → add the drop_caches *loop during load*, and/or **stage weights to local per-node NVMe** (`$HOME/.cache/huggingface`, `shared_weights_nfs: false`) — the definitive NFS fix.
