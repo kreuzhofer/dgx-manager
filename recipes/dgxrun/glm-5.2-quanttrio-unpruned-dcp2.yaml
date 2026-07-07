@@ -14,7 +14,7 @@ defaults:
   port: 8000
   host: 0.0.0.0
   tensor_parallel: 4
-  gpu_memory_utilization: 0.88   # guard-safe with the node squeeze (0.90 needs 109.5GB free; we have ~108-110)
+  gpu_memory_utilization: 0.90   # community value; earlyoom (the real load-killer) now DISABLED; guard OK with drop-loop
   max_model_len: 262144   # 256K via DCP2
   served_model_name: glm-5.2
 env:
@@ -52,4 +52,4 @@ env:
   NCCL_DEBUG: WARN
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
 command: |
-  vllm serve {model} --served-model-name {served_model_name} --host {host} --port {port} --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --enable-prefix-caching -tp {tensor_parallel} --pipeline-parallel-size 1 --decode-context-parallel-size 2 --dcp-kv-cache-interleave-size 1 --attention-backend B12X_MLA_SPARSE --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}' --max-model-len {max_model_len} --max-num-seqs 1 --max-num-batched-tokens 4096 --gpu-memory-utilization {gpu_memory_utilization} --kv-cache-dtype fp8_ds_mla --async-scheduling --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"PIECEWISE","max_cudagraph_capture_size":10}'
+  vllm serve {model} --served-model-name {served_model_name} --host {host} --port {port} --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --enable-prefix-caching -tp {tensor_parallel} --pipeline-parallel-size 1 --decode-context-parallel-size 2 --dcp-kv-cache-interleave-size 1 --attention-backend B12X_MLA_SPARSE --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}' --max-model-len {max_model_len} --max-num-seqs 1 --max-num-batched-tokens 2048 --gpu-memory-utilization {gpu_memory_utilization} --kv-cache-dtype fp8_ds_mla --async-scheduling --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"PIECEWISE","max_cudagraph_capture_size":10}'
