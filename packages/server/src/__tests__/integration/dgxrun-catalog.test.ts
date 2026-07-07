@@ -123,13 +123,13 @@ async function seedCluster(n: number) {
 }
 
 describe("GET /api/recipes includes @dgxrun catalog", () => {
-  it("lists the @dgxrun/glm-5.2-awq-15pct recipe with source dgxrun", async () => {
+  it("lists the @dgxrun/glm-5.2-awq-15pct-144k recipe with source dgxrun", async () => {
     const app = makeApp(makeStubHub());
 
     const res = await request(app).get("/api/recipes");
 
     expect(res.status).toBe(200);
-    const hit = res.body.find((r: any) => r.file === "@dgxrun/glm-5.2-awq-15pct");
+    const hit = res.body.find((r: any) => r.file === "@dgxrun/glm-5.2-awq-15pct-144k");
     expect(hit).toBeTruthy();
     expect(hit.source).toBe("dgxrun");
   });
@@ -145,7 +145,7 @@ describe("POST /api/deployments with @dgxrun recipeFile", () => {
 
     const res = await request(app)
       .post("/api/deployments")
-      .send({ nodeIds: ids, recipeFile: "@dgxrun/glm-5.2-awq-15pct" });
+      .send({ nodeIds: ids, recipeFile: "@dgxrun/glm-5.2-awq-15pct-144k" });
 
     expect(res.status).toBe(201);
 

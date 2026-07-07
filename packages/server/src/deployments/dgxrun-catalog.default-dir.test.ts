@@ -25,6 +25,6 @@ beforeAll(async () => {
 describe("DGXRUN_RECIPES_DIR default (no env override)", () => {
   it("resolves to the real in-repo recipes/dgxrun dir and finds the glm-5.2 recipe", () => {
     const catalog = getDgxrunCatalog();
-    expect(catalog.some((r) => r.file === "@dgxrun/glm-5.2-awq-15pct")).toBe(true);
+    expect(catalog.some((r) => r.file === "@dgxrun/glm-5.2-awq-15pct-144k")).toBe(true);
   });
 });
