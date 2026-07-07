@@ -21,6 +21,9 @@ services:
       - dgx-data:/app/data
       - ${HOME}/.ssh:/root/.ssh:ro
       - ${SHARED_STORAGE_PATH:-/mnt/tank}:${SHARED_STORAGE_PATH:-/mnt/tank}
+      # Live recipe catalog: recipes/dgxrun/*.yaml are read at runtime, so
+      # editing/adding a recipe no longer needs a server rebuild.
+      - ./recipes:/app/recipes:ro
     restart: unless-stopped
 
   dashboard:
