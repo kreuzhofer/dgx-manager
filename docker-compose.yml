@@ -24,6 +24,12 @@ services:
       # Live recipe catalog: recipes/dgxrun/*.yaml are read at runtime, so
       # editing/adding a recipe no longer needs a server rebuild.
       - ./recipes:/app/recipes:ro
+      # Live agent bundles + version: a bundle rebuilt on the Pi (legacy builder,
+      # since the Pi has no buildx) is served without re-baking the server image.
+      # Mount package.json too so /api/agent/version and the served tarball stay
+      # in lockstep — always rebuild the bundle after bumping the agent version.
+      - ./packages/server/agent-bundles:/app/packages/server/agent-bundles:ro
+      - ./packages/agent/package.json:/app/packages/agent/package.json:ro
     restart: unless-stopped
 
   dashboard:
