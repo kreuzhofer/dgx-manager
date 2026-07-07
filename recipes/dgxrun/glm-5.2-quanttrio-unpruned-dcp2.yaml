@@ -22,12 +22,12 @@ env:
   HF_HUB_OFFLINE: "1"
   LD_PRELOAD: /cache/huggingface/nccl-2.30.4/libnccl.so.2
   # All JIT caches under one subfolder on NFS (distinct from the pruned model's). Persisted -> warm relaunch.
-  TRITON_CACHE_DIR: /cache/huggingface/.jit-cache-unpruned/triton
-  TORCHINDUCTOR_CACHE_DIR: /cache/huggingface/.jit-cache-unpruned/inductor
-  VLLM_CACHE_ROOT: /cache/huggingface/.jit-cache-unpruned/vllm
-  FLASHINFER_JIT_DIR: /cache/huggingface/.jit-cache-unpruned/flashinfer-jit
-  FLASHINFER_WORKSPACE_DIR: /cache/huggingface/.jit-cache-unpruned/flashinfer-ws
-  FLASHINFER_AUTOTUNE_DIR: /cache/huggingface/.jit-cache-unpruned/flashinfer-autotune
+  TRITON_CACHE_DIR: /root/glm-jit/triton
+  TORCHINDUCTOR_CACHE_DIR: /root/glm-jit/inductor
+  VLLM_CACHE_ROOT: /root/glm-jit/vllm
+  FLASHINFER_JIT_DIR: /root/glm-jit/flashinfer-jit
+  FLASHINFER_WORKSPACE_DIR: /root/glm-jit/flashinfer-ws
+  FLASHINFER_AUTOTUNE_DIR: /root/glm-jit/flashinfer-autotune
   FLASHINFER_AUTOTUNER_LOAD_FROM_FILE: "1"
   TORCHINDUCTOR_COMPILE_THREADS: "1"   # serialize compile so its peak fits alongside the 97GB weights
   MAX_JOBS: "2"
