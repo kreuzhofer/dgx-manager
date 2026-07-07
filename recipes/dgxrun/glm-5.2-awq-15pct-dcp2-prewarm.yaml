@@ -17,7 +17,7 @@ defaults:
   port: 8000
   host: 0.0.0.0
   tensor_parallel: 4
-  gpu_memory_utilization: 0.76   # just fits weights (~88/121.63=0.72) + tiny 8K KV; ~30 GB free for the compile spike
+  gpu_memory_utilization: 0.74   # just above the weight floor (~88/121.63=0.72) — maximize free RAM for the compile
   max_model_len: 8192            # tiny KV — compilation is keyed on batch/capture sizes, NOT context, so kernels transfer
   served_model_name: glm-5.2
 env:
@@ -29,6 +29,11 @@ env:
   FLASHINFER_WORKSPACE_DIR: /cache/huggingface/.flashinfer-dcp
   FLASHINFER_AUTOTUNE_DIR: /cache/huggingface/.flashinfer-autotune-dcp
   FLASHINFER_AUTOTUNER_LOAD_FROM_FILE: "1"
+  # SERIALIZE the JIT compile so its peak fits alongside the 88GB weights (6 parallel cicc = ~25GB spike;
+  # 1 at a time = ~5-10GB). This is what lets the prewarm fit at all on the 124GB unified pool.
+  TORCHINDUCTOR_COMPILE_THREADS: "1"
+  MAX_JOBS: "2"
+  NVCC_THREADS: "1"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "5400"
   VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
   VLLM_USE_B12X_SPARSE_INDEXER: "1"

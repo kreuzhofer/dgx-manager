@@ -30,6 +30,9 @@ env:
   FLASHINFER_WORKSPACE_DIR: /cache/huggingface/.flashinfer-dcp
   FLASHINFER_AUTOTUNE_DIR: /cache/huggingface/.flashinfer-autotune-dcp
   FLASHINFER_AUTOTUNER_LOAD_FROM_FILE: "1"
+  TORCHINDUCTOR_COMPILE_THREADS: "1"   # serialize any residual compile (cache miss) so it fits alongside weights+KV
+  MAX_JOBS: "2"
+  NVCC_THREADS: "1"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "5400"
   VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
   VLLM_USE_B12X_SPARSE_INDEXER: "1"
