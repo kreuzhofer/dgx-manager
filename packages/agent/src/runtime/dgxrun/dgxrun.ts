@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { dropCachesOnce, startDropCacheLoop, stopDropCacheLoop } from "./dgxrun-dropcache.js";
 import type { ChildProcess } from "node:child_process";
 import { buildDgxrunDockerArgs, type DgxrunRecipe } from "./dgxrun-args.js";
 import { resolveHfHome } from "../sparkrun.js";
@@ -110,6 +111,9 @@ export function launchDgxrun(
   onLog(`[dgxrun] rank ${args.rank}/${args.nnodes} launching (master ${args.masterAddr}:${args.masterPort})\n`);
   onLog(`[dgxrun] docker ${dockerArgs.join(" ")}\n`);
 
+  // Free the page cache before the container streams its weights off NFS (GB10's
+  // unified pool shares page cache with CUDA-graph capture headroom).
+  dropCachesOnce();
   const child = spawn("docker", dockerArgs);
   let stderr = "";
   child.stdout?.on("data", (b: Buffer) => onLog(b.toString()));
@@ -117,6 +121,9 @@ export function launchDgxrun(
   child.on("exit", (code) => {
     if (code === 0) {
       startLogFollower(deploymentId, name, onLog);
+      // Keep the page cache clear through the weight load; stopped when the head
+      // reports the API ready (dgxrun-metrics), on teardown, or after the backstop.
+      startDropCacheLoop(deploymentId);
       onExit(0);
     } else {
       onLog(`[dgxrun] docker run exited ${code}${stderr ? `: ${stderr.trim().slice(0, 500)}` : ""}\n`);
@@ -138,6 +145,7 @@ function startLogFollower(deploymentId: string, name: string, onLog: (line: stri
 
 /** Tear down THIS node's rank container + kill its log follower. */
 export function stopDgxrun(deploymentId: string): void {
+  stopDropCacheLoop(deploymentId);
   const f = logFollowers.get(deploymentId);
   if (f) { try { f.kill(); } catch { /* gone */ } logFollowers.delete(deploymentId); }
   const name = dgxrunContainerName(deploymentId);

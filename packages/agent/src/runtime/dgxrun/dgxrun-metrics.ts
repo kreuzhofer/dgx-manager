@@ -1,5 +1,6 @@
 import { loadDeployments } from "../deployment-store.js";
 import { inspectDgxrunContainer, captureCrashedDgxrunLogs } from "./dgxrun.js";
+import { stopDropCacheLoop } from "./dgxrun-dropcache.js";
 import {
   parseVllmMetrics, computeTps, firstErrorLine, type TokenSample,
 } from "../sparkrun-metrics.js";
@@ -94,6 +95,8 @@ export async function checkDgxrunDeployments(): Promise<VllmStatus[]> {
         const res = await fetch(`http://localhost:${d.port}/metrics`, { signal: AbortSignal.timeout(3000) });
         status.apiReady = res.ok;
         if (res.ok) {
+          // Serving now — the weight-load page-cache pressure is over; stop dropping caches.
+          stopDropCacheLoop(d.deploymentId);
           const text = await res.text();
           const m = parseVllmMetrics(text);
           status.requestsRunning = m.numRequestsRunning ?? null;
