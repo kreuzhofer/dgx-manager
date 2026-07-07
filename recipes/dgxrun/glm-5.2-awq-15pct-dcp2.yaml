@@ -27,6 +27,8 @@ env:
   TRITON_CACHE_DIR: /cache/huggingface/.tritoncache-dcp
   # Persist ALL JIT caches to NFS so a -prewarm run warms them for the full run (no compile spike).
   TORCHINDUCTOR_CACHE_DIR: /cache/huggingface/.inductorcache-dcp
+  VLLM_CACHE_ROOT: /cache/huggingface/.vllmcache-dcp        # vLLM torch.compile graphs — MUST match the -prewarm recipe
+  FLASHINFER_JIT_DIR: /cache/huggingface/.flashinfer-jit-dcp
   FLASHINFER_WORKSPACE_DIR: /cache/huggingface/.flashinfer-dcp
   FLASHINFER_AUTOTUNE_DIR: /cache/huggingface/.flashinfer-autotune-dcp
   FLASHINFER_AUTOTUNER_LOAD_FROM_FILE: "1"

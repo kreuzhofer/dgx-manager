@@ -17,8 +17,9 @@ defaults:
   port: 8000
   host: 0.0.0.0
   tensor_parallel: 4
-  gpu_memory_utilization: 0.74   # just above the weight floor (~88/121.63=0.72) — maximize free RAM for the compile
-  max_model_len: 8192            # tiny KV — compilation is keyed on batch/capture sizes, NOT context, so kernels transfer
+  gpu_memory_utilization: 0.74   # just above the weight floor (~88/121.63=0.72): KV pool shrinks to ~2GB (VLLM_ALLOW_LONG
+                                 # lets max_model_len exceed it), freeing ~30GB for the compile — while the cache key still matches.
+  max_model_len: 262144          # MATCH the full run so vLLM's compile-cache key is identical (else full run cache-misses -> recompiles)
   served_model_name: glm-5.2
 env:
   HF_HOME: /cache/huggingface
@@ -26,6 +27,8 @@ env:
   LD_PRELOAD: /cache/huggingface/nccl-2.30.4/libnccl.so.2
   TRITON_CACHE_DIR: /cache/huggingface/.tritoncache-dcp
   TORCHINDUCTOR_CACHE_DIR: /cache/huggingface/.inductorcache-dcp
+  VLLM_CACHE_ROOT: /cache/huggingface/.vllmcache-dcp        # THE key one — vLLM's torch.compile graphs (was ephemeral /root/.cache/vllm)
+  FLASHINFER_JIT_DIR: /cache/huggingface/.flashinfer-jit-dcp # FlashInfer JIT (WORKSPACE_DIR is runtime scratch, not the cache)
   FLASHINFER_WORKSPACE_DIR: /cache/huggingface/.flashinfer-dcp
   FLASHINFER_AUTOTUNE_DIR: /cache/huggingface/.flashinfer-autotune-dcp
   FLASHINFER_AUTOTUNER_LOAD_FROM_FILE: "1"
