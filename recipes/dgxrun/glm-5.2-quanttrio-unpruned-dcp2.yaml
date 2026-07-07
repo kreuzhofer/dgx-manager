@@ -14,14 +14,24 @@ defaults:
   port: 8000
   host: 0.0.0.0
   tensor_parallel: 4
-  gpu_memory_utilization: 0.90   # community value; capture OOM was page-cache not gmu — fix is node-prep
+  gpu_memory_utilization: 0.88   # guard-safe with the node squeeze (0.90 needs 109.5GB free; we have ~108-110)
   max_model_len: 262144   # 256K via DCP2
   served_model_name: glm-5.2
 env:
   HF_HOME: /cache/huggingface
   HF_HUB_OFFLINE: "1"
   LD_PRELOAD: /cache/huggingface/nccl-2.30.4/libnccl.so.2
-  TRITON_CACHE_DIR: /cache/huggingface/.tritoncache-dcp
+  # All JIT caches under one subfolder on NFS (distinct from the pruned model's). Persisted -> warm relaunch.
+  TRITON_CACHE_DIR: /cache/huggingface/.jit-cache-unpruned/triton
+  TORCHINDUCTOR_CACHE_DIR: /cache/huggingface/.jit-cache-unpruned/inductor
+  VLLM_CACHE_ROOT: /cache/huggingface/.jit-cache-unpruned/vllm
+  FLASHINFER_JIT_DIR: /cache/huggingface/.jit-cache-unpruned/flashinfer-jit
+  FLASHINFER_WORKSPACE_DIR: /cache/huggingface/.jit-cache-unpruned/flashinfer-ws
+  FLASHINFER_AUTOTUNE_DIR: /cache/huggingface/.jit-cache-unpruned/flashinfer-autotune
+  FLASHINFER_AUTOTUNER_LOAD_FROM_FILE: "1"
+  TORCHINDUCTOR_COMPILE_THREADS: "1"   # serialize compile so its peak fits alongside the 97GB weights
+  MAX_JOBS: "2"
+  NVCC_THREADS: "1"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "5400"
   VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
   VLLM_USE_B12X_SPARSE_INDEXER: "1"
@@ -42,4 +52,4 @@ env:
   NCCL_DEBUG: WARN
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
 command: |
-  vllm serve {model} --served-model-name {served_model_name} --host {host} --port {port} --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --enable-prefix-caching -tp {tensor_parallel} --pipeline-parallel-size 1 --decode-context-parallel-size 2 --dcp-kv-cache-interleave-size 1 --attention-backend B12X_MLA_SPARSE --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}' --max-model-len {max_model_len} --max-num-seqs 1 --max-num-batched-tokens 4096 --gpu-memory-utilization {gpu_memory_utilization} --kv-cache-dtype fp8_ds_mla --async-scheduling --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"FULL","max_cudagraph_capture_size":10}'
+  vllm serve {model} --served-model-name {served_model_name} --host {host} --port {port} --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --enable-prefix-caching -tp {tensor_parallel} --pipeline-parallel-size 1 --decode-context-parallel-size 2 --dcp-kv-cache-interleave-size 1 --attention-backend B12X_MLA_SPARSE --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}' --max-model-len {max_model_len} --max-num-seqs 1 --max-num-batched-tokens 4096 --gpu-memory-utilization {gpu_memory_utilization} --kv-cache-dtype fp8_ds_mla --async-scheduling --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"PIECEWISE","max_cudagraph_capture_size":10}'
