@@ -6,6 +6,7 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { collectMetrics } from "./metrics.js";
 import { shouldReportStatus } from "./runtime/deploy-report.js";
+import { detectPhase, phaseRank } from "./runtime/deploy-phase.js";
 import { discoverRecipes, updateRegistries } from "./recipes.js";
 import { writeRegistriesFile, type RegistryWire } from "./registries.js";
 import { untrackDeployment } from "./runtime/vllm.js";
@@ -256,7 +257,10 @@ function connect() {
             error: running ? undefined : "dgxrun rank not running after agent restart",
           });
         } else {
-          sendMsg("agent:deployment:status", { deploymentId: d.deploymentId, status: "starting" });
+          // Head is running but may still be loading/compiling. On a WS reconnect
+          // reportPhase drops this "starting" if we've already advanced past it,
+          // so the dashboard doesn't snap back to "starting" mid-load.
+          reportPhase(d.deploymentId, "starting");
         }
       }
     }
@@ -536,18 +540,22 @@ function connect() {
   });
 }
 
-function detectPhase(line: string): string | null {
-  const l = line.toLowerCase();
-  if (l.includes("building") || l.includes("=== building")) return "building";
-  if (l.includes("copying") && l.includes("image to")) return "building";
-  if (l.includes("downloading model") || l.includes("=== downloading")) return "downloading";
-  if (l.includes("fetching") && l.includes("files")) return "downloading";
-  if (l.includes("starting head node") || l.includes("applying mod")) return "launching";
-  if (l.includes("starting ray") || l.includes("ray worker")) return "launching";
-  if (l.includes("starting worker node")) return "launching";
-  if (l.includes("loading safetensors") || l.includes("loading model")) return "loading";
-  if (l.includes("application startup complete")) return "running";
-  return null;
+// Monotonic per-deployment phase reporting: the dashboard status only ever moves
+// FORWARD through the lifecycle (see runtime/deploy-phase). A lower-ranked match
+// arriving late — the post-load "Prefetching checkpoint files" line (reads as
+// download) or a reconnect re-emitting "starting" — is dropped rather than
+// regressing the status, which is what read as "downloading while compiling".
+const deployPhaseRank = new Map<string, number>();
+function reportPhase(deploymentId: string, phase: string, extra: Record<string, unknown> = {}): void {
+  const r = phaseRank(phase);
+  if (r >= 0) {
+    if (r <= (deployPhaseRank.get(deploymentId) ?? -1)) return; // not forward — ignore
+    deployPhaseRank.set(deploymentId, r);
+  }
+  sendMsg("agent:deployment:status", { deploymentId, status: phase, ...extra });
+}
+function clearPhaseTracking(deploymentId: string): void {
+  deployPhaseRank.delete(deploymentId);
 }
 
 function sendMsg(type: string, payload: Record<string, unknown>) {
@@ -714,11 +722,10 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
           break;
         }
         // Only the head drives lifecycle status; workers are silent unless they fail.
-        if (rank === 0) sendMsg("agent:deployment:status", { deploymentId, status: "starting" });
+        if (rank === 0) reportPhase(deploymentId, "starting");
         // Port override arrives via params (server folds config into params for
         // dgxrun); fall back to the recipe's default port.
         const deployPort = Number(params?.port ?? recipe.defaults?.port ?? 8000);
-        let lastPhase = "starting";
         try {
           launchDgxrun(
             deploymentId,
@@ -729,12 +736,10 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
               const loadProgress = parseLoadingShards(line);
               if (loadProgress && rank === 0) emitDeploymentProgress(deploymentId, "loading", loadProgress);
               const phase = detectPhase(line);
-              if (phase && phase !== lastPhase && rank === 0) {
-                lastPhase = phase;
-                sendMsg("agent:deployment:status", {
-                  deploymentId, status: phase,
-                  port: phase === "running" ? deployPort : undefined,
-                });
+              // Forward-only: reportPhase drops a late lower-ranked match (e.g. the
+              // post-load "Prefetching checkpoint files" line) instead of regressing.
+              if (phase && rank === 0) {
+                reportPhase(deploymentId, phase, phase === "running" ? { port: deployPort } : {});
               }
             },
             (code) => {
@@ -899,6 +904,7 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
         deploymentId: string; deleteAfter?: boolean; clusterNodes?: string[]; runtime?: string; modelName?: string;
       };
       sendMsg("agent:deployment:status", { deploymentId, status: "stopping" });
+      clearPhaseTracking(deploymentId); // reset forward-only phase tracking for this id
 
       // Stop asynchronously so we can report progress
       (async () => {
