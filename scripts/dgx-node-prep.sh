@@ -29,12 +29,28 @@ swapoff -a || true
 sed -i.bak '/\sswap\s/s/^\([^#]\)/#\1/' /etc/fstab 2>/dev/null || true
 echo "   active swap: $(swapon --show --noheadings | wc -l) devices"
 
-echo "== 3. earlyoom (keep the node reachable if OOM hits) =="
+echo "== 3. earlyoom (recoverable OOM; kill the deploy, NEVER system/network services) =="
 if command -v earlyoom >/dev/null 2>&1 || apt-get install -y earlyoom >/dev/null 2>&1; then
-  mkdir -p /etc/default
-  echo 'EARLYOOM_ARGS="-m 2 -s 100 --prefer (^|/)(vllm|python3|python)($|\s)"' > /etc/default/earlyoom
+  # WARNING (2026-07-07): the packaged earlyoom.service IGNORES /etc/default/earlyoom on this build —
+  # it runs `earlyoom -r 3600` with DEFAULTS (-m 10, no --prefer). At -m 10 it fires at ~12 GB free
+  # (inside a deploy's normal headroom) and, with no --prefer, SIGKILLs NetworkManager/systemd/netplan
+  # by raw oom_score -> breaks NCCL -> the "Broken pipe / Marlin hang" deploy deaths. Force the args
+  # via a systemd drop-in so they actually take effect, and VERIFY the running args (echo below).
+  mkdir -p /etc/default /etc/systemd/system/earlyoom.service.d
+  echo 'EARLYOOM_ARGS="-m 2 -s 100 --prefer vllm|python --avoid sshd|systemd|NetworkManager|netplan|dbus|polkit|docker|containerd|earlyoom"' > /etc/default/earlyoom
+  cat > /etc/systemd/system/earlyoom.service.d/override.conf <<'EOF'
+[Service]
+# -m 2: act only near TRUE OOM (SIGTERM at 2% mem free, SIGKILL at 1%) -> never fires on a deploy's
+# normal ~12 GB-free headroom. --prefer: kill the DEPLOY (vllm/python) if it does. --avoid: NEVER
+# touch critical system/network services (killing those broke every deploy before this fix).
+ExecStart=
+ExecStart=/usr/bin/earlyoom -r 3600 -m 2 -s 100 --prefer 'vllm|python' --avoid 'sshd|systemd|NetworkManager|netplan|dbus|polkit|docker|containerd|earlyoom'
+EOF
+  systemctl daemon-reload 2>/dev/null || true
   systemctl enable --now earlyoom 2>/dev/null || true
+  systemctl restart earlyoom 2>/dev/null || true
   echo "   earlyoom: $(systemctl is-active earlyoom 2>/dev/null || echo unavailable)"
+  echo "   earlyoom ARGS (must show -m 2 + --prefer/--avoid, NOT a bare '-r 3600'): $(ps -o args= -C earlyoom 2>/dev/null | head -1)"
 else
   echo "   earlyoom not installable (offline?) — skipping; drop_caches + swapoff still protect"
 fi
