@@ -15,7 +15,8 @@ defaults:
   port: 8000
   host: 0.0.0.0
   tensor_parallel: 4
-  gpu_memory_utilization: 0.89   # 0.90 spiked to 116/124GB during capture -> OOM/node-wedge (2026-07-06)
+  gpu_memory_utilization: 0.90   # community value; the 0.90/320K OOM was page-cache, not gmu — fix is
+                                 # node-prep (drop_caches + swapoff), see docs/glm-5.2-dcp-nodeprep-retry.md
   max_model_len: 262144   # 256K first — climb toward 320K once capture is proven to survive
   served_model_name: glm-5.2
 env:
