@@ -29,30 +29,22 @@ swapoff -a || true
 sed -i.bak '/\sswap\s/s/^\([^#]\)/#\1/' /etc/fstab 2>/dev/null || true
 echo "   active swap: $(swapon --show --noheadings | wc -l) devices"
 
-echo "== 3. earlyoom (recoverable OOM; kill the deploy, NEVER system/network services) =="
-if command -v earlyoom >/dev/null 2>&1 || apt-get install -y earlyoom >/dev/null 2>&1; then
-  # WARNING (2026-07-07): the packaged earlyoom.service IGNORES /etc/default/earlyoom on this build —
-  # it runs `earlyoom -r 3600` with DEFAULTS (-m 10, no --prefer). At -m 10 it fires at ~12 GB free
-  # (inside a deploy's normal headroom) and, with no --prefer, SIGKILLs NetworkManager/systemd/netplan
-  # by raw oom_score -> breaks NCCL -> the "Broken pipe / Marlin hang" deploy deaths. Force the args
-  # via a systemd drop-in so they actually take effect, and VERIFY the running args (echo below).
-  mkdir -p /etc/default /etc/systemd/system/earlyoom.service.d
-  echo 'EARLYOOM_ARGS="-m 2 -s 100 --prefer vllm|python --avoid sshd|systemd|NetworkManager|netplan|dbus|polkit|docker|containerd|earlyoom"' > /etc/default/earlyoom
-  cat > /etc/systemd/system/earlyoom.service.d/override.conf <<'EOF'
-[Service]
-# -m 2: act only near TRUE OOM (SIGTERM at 2% mem free, SIGKILL at 1%) -> never fires on a deploy's
-# normal ~12 GB-free headroom. --prefer: kill the DEPLOY (vllm/python) if it does. --avoid: NEVER
-# touch critical system/network services (killing those broke every deploy before this fix).
-ExecStart=
-ExecStart=/usr/bin/earlyoom -r 3600 -m 2 -s 100 --prefer 'vllm|python' --avoid 'sshd|systemd|NetworkManager|netplan|dbus|polkit|docker|containerd|earlyoom'
-EOF
+echo "== 3. earlyoom — DISABLE it (incompatible with memory-maxed DCP deploys) =="
+# A gmu-0.90 + forced-KV deploy INTENTIONALLY runs with <2 GB free out of the 124 GB unified pool.
+# earlyoom at ANY useful threshold (-m 2 = 2.48 GB) reads that normal state as near-OOM and SIGKILLs
+# vllm -> kills the deploy (observed 2026-07-07: earlyoom "SIGKILL to vllm badness 972"). And the
+# packaged service ran DEFAULTS (-m 10, no --prefer) -> killed NetworkManager/systemd/netplan -> the
+# "Broken pipe / Marlin hang" deploy deaths. There is NO threshold that fits: the deploy's normal free
+# memory sits below any real OOM trigger. So disable earlyoom. Safety without it: swapoff (step 2)
+# makes an OOM a recoverable kill instead of a freeze, and the kernel OOM-killer fires ONLY at true
+# 0-free OOM and kills the biggest hog (vllm). See memory earlyoom-killed-glm52-deploys.
+if systemctl list-unit-files earlyoom.service >/dev/null 2>&1; then
+  systemctl disable --now earlyoom 2>/dev/null || true
+  rm -f /etc/systemd/system/earlyoom.service.d/override.conf 2>/dev/null || true
   systemctl daemon-reload 2>/dev/null || true
-  systemctl enable --now earlyoom 2>/dev/null || true
-  systemctl restart earlyoom 2>/dev/null || true
-  echo "   earlyoom: $(systemctl is-active earlyoom 2>/dev/null || echo unavailable)"
-  echo "   earlyoom ARGS (must show -m 2 + --prefer/--avoid, NOT a bare '-r 3600'): $(ps -o args= -C earlyoom 2>/dev/null | head -1)"
+  echo "   earlyoom disabled ($(systemctl is-active earlyoom 2>/dev/null || echo inactive)); swapoff + kernel OOM-killer are the safety net"
 else
-  echo "   earlyoom not installable (offline?) — skipping; drop_caches + swapoff still protect"
+  echo "   earlyoom not present — nothing to disable (swapoff + kernel OOM-killer protect)"
 fi
 
 echo "== 4. disable desktop GUI (frees ~2-3 GB) =="
