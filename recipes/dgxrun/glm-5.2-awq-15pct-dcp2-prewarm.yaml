@@ -1,9 +1,11 @@
-# @dgxrun/glm-5.2-awq-15pct-dcp2 — long-context (DCP2) variant of the 15pct model.
-# Config mirrors the community reference CosmicRaisins/recipes/glm52-quanttrio-unpruned-dcp2-320k.yaml
-# (the e232d26 DCP stack), adapted for our 15pct AWQ model + separate MTP drafter + dgxrun.
-# DCP2 shards MLA KV across the 4 ranks (~4x the no-DCP window). Requires the DCP image
-# (scripts/build-glm52-image.sh dcp). Backend is B12X_MLA_SPARSE (needs the index_topk_pattern
-# hf-override + VLLM_USE_B12X_SPARSE_INDEXER). Fallback: glm-5.2-awq-15pct-144k.yaml (no DCP).
+# @dgxrun/glm-5.2-awq-15pct-dcp2-prewarm — JIT cache warmer for the DCP2 stack.
+# IDENTICAL compile-affecting config to glm-5.2-awq-15pct-dcp2.yaml (model, MTP spec-config, DCP2,
+# B12X_MLA_SPARSE, index_topk_pattern, cudagraph FULL, max-num-seqs 1, max-num-batched-tokens 4096),
+# differing ONLY in max_model_len (8K) + gmu (0.76). The tiny KV + low gmu leave ~30 GB free so the
+# ~20-30 GB first-run JIT compile spike succeeds and populates the Triton/Inductor/FlashInfer caches
+# (on NFS, shared across nodes). RUN THIS FIRST, wait for it to reach `running` (capture complete),
+# then TEAR IT DOWN and deploy the full glm-5.2-awq-15pct-dcp2.yaml — which now finds warm caches and
+# skips the spike, so 256K/0.88 fits. See docs/glm-5.2-dcp-nodeprep-retry.md.
 recipe_version: "2"
 runner: dgxrun
 maxoutmem: true
@@ -15,17 +17,14 @@ defaults:
   port: 8000
   host: 0.0.0.0
   tensor_parallel: 4
-  gpu_memory_utilization: 0.88   # weights(~88) + 256K DCP2 KV(~19) = ~107 GiB; needs guard-free >= 107
-                                 # (min_free 1-2GiB + isolate desktop). Run AFTER the -prewarm run warms
-                                 # the JIT caches, so no +20-30GB compile spike lands here.
-  max_model_len: 262144   # 256K
+  gpu_memory_utilization: 0.76   # just fits weights (~88/121.63=0.72) + tiny 8K KV; ~30 GB free for the compile spike
+  max_model_len: 8192            # tiny KV — compilation is keyed on batch/capture sizes, NOT context, so kernels transfer
   served_model_name: glm-5.2
 env:
   HF_HOME: /cache/huggingface
   HF_HUB_OFFLINE: "1"
   LD_PRELOAD: /cache/huggingface/nccl-2.30.4/libnccl.so.2
   TRITON_CACHE_DIR: /cache/huggingface/.tritoncache-dcp
-  # Persist ALL JIT caches to NFS so a -prewarm run warms them for the full run (no compile spike).
   TORCHINDUCTOR_CACHE_DIR: /cache/huggingface/.inductorcache-dcp
   FLASHINFER_WORKSPACE_DIR: /cache/huggingface/.flashinfer-dcp
   FLASHINFER_AUTOTUNE_DIR: /cache/huggingface/.flashinfer-autotune-dcp
