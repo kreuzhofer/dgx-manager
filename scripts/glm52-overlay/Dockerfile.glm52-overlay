@@ -1,0 +1,20 @@
+# GLM-5.2 sm_121 overlay: bake the public CosmicRaisins DSA kernels + b12x +
+# the deep_gemm sm12x re-bind onto the freshly-built base. No CUDA recompile.
+FROM vllm-node-tf5-glm52-b12x:base
+ARG VLLM=/usr/local/lib/python3.12/dist-packages/vllm
+# 1) overlay the 10 Triton/sm12x kernels into the vLLM tree (launch.sh KMOUNTS layout)
+COPY kernels/sparse_mla_kernels.py   ${VLLM}/v1/attention/backends/mla/
+COPY kernels/sparse_mla_env.py       ${VLLM}/v1/attention/backends/mla/
+COPY kernels/sm12x_sparse_mla_attn.py ${VLLM}/v1/attention/backends/mla/
+COPY kernels/patch_flashmla_ops.py   ${VLLM}/v1/attention/backends/mla/
+COPY kernels/flashmla_sparse.py      ${VLLM}/v1/attention/backends/mla/
+COPY kernels/sm12x_deep_gemm_fallbacks.py ${VLLM}/v1/attention/ops/deepseek_v4_ops/
+COPY kernels/sm12x_mqa.py            ${VLLM}/v1/attention/ops/deepseek_v4_ops/
+COPY kernels/b12x_sparse_helpers.py  ${VLLM}/v1/attention/ops/deepseek_v4_ops/
+COPY kernels/sparse_attn_indexer.py  ${VLLM}/model_executor/layers/
+COPY kernels/deepseek_v2.py          ${VLLM}/model_executor/models/
+# 2) b12x decode kernel (cudagraph-FULL-safe); --no-deps to avoid touching torch/vllm
+RUN pip install --no-deps b12x==0.23.0
+# 3) in-place deep_gemm sm12x re-bind
+COPY patch_deep_gemm.py /tmp/patch_deep_gemm.py
+RUN python3 /tmp/patch_deep_gemm.py && python3 -c "import ast; ast.parse(open('${VLLM}/utils/deep_gemm.py').read()); print('deep_gemm.py syntax OK')"

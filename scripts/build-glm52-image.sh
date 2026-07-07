@@ -46,11 +46,13 @@ case "$VARIANT" in
 esac
 
 # ---- shared config (override via env) ----------------------------------------
+# Repo root, so vendored build inputs resolve in-repo regardless of CWD.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KERNELS_REPO="${KERNELS_REPO:-CosmicRaisins/glm-5.2-gb10}"
 B12X_VERSION="${B12X_VERSION:-0.23.0}"
 SPARK_VLLM_DOCKER="${SPARK_VLLM_DOCKER:-/mnt/tank/src/github/spark-vllm-docker}"
-OVERLAY_SRC="${OVERLAY_SRC:-/mnt/tank/src/glm52-overlay}"
-OVERLAY_BUILD="${OVERLAY_BUILD:-/mnt/tank/src/glm52-overlay-$VARIANT}"
+OVERLAY_SRC="${OVERLAY_SRC:-$REPO_ROOT/scripts/glm52-overlay}"   # vendored in-repo (was /mnt/tank/src/glm52-overlay)
+OVERLAY_BUILD="${OVERLAY_BUILD:-/mnt/tank/src/glm52-overlay-$VARIANT}"   # scratch: wiped+regenerated each build, on NFS so the build node sees it
 BUILD_NODE="${BUILD_NODE:-192.168.44.38}"
 COPY_NODES="${COPY_NODES:-192.168.44.36,192.168.44.37,192.168.44.39}"
 SSH_USER="${SSH_USER:-daniel}"
