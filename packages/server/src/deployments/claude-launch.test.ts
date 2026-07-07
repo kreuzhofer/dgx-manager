@@ -88,3 +88,27 @@ describe("buildClaudeLaunchSnippet", () => {
     },
   );
 });
+
+describe("buildClaudeLaunchSnippet — 1M context cap", () => {
+  const base = { baseUrl: "http://10.0.0.5:8000", model: "glm-5.2", authToken: "dgx-local", shell: "bash" as const };
+  const DISABLE = "CLAUDE_CODE_DISABLE_1M_CONTEXT";
+
+  it("adds CLAUDE_CODE_DISABLE_1M_CONTEXT for a sub-1M served context (256K)", () => {
+    expect(buildClaudeLaunchSnippet({ ...base, maxModelLen: 262144 })).toContain(`export ${DISABLE}='1'`);
+  });
+  it("emits it in PowerShell too", () => {
+    expect(buildClaudeLaunchSnippet({ ...base, shell: "powershell", maxModelLen: 262144 })).toContain(`$env:${DISABLE} = '1'`);
+  });
+  it("omits it when the served context is >= 1M (a real 1M model keeps 1M)", () => {
+    expect(buildClaudeLaunchSnippet({ ...base, maxModelLen: 1_000_000 })).not.toContain(DISABLE);
+  });
+  it("omits it when max_model_len is unknown (endpoint unreachable)", () => {
+    expect(buildClaudeLaunchSnippet({ ...base })).not.toContain(DISABLE);
+  });
+  it("still emits for a sub-200K deployment (best-effort; Claude Code's floor is ~200K so it may still overflow)", () => {
+    expect(buildClaudeLaunchSnippet({ ...base, maxModelLen: 147456 })).toContain(`export ${DISABLE}='1'`);
+  });
+  it("omits it for a non-positive max_model_len", () => {
+    expect(buildClaudeLaunchSnippet({ ...base, maxModelLen: 0 })).not.toContain(DISABLE);
+  });
+});

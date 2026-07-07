@@ -148,12 +148,23 @@ deploymentsRouter.get("/:id/claude-launch", async (req, res) => {
     deployment.displayName ?? deployment.model.name,
     fetchImpl,
   );
+  // Served context window from /v1/models, so the snippet can cap Claude Code's
+  // 1M assumption. Best-effort: if the endpoint is unreachable, omit the cap.
+  let maxModelLen: number | undefined;
+  try {
+    const r = await fetchImpl(`${baseUrl}/v1/models`, { signal: AbortSignal.timeout(3000) });
+    if (r.ok) {
+      const parsed = JSON.parse(await r.text());
+      const len = parsed?.data?.[0]?.max_model_len;
+      if (typeof len === "number" && len > 0) maxModelLen = len;
+    }
+  } catch { /* endpoint not ready — omit the cap */ }
   res.json({
     baseUrl,
     model,
     shells: {
-      bash: buildClaudeLaunchSnippet({ baseUrl, model, authToken: CLAUDE_AUTH_TOKEN, shell: "bash" }),
-      powershell: buildClaudeLaunchSnippet({ baseUrl, model, authToken: CLAUDE_AUTH_TOKEN, shell: "powershell" }),
+      bash: buildClaudeLaunchSnippet({ baseUrl, model, authToken: CLAUDE_AUTH_TOKEN, shell: "bash", maxModelLen }),
+      powershell: buildClaudeLaunchSnippet({ baseUrl, model, authToken: CLAUDE_AUTH_TOKEN, shell: "powershell", maxModelLen }),
     },
   });
 });

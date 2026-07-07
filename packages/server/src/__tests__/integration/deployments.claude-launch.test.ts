@@ -46,13 +46,14 @@ afterEach(async () => {
   await prisma.node.deleteMany();
 });
 
-// Stub that resolves /v1/models to a fixed served id.
-function makeApp(servedId = "served-xyz") {
+// Stub that resolves /v1/models to a fixed served id (+ optional max_model_len).
+function makeApp(servedId = "served-xyz", maxModelLen?: number) {
   const app = express();
   app.use(express.json());
   app.set("fetchImpl", async () => ({
     ok: true,
-    text: async () => JSON.stringify({ data: [{ id: servedId }] }),
+    text: async () =>
+      JSON.stringify({ data: [{ id: servedId, ...(maxModelLen != null ? { max_model_len: maxModelLen } : {}) }] }),
   }));
   app.use("/api/deployments", deploymentsRouter);
   return app;
@@ -83,6 +84,21 @@ describe("GET /api/deployments/:id/claude-launch", () => {
     expect(res.body.shells.bash).toContain("export ANTHROPIC_DEFAULT_OPUS_MODEL='live-served-name'");
     expect(res.body.shells.bash).not.toContain("/v1");
     expect(res.body.shells.powershell).toContain("$env:ANTHROPIC_BASE_URL = 'http://10.0.0.5:8000'");
+  });
+
+  it("caps Claude Code's 1M window when the served context is < 1M", async () => {
+    const d = await seedDeployment();
+    const res = await request(makeApp("served-xyz", 262144)).get(`/api/deployments/${d.id}/claude-launch`);
+    expect(res.status).toBe(200);
+    expect(res.body.shells.bash).toContain("export CLAUDE_CODE_DISABLE_1M_CONTEXT='1'");
+    expect(res.body.shells.powershell).toContain("$env:CLAUDE_CODE_DISABLE_1M_CONTEXT = '1'");
+  });
+
+  it("does not cap when max_model_len is absent from /v1/models", async () => {
+    const d = await seedDeployment();
+    const res = await request(makeApp("served-xyz")).get(`/api/deployments/${d.id}/claude-launch`);
+    expect(res.status).toBe(200);
+    expect(res.body.shells.bash).not.toContain("CLAUDE_CODE_DISABLE_1M_CONTEXT");
   });
 
   it("404s for an unknown deployment id", async () => {
