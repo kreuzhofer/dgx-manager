@@ -794,13 +794,14 @@ export default function DeploymentsPage() {
     const used = n.metrics?.[0]?.vramUsed ?? 0;
     return Math.max(0, total - used);
   };
-  // Online nodes available for the cluster picker. Sorted by free VRAM
-  // (most free first) so the default selection picks the nodes least
-  // likely to clash with running deploys.
+  // Online nodes available for the cluster picker. Sorted by name (numeric-
+  // aware) so the order is deterministic and node 1 (e.g. dgx-spark-01) is the
+  // default head — the auto-pick (slice 0..N) and the default head (first
+  // selected) both take the first entry. Free VRAM is still shown per node.
   const clusterCandidates = nodes
     .filter((n) => n.status === "online")
     .slice()
-    .sort((a, b) => nodeFreeMB(b) - nodeFreeMB(a));
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
 
   // Initialize the cluster selection when:
   //   - the recipe changes (different requiredNodes),
