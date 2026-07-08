@@ -11,6 +11,7 @@ import { powerCommand, macCaptureCmd, wolArmCmd, normalizeMac, agentSupportsPowe
 import { sshExec as defaultSshExec } from "../ssh/executor.js";
 import { broadcastFor, sendMagicPacket as defaultWolSend } from "../nodes/wol.js";
 import { triggerClusterReseed } from "../ssh/known-hosts-trigger.js";
+import { planAgentUpdate, bundleArchQuery } from "../nodes/agent-update.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -603,6 +604,63 @@ nodesRouter.post("/:id/update-agent", async (req, res) => {
   });
 
   res.json({ status: "updating", version, bundleUrl });
+});
+
+/**
+ * @openapi
+ * /api/nodes/update-agent-all:
+ *   post:
+ *     tags: [Nodes]
+ *     summary: Bulk-update all online agents to the bundled version
+ *     description: >
+ *       Fans a `cmd:update` out to every ONLINE node not already on the bundled
+ *       agent version (`?force=true` includes current ones). Parallel dispatch —
+ *       the 0.5.756+ robust self-update is non-blocking with auto-rollback and
+ *       leaves running containers untouched — so simultaneous updates are safe.
+ *       Per-node outcomes arrive via the `node:status` / `agentVersion` SSE.
+ *     parameters:
+ *       - in: query
+ *         name: force
+ *         schema: { type: boolean }
+ *         required: false
+ *         description: Also re-dispatch to nodes already on the target version.
+ *     responses:
+ *       '200':
+ *         description: '{ version, dispatched[], skipped[], offline[] } — each a {id,name,agentVersion} list'
+ */
+// POST /api/nodes/update-agent-all — bulk agent roll: fan cmd:update out to every
+// ONLINE node not already on the bundled version (?force=true includes current
+// ones). Parallel dispatch — 0.5.756+ robust self-update swaps atomically without
+// blocking the heartbeat or touching running containers, so simultaneous updates
+// are safe; per-node OUTCOMES arrive via the node:status / agentVersion SSE as each
+// agent restarts and re-registers. (Serial-with-progress-streaming is a follow-up.)
+nodesRouter.post("/update-agent-all", async (req, res) => {
+  const agentHub: AgentHub = req.app.get("agentHub");
+  const force = req.query.force === "true";
+  const nodes = await prisma.node.findMany();
+  const version = getExpectedAgentVersion();
+  const plan = planAgentUpdate(
+    nodes.map((n) => ({ id: n.id, name: n.name, agentVersion: n.agentVersion, arch: n.arch })),
+    version,
+    (id) => agentHub.isAgentOnline(id),
+    force,
+  );
+
+  const managerHost = process.env.MANAGER_ADVERTISE_HOST || process.env.MANAGER_HOST || "192.168.44.36";
+  const port = process.env.PORT || "4000";
+  for (const n of plan.toUpdate) {
+    const bundleUrl = `http://${managerHost}:${port}/api/agent/bundle${bundleArchQuery(n.arch)}`;
+    agentHub.sendToAgent(n.id, { type: "cmd:update", payload: { bundleUrl, version } });
+  }
+
+  const summarize = (list: typeof plan.toUpdate) =>
+    list.map((n) => ({ id: n.id, name: n.name, agentVersion: n.agentVersion }));
+  res.json({
+    version,
+    dispatched: summarize(plan.toUpdate),
+    skipped: summarize(plan.skipped),
+    offline: summarize(plan.offline),
+  });
 });
 
 // POST /api/nodes/:id/power — reboot / shutdown / sleep a node.
