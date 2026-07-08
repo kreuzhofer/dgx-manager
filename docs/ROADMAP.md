@@ -138,7 +138,7 @@ All storage paths configurable via `SHARED_STORAGE_PATH` env var — no hardcode
 - `POST /api/nodes/:id/update-agent` sends update command via WebSocket
 - Agent downloads bundle, swaps files atomically, restarts systemd service
 - Works for all nodes regardless of bootstrap method
-- [ ] `POST /api/nodes/update-agent-all` — bulk update endpoint that fans out to every online node, optionally serial (default) or parallel, and streams per-node status. Today the dashboard / operator has to iterate per-node, which is awkward after a bundle rebuild.
+- ✅ `POST /api/nodes/update-agent-all` — bulk agent roll (shipped 2026-07-08). Fans `cmd:update` to every online node not already on the bundled version (`?force` includes current ones); returns `{ version, dispatched[], skipped[], offline[] }`; per-node outcome via the `node:status`/`agentVersion` SSE. Parallel dispatch (safe with 0.5.756's robust self-update). Live-verified (4 skipped, aihost01 offline). *Follow-ups:* serial-with-progress-streaming + a dashboard "Update all agents" button.
 - [ ] Remove dead offline FP8 quantize plumbing now that FP8 deploys use vLLM's on-load `--quantization fp8`. Specifically: `POST /api/finetune/:id/quantize`, the agent `cmd:finetune:quantize` handler, `quantizationStatus`/`quantizedPath`/`quantizationLog`/`quantizedAt` columns, the dashboard Quantize button, `scripts/quantize_fp8.py` in the recipes repo. Driven by an unresolvable llmcompressor↔transformers pin conflict (llmcompressor 0.10 pins `transformers<=4.57.6`; qwen3_5 needs `>=5.0`). Left in place for now so the change footprint stays small; can be ripped out once we're sure on-load FP8 is the durable answer.
 
 ### Settings Dashboard

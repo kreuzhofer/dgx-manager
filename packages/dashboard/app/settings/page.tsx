@@ -22,6 +22,8 @@ interface JoinToken {
 export default function SettingsPage() {
   const [tokens, setTokens] = useState<JoinToken[]>([]);
   const [agentVersion, setAgentVersion] = useState("...");
+  const [rolling, setRolling] = useState(false);
+  const [rollResult, setRollResult] = useState<string | null>(null);
   const serverHost = getServerHost();
 
   const loadTokens = useCallback(async () => {
@@ -37,6 +39,26 @@ export default function SettingsPage() {
   async function revokeToken(id: string) {
     await fetch(`${API}/api/tokens/${id}`, { method: "DELETE" });
     loadTokens();
+  }
+
+  async function updateAllAgents() {
+    if (!window.confirm(`Roll all online agents to the bundled version (v${agentVersion})? Running deployments keep serving.`)) return;
+    setRolling(true);
+    setRollResult(null);
+    try {
+      const res = await fetch(`${API}/api/nodes/update-agent-all`, { method: "POST" });
+      const d = await res.json();
+      const disp = d.dispatched?.length ?? 0, skip = d.skipped?.length ?? 0, off = d.offline?.length ?? 0;
+      setRollResult(
+        disp > 0
+          ? `Updating ${disp} node${disp > 1 ? "s" : ""} → v${d.version}${skip ? `; ${skip} already current` : ""}${off ? `; ${off} offline` : ""}.`
+          : `All ${skip} online node${skip !== 1 ? "s" : ""} already on v${d.version}${off ? `; ${off} offline` : ""}.`,
+      );
+    } catch (e) {
+      setRollResult(`Failed: ${String(e)}`);
+    } finally {
+      setRolling(false);
+    }
   }
 
   const statusColor: Record<string, string> = {
@@ -115,6 +137,17 @@ export default function SettingsPage() {
               Download agent-bundle.tar.gz
             </a>
           </div>
+          <div className="flex justify-between items-center">
+            <span className="text-gray-400">Roll all agents</span>
+            <button
+              onClick={updateAllAgents}
+              disabled={rolling}
+              className="text-xs px-3 py-1 rounded bg-green-600/20 text-green-300 hover:bg-green-600/30 disabled:opacity-50 transition-colors"
+            >
+              {rolling ? "Rolling…" : "Update all agents"}
+            </button>
+          </div>
+          {rollResult && <p className="text-xs text-gray-500">{rollResult}</p>}
         </div>
       </section>
 
