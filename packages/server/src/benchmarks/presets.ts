@@ -18,15 +18,81 @@ export type ToolEvalConfig = {
   seed: number;            // --seed N, for reproducible runs
 };
 
-export type BenchmarkKind = "throughput" | "tool-eval";
+export type AccuracyConfig = {
+  tasks: string[];
+  primaryTask: string;
+  primaryMetric: string;
+  limit: number | null;
+  numFewshot: number | null;
+  maxGenToks: number;
+  applyChatTemplate: boolean;
+  reasoning: boolean;
+  seed: number;
+};
+
+export type BenchmarkKind = "throughput" | "tool-eval" | "accuracy";
 
 export type BenchmarkPreset = {
   id: string;
   label: string;
   description: string;
   kind: BenchmarkKind;
-  config: BenchmarkConfig | ToolEvalConfig;
+  config: BenchmarkConfig | ToolEvalConfig | AccuracyConfig;
 };
+
+type AccuracyBench = {
+  idBase: string;
+  label: string;
+  task: string;
+  primaryMetric: string;
+  quickLimit: number;
+  maxGenToks: number;
+  blurb: string;
+};
+
+// The v1 lineup: HF Open LLM Leaderboard v2 minus MuSR, all generative/CoT so
+// they run over an OpenAI chat endpoint. Task ids are pinned against the
+// LM_EVAL_VERSION set in orchestrator.ts — verify them when bumping that pin.
+const ACCURACY_BENCHES: AccuracyBench[] = [
+  { idBase: "ifeval", label: "IFEval", task: "ifeval", primaryMetric: "prompt_level_strict_acc", quickLimit: 100, maxGenToks: 2048, blurb: "Instruction-following adherence." },
+  { idBase: "mmlu-pro", label: "MMLU-Pro (CoT)", task: "mmlu_pro", primaryMetric: "exact_match", quickLimit: 200, maxGenToks: 4096, blurb: "Knowledge/reasoning tail, chain-of-thought." },
+  { idBase: "gpqa-diamond", label: "GPQA-Diamond (CoT)", task: "gpqa_diamond_cot_zeroshot", primaryMetric: "exact_match", quickLimit: 50, maxGenToks: 4096, blurb: "Hard graduate-level Q&A, chain-of-thought." },
+  { idBase: "gsm8k", label: "GSM8K", task: "gsm8k_cot", primaryMetric: "exact_match", quickLimit: 200, maxGenToks: 2048, blurb: "Grade-school math word problems." },
+  { idBase: "bbh", label: "BBH", task: "bbh_cot_zeroshot", primaryMetric: "exact_match", quickLimit: 40, maxGenToks: 4096, blurb: "Big-Bench-Hard reasoning suite, chain-of-thought." },
+  { idBase: "math-hard", label: "MATH-hard", task: "leaderboard_math_hard", primaryMetric: "exact_match", quickLimit: 100, maxGenToks: 4096, blurb: "Competition-level MATH (level-5)." },
+];
+
+function accuracyPresets(): BenchmarkPreset[] {
+  const out: BenchmarkPreset[] = [];
+  for (const b of ACCURACY_BENCHES) {
+    const base: AccuracyConfig = {
+      tasks: [b.task],
+      primaryTask: b.task,
+      primaryMetric: b.primaryMetric,
+      limit: null,
+      numFewshot: null,
+      maxGenToks: b.maxGenToks,
+      applyChatTemplate: true,
+      reasoning: true,
+      seed: 42,
+    };
+    out.push({
+      id: `acc-${b.idBase}-quick`,
+      label: `${b.label} — quick (${b.quickLimit})`,
+      description: `${b.blurb} Sampled to ${b.quickLimit} items for a fast quality probe.`,
+      kind: "accuracy",
+      config: { ...base, limit: b.quickLimit },
+    });
+    out.push({
+      id: `acc-${b.idBase}-full`,
+      label: `${b.label} — full`,
+      description: `${b.blurb} Complete dataset — can run for hours on a slow endpoint.`,
+      kind: "accuracy",
+      config: { ...base },
+    });
+  }
+  return out;
+}
 
 export const BENCHMARK_PRESETS: BenchmarkPreset[] = [
   {
@@ -137,6 +203,7 @@ export const BENCHMARK_PRESETS: BenchmarkPreset[] = [
     kind: "tool-eval",
     config: { short: false, hardmode: false, contextPressure: 0.75, seed: 42 },
   },
+  ...accuracyPresets(),
 ];
 
 export function listPresets(): BenchmarkPreset[] {

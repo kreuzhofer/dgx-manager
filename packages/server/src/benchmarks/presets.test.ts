@@ -4,6 +4,18 @@ import { BENCHMARK_PRESETS, BenchmarkConfig, getPreset, listPresets } from "./pr
 describe("BENCHMARK_PRESETS", () => {
   it("exposes the five throughput presets plus four tool-eval presets by id", () => {
     expect(listPresets().map((p) => p.id).sort()).toEqual([
+      "acc-bbh-full",
+      "acc-bbh-quick",
+      "acc-gpqa-diamond-full",
+      "acc-gpqa-diamond-quick",
+      "acc-gsm8k-full",
+      "acc-gsm8k-quick",
+      "acc-ifeval-full",
+      "acc-ifeval-quick",
+      "acc-math-hard-full",
+      "acc-math-hard-quick",
+      "acc-mmlu-pro-full",
+      "acc-mmlu-pro-quick",
       "chat-long",
       "chat-short",
       "code-32k",
@@ -79,7 +91,43 @@ describe("tool-eval presets", () => {
 
   it("every preset carries a kind field", () => {
     for (const p of BENCHMARK_PRESETS) {
-      expect(["throughput", "tool-eval"]).toContain(p.kind);
+      expect(["throughput", "tool-eval", "accuracy"]).toContain(p.kind);
+    }
+  });
+});
+
+describe("accuracy presets", () => {
+  const benches = ["ifeval", "mmlu-pro", "gpqa-diamond", "gsm8k", "bbh", "math-hard"];
+
+  it("registers a quick and a full variant per benchmark, all kind 'accuracy'", () => {
+    for (const b of benches) {
+      const quick = getPreset(`acc-${b}-quick`);
+      const full = getPreset(`acc-${b}-full`);
+      expect(quick, `acc-${b}-quick should exist`).toBeDefined();
+      expect(full, `acc-${b}-full should exist`).toBeDefined();
+      expect(quick!.kind).toBe("accuracy");
+      expect(full!.kind).toBe("accuracy");
+    }
+  });
+
+  it("quick variants set a numeric limit; full variants set limit null", () => {
+    for (const b of benches) {
+      const quick = getPreset(`acc-${b}-quick`)!.config as import("./presets.js").AccuracyConfig;
+      const full = getPreset(`acc-${b}-full`)!.config as import("./presets.js").AccuracyConfig;
+      expect(typeof quick.limit).toBe("number");
+      expect(full.limit).toBeNull();
+    }
+  });
+
+  it("every accuracy preset has primaryTask ∈ tasks and a non-empty primaryMetric", () => {
+    for (const p of listPresets().filter((p) => p.kind === "accuracy")) {
+      const cfg = p.config as import("./presets.js").AccuracyConfig;
+      expect(cfg.tasks.length).toBeGreaterThan(0);
+      expect(cfg.tasks).toContain(cfg.primaryTask);
+      expect(cfg.primaryMetric.length).toBeGreaterThan(0);
+      expect(cfg.reasoning).toBe(true);
+      expect(cfg.applyChatTemplate).toBe(true);
+      expect(cfg.maxGenToks).toBeGreaterThan(0);
     }
   });
 });
