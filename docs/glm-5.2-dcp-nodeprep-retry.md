@@ -14,7 +14,14 @@ Root cause chain (GB10 unified memory — weights + KV + CUDA graphs + Linux pag
 
 ### A. Persistent per-node prep (once; via `scripts/dgx-node-prep.sh`)
 Run on all 4 nodes; persist via `/etc/sysctl.d/` + systemd:
-- `vm.min_free_kbytes = 5242880` (5 GiB the page cache can't consume → guaranteed capture headroom)
+- `vm.min_free_kbytes = 1048576` (1 GiB)
+  - **Superseded 2026-07-09 — was `5242880` (5 GiB), and that backfired.** `min_free_kbytes` is a
+    floor the kernel refuses to allocate below, so it withholds that memory from *vLLM too*, not just
+    from the page cache. With 5 GiB reserved, `torch.compile`'s 5.00 GiB CUDA-graph capture allocation
+    failed on all four ranks while the log reported ~9.7 GiB "free" (usable was 4.71 GiB). It missed
+    by 0.29 GiB. Keeping page cache out of the unified pool is the job of the agent's drop-cache loop
+    (`runtime/dgxrun/dgxrun-dropcache.ts`, every 500 ms through weight load), which holds `Cached` at
+    <1 GiB — a reserve is the wrong tool and actively costs you capture headroom.
 - `vm.vfs_cache_pressure = 200`, `vm.dirty_ratio = 5`, `vm.dirty_background_ratio = 2`
 - **`swapoff -a` + `vm.swappiness = 1`** — converts the freeze into a recoverable OOM-kill (no more power-cycles)
 - **`earlyoom`** (`-m 2 -s 100 --prefer 'vllm|python3|python'`) — keeps a headless node reachable if OOM does hit

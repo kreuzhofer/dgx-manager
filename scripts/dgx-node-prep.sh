@@ -11,8 +11,12 @@ set -euo pipefail
 
 echo "== 1. sysctls (persist + apply) =="
 cat > /etc/sysctl.d/90-dgx-dcp.conf <<'EOF'
-# Reserve 5 GiB the page cache cannot consume -> guaranteed headroom for capture/JIT.
-vm.min_free_kbytes = 5242880
+# Reserve 1 GiB. A 5 GiB reserve backfired: the kernel refuses to allocate below
+# min_free, so torch.compile's 5.00 GiB CUDA-graph capture allocation failed on
+# every rank with ~9.7 GiB "free" (usable was only 4.7 GiB). Page cache is kept
+# out of the unified pool by the agent's drop-cache loop (every 500 ms during a
+# dgxrun deploy), which is the correct tool for that job.
+vm.min_free_kbytes = 1048576
 # Reclaim dentry/inode cache aggressively; cap dirty pages so writeback can't hoard DRAM.
 vm.vfs_cache_pressure = 200
 vm.dirty_ratio = 5
