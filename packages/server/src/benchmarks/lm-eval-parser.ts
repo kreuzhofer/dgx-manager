@@ -36,6 +36,10 @@ export function parseLmEvalResults(
     throw new Error(`failed to parse lm-eval JSON: ${(e as Error).message}`);
   }
 
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("lm-eval result missing required object: results");
+  }
+
   const results = parsed.results;
   if (!results || typeof results !== "object") {
     throw new Error("lm-eval result missing required object: results");

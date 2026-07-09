@@ -50,4 +50,27 @@ describe("parseLmEvalResults", () => {
   it("throws when the results object is missing", () => {
     expect(() => parseLmEvalResults("{}", "ifeval", "prompt_level_strict_acc")).toThrow(/results/i);
   });
+
+  it("excludes a metric whose value is non-numeric", () => {
+    const json = JSON.stringify({
+      results: { t: { "acc,none": 0.5, "acc_stderr,none": 0.01, "broken,none": "N/A" } },
+    });
+    const { metrics } = parseLmEvalResults(json, "t", "acc");
+    expect(metrics.some((m) => m.metric === "broken")).toBe(false);
+    expect(metrics.some((m) => m.metric === "acc")).toBe(true);
+  });
+
+  it("throws when the primary metric value is present but non-numeric", () => {
+    const json = JSON.stringify({ results: { t: { "exact_match,none": "N/A" } } });
+    expect(() => parseLmEvalResults(json, "t", "exact_match")).toThrow(/missing/i);
+  });
+
+  it("emits exactly one row per numeric non-stderr metric (ifeval → 3)", () => {
+    const { metrics } = parseLmEvalResults(fixture, "ifeval", "prompt_level_strict_acc");
+    expect(metrics.filter((m) => m.task === "ifeval")).toHaveLength(3);
+  });
+
+  it("throws when the parsed top-level is not an object", () => {
+    expect(() => parseLmEvalResults("null", "t", "acc")).toThrow(/results/i);
+  });
 });
