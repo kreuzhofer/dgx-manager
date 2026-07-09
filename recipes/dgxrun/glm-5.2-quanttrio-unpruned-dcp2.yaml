@@ -18,6 +18,17 @@ defaults:
   # vm.min_free_kbytes is small (node-prep now sets 1 GiB, not 5) — the kernel
   # withholds min_free from CUDA too. Confirmed serving at 0.90 on 2026-07-09.
   gpu_memory_utilization: 0.90
+  # 256K is the CEILING for this config, measured 2026-07-09 by bisection:
+  #   KV 7.00 GiB (262144) -> serves.
+  #   KV 7.75 GiB (294912) -> kernel OOM-kill of VLLM::Worker_TP during capture.
+  #   KV 8.50 GiB (327680) -> kernel OOM-kill during capture.
+  # Steady-state free while serving 256K is only ~2.9 GiB on the worst node:
+  # weights 93.9 + KV 7.0 + ~14 GiB of FULL cudagraphs / activations / CUDA
+  # contexts, out of 121.63. To go beyond 256K you must give something up —
+  # the separate MTP drafter (~4.8 GiB) or cudagraph FULL -> PIECEWISE — and
+  # both cost decode speed. Do not raise max_model_len without also raising
+  # --kv-cache-memory-bytes below; KV must hold >= max_model_len tokens
+  # (7.00 GiB = 274,560 tokens, i.e. only 4.7% slack over 262,144).
   max_model_len: 262144   # 256K via DCP2
   served_model_name: glm-5.2
 env:
