@@ -1,0 +1,63 @@
+# @dgxrun/glm-5.2-quanttrio-unpruned-dcp2-320k — UNPRUNED QuantTrio Int4-Int8Mix + DCP2, 320K.
+# Context-headroom variant of the proven 256K recipe. Steady-state free memory while serving
+# 256K was only ~2.9 GiB on the worst node (weights 93.9 + KV 7.0 + ~14 GiB cudagraphs/
+# activations/contexts of a 121.63 GiB pool), so KV can grow by at most ~1.9 GiB before the
+# 1 GiB min_free floor. 8.50 GiB KV = ~333k tokens, covering a 327,680 (320K) window.
+# The community reference model (best quality). SELF-DRAFTS (built-in MTP head) — no separate
+# drafter, so the spec-config points at the model itself. Config mirrors CosmicRaisins
+# recipes/glm52-quanttrio-unpruned-dcp2-320k.yaml, at 256K / gmu 0.89 (conservative after the
+# pruned model OOM'd at 0.90/320K). Requires the DCP image (scripts/build-glm52-image.sh dcp).
+recipe_version: "2"
+runner: dgxrun
+maxoutmem: true
+model: QuantTrio/GLM-5.2-Int4-Int8Mix
+runtime: vllm
+container: vllm-node-tf5-glm52-b12x-dcp:probe
+cluster_only: true
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 4
+  # vLLM's startup guard requires free >= gmu*total. That check only clears once
+  # vm.min_free_kbytes is small (node-prep now sets 1 GiB, not 5) — the kernel
+  # withholds min_free from CUDA too. Confirmed serving at 0.90 on 2026-07-09.
+  gpu_memory_utilization: 0.90
+  max_model_len: 327680   # 320K via DCP2 (KV sized at 8.50 GiB below)
+  served_model_name: glm-5.2
+env:
+  HF_HOME: /cache/huggingface
+  HF_HUB_OFFLINE: "1"
+  LD_PRELOAD: /cache/huggingface/nccl-2.30.4/libnccl.so.2
+  # All JIT caches under one subfolder on NFS (distinct from the pruned model's). Persisted -> warm relaunch.
+  TRITON_CACHE_DIR: /root/glm-jit/triton
+  TORCHINDUCTOR_CACHE_DIR: /root/glm-jit/inductor
+  VLLM_CACHE_ROOT: /root/glm-jit/vllm
+  FLASHINFER_JIT_DIR: /root/glm-jit/flashinfer-jit
+  FLASHINFER_WORKSPACE_DIR: /root/glm-jit/flashinfer-ws
+  FLASHINFER_AUTOTUNE_DIR: /root/glm-jit/flashinfer-autotune
+  FLASHINFER_AUTOTUNER_LOAD_FROM_FILE: "1"
+  TORCHINDUCTOR_COMPILE_THREADS: "1"   # serialize compile so its peak fits alongside the 97GB weights
+  MAX_JOBS: "2"
+  NVCC_THREADS: "1"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "5400"
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+  VLLM_USE_B12X_SPARSE_INDEXER: "1"
+  VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: "256"   # bound the sparse-indexer logits buffer (context-sized ~10GB) -> frees KV budget for 256K
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  VLLM_DCP_GLOBAL_TOPK: "1"
+  VLLM_DCP_SHARD_DRAFT: "1"
+  TORCH_CUDA_ARCH_LIST: "12.1a"
+  GLM52_BIND_HOST_TRITON: "0"
+  NCCL_NET: IB
+  NCCL_IB_DISABLE: "0"
+  NCCL_IB_HCA: "rocep1s0f0,roceP2p1s0f0"
+  NCCL_SOCKET_IFNAME: "enP7s7,enp1s0f0np0,enP2p1s0f0np0"
+  GLOO_SOCKET_IFNAME: enp1s0f0np0
+  NCCL_IB_GID_INDEX: "3"
+  NCCL_CROSS_NIC: "1"
+  NCCL_CUMEM_ENABLE: "0"
+  NCCL_IGNORE_CPU_AFFINITY: "1"
+  NCCL_DEBUG: WARN
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+command: |
+  vllm serve {model} --served-model-name {served_model_name} --host {host} --port {port} --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --enable-prefix-caching --speculative-config '{"model":"CosmicRaisins/GLM-5.2-MTP-INT4-aligned","method":"mtp","draft_attention_backend":"B12X_MLA_SPARSE","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' -tp {tensor_parallel} --pipeline-parallel-size 1 --decode-context-parallel-size 2 --dcp-kv-cache-interleave-size 1 --attention-backend B12X_MLA_SPARSE --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}' --max-model-len {max_model_len} --max-num-seqs 1 --max-num-batched-tokens 2048 --gpu-memory-utilization {gpu_memory_utilization} --kv-cache-dtype fp8_ds_mla --kv-cache-memory-bytes 9126805504 --async-scheduling --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"FULL","max_cudagraph_capture_size":10}'
