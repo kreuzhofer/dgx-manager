@@ -16,10 +16,12 @@ process.env.SHARED_STORAGE_PATH = TMP_DIR;
 // Mock the orchestrator so the route test never spawns uvx.
 const runMock = vi.fn();
 const runToolEvalMock = vi.fn();
+const runAccuracyMock = vi.fn();
 const cancelMock = vi.fn();
 vi.mock("../../benchmarks/orchestrator.js", () => ({
   runBenchmark: (...a: unknown[]) => runMock(...a),
   runToolEval: (...a: unknown[]) => runToolEvalMock(...a),
+  runAccuracy: (...a: unknown[]) => runAccuracyMock(...a),
   cancelBenchmark: (...a: unknown[]) => cancelMock(...a),
 }));
 
@@ -49,6 +51,7 @@ afterAll(async () => {
 beforeEach(async () => {
   runMock.mockReset();
   runToolEvalMock.mockReset();
+  runAccuracyMock.mockReset();
   cancelMock.mockReset();
   // FK-ordered wipe
   await prisma.benchmarkResult.deleteMany();
@@ -201,6 +204,67 @@ describe("POST /api/benchmarks (tool-eval dispatch)", () => {
     expect(detail.body.error).toMatch(/tool-eval-bench exited with code 1/);
     expect(detail.body.toolEvalScore).toBeNull();
     expect(detail.body.toolEvalCategories.length).toBe(0);
+  });
+});
+
+describe("POST /api/benchmarks (accuracy dispatch)", () => {
+  it("creates a run with kind 'accuracy' for an accuracy preset", async () => {
+    const d = await seedRunningDeployment();
+    runAccuracyMock.mockReturnValue(new Promise(() => {}));
+    const res = await request(makeApp())
+      .post("/api/benchmarks")
+      .send({ deploymentId: d.id, presetId: "acc-ifeval-quick" });
+    expect(res.status).toBe(201);
+    expect(res.body.kind).toBe("accuracy");
+    expect(res.body.presetId).toBe("acc-ifeval-quick");
+    expect(runAccuracyMock).toHaveBeenCalledTimes(1);
+    const call = runAccuracyMock.mock.calls[0][0];
+    expect(call.endpointV1Url).toBe("http://10.0.0.1:8000/v1");
+    expect(call.config.primaryTask).toBe("ifeval");
+    expect(runMock).not.toHaveBeenCalled();
+    expect(runToolEvalMock).not.toHaveBeenCalled();
+  });
+
+  it("persists accuracyScore and accuracyMetrics on completion", async () => {
+    const d = await seedRunningDeployment();
+    runAccuracyMock.mockResolvedValue({
+      exitCode: 0,
+      rawOutput: "{}",
+      summary: {
+        primaryScore: 42,
+        metrics: [{ task: "ifeval", metric: "prompt_level_strict_acc", value: 0.42, stderr: 0.02, isGroup: false, nSamples: 100 }],
+      },
+    });
+
+    const app = makeApp();
+    const res = await request(app)
+      .post("/api/benchmarks")
+      .send({ deploymentId: d.id, presetId: "acc-ifeval-quick" });
+    const runId = res.body.id;
+    await new Promise((r) => setTimeout(r, 20));
+
+    const detail = await request(app).get(`/api/benchmarks/${runId}`);
+    expect(detail.body.status).toBe("completed");
+    expect(detail.body.accuracyScore).toBe(42);
+    const metrics = JSON.parse(detail.body.accuracyMetrics);
+    expect(metrics[0].task).toBe("ifeval");
+  });
+
+  it("marks the run failed when lm-eval exits non-zero", async () => {
+    const d = await seedRunningDeployment();
+    runAccuracyMock.mockResolvedValue({ exitCode: 1, rawOutput: null, summary: null });
+
+    const app = makeApp();
+    const res = await request(app)
+      .post("/api/benchmarks")
+      .send({ deploymentId: d.id, presetId: "acc-ifeval-quick" });
+    const runId = res.body.id;
+    await new Promise((r) => setTimeout(r, 20));
+
+    const detail = await request(app).get(`/api/benchmarks/${runId}`);
+    expect(detail.body.status).toBe("failed");
+    expect(detail.body.error).toMatch(/lm-eval exited with code 1/);
+    expect(detail.body.accuracyScore).toBeNull();
   });
 });
 

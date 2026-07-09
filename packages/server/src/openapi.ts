@@ -16,7 +16,7 @@ Full-stack control plane for a DGX Spark cluster. Domains and how they relate:
   **inline recipe body** (\`recipeYaml\`) for remote recipe development. Stopped via DELETE.
 - **Load Balancer** — round-robin inference proxy routing to running deployments.
 - **Fine-tune** — training jobs (train -> merge -> quantize -> deploy the merged model via sparkrun).
-- **Benchmarks** — server-side benchmark runs (llama-benchy / tool-eval-bench) against a deployment.
+- **Benchmarks** — server-side benchmark runs (llama-benchy / tool-eval-bench / lm-eval) against a deployment.
 - **Datasets / Models / Settings / Tokens / Agent bundle** — supporting resources.
 
 Typical flow: register a Node -> it provisions (incl. sparkrun) -> pick a Recipe -> create a
