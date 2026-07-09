@@ -155,16 +155,61 @@ export function stopDgxrun(deploymentId: string): void {
 
 export interface DgxrunContainerState { name: string; state: string; restartCount: number; }
 
-/** Read-only docker state + restart count for a deployment's rank container. */
-export function inspectDgxrunContainer(deploymentId: string): DgxrunContainerState | null {
+/**
+ * Outcome of a `docker inspect`. The three cases are NOT interchangeable:
+ * `absent` means docker positively said the container does not exist, while
+ * `unknown` means we failed to ask (timeout, busy/dead daemon). Collapsing
+ * `unknown` into `absent` is what tore down every rank of a healthy GLM-5.2
+ * cluster: under a heavy NFS weight stream the daemon was slow, inspect timed
+ * out, and the agent reported "container missing" for a container that was
+ * mid-`torch.compile`.
+ */
+export type DgxrunInspect =
+  | { kind: "found"; name: string; state: string; restartCount: number }
+  | { kind: "absent" }
+  | { kind: "unknown"; reason: string };
+
+/**
+ * Pure: classify a `docker inspect` invocation. Docker exits non-zero with
+ * `Error: No such object: <name>` (or "No such container") when the container
+ * genuinely does not exist. Every OTHER non-zero exit — a spawnSync timeout
+ * (status null + error), a daemon error — is `unknown`, never `absent`.
+ */
+export function classifyDockerInspect(
+  status: number | null,
+  stdout: string,
+  stderr: string,
+  name: string,
+  error?: Error,
+): DgxrunInspect {
+  if (status === 0) {
+    const out = (stdout || "").trim();
+    if (!out) return { kind: "unknown", reason: "docker inspect returned empty output" };
+    const [state, rc] = out.split(/\s+/);
+    return { name, kind: "found", state, restartCount: Number(rc) || 0 };
+  }
+  const blob = `${stderr || ""} ${error?.message ?? ""}`;
+  if (/no such (object|container)/i.test(blob)) return { kind: "absent" };
+  if (status === null) {
+    return { kind: "unknown", reason: error?.message || "docker inspect timed out" };
+  }
+  return { kind: "unknown", reason: (stderr || "").trim() || `docker inspect exited ${status}` };
+}
+
+/** Read-only docker state for a rank container, distinguishing absent from unknown. */
+export function inspectDgxrunContainerResult(deploymentId: string): DgxrunInspect {
   const name = dgxrunContainerName(deploymentId);
   const r = spawnSync("docker", ["inspect", name, "--format", "{{.State.Status}} {{.RestartCount}}"],
     { encoding: "utf8", timeout: 10_000 });
-  if (r.status !== 0) return null;
-  const out = (r.stdout || "").trim();
-  if (!out) return null;
-  const [state, rc] = out.split(/\s+/);
-  return { name, state, restartCount: Number(rc) || 0 };
+  return classifyDockerInspect(r.status, r.stdout ?? "", r.stderr ?? "", name, r.error as Error | undefined);
+}
+
+/** Read-only docker state + restart count for a deployment's rank container. */
+export function inspectDgxrunContainer(deploymentId: string): DgxrunContainerState | null {
+  const res = inspectDgxrunContainerResult(deploymentId);
+  return res.kind === "found"
+    ? { name: res.name, state: res.state, restartCount: res.restartCount }
+    : null;
 }
 
 /** True when the rank container is running. */

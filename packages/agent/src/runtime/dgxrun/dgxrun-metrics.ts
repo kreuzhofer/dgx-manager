@@ -1,5 +1,7 @@
 import { loadDeployments } from "../deployment-store.js";
-import { inspectDgxrunContainer, captureCrashedDgxrunLogs } from "./dgxrun.js";
+import {
+  inspectDgxrunContainerResult, captureCrashedDgxrunLogs, type DgxrunContainerState,
+} from "./dgxrun.js";
 import { stopDropCacheLoop } from "./dgxrun-dropcache.js";
 import {
   parseVllmMetrics, computeTps, firstErrorLine, type TokenSample,
@@ -8,8 +10,19 @@ import type { VllmStatus } from "../vllm.js";
 
 const CRASH_LOOP_THRESHOLD = 2;
 
+/**
+ * How many CONSECUTIVE `absent` inspects before we declare the container gone.
+ * One is not enough: docker briefly reports "no such object" while a container is
+ * being recreated, and a single false "container missing" tears down every rank
+ * of an mp cluster (one dead rank hangs all).
+ */
+const ABSENT_TICKS_TO_FAIL = 2;
+
 /** Previous generation-tokens counter sample per deployment, for the tps rate. */
 const prevTokens = new Map<string, TokenSample>();
+
+/** Consecutive `absent` inspects per deployment. Reset on any successful inspect. */
+const absentTicks = new Map<string, number>();
 
 /**
  * Health-check dgxrun-launched deployments tracked in the local store. Mirrors
@@ -26,14 +39,47 @@ export async function checkDgxrunDeployments(): Promise<VllmStatus[]> {
   const results: VllmStatus[] = [];
 
   for (const d of deployments) {
-    const c = inspectDgxrunContainer(d.deploymentId);
+    const res = inspectDgxrunContainerResult(d.deploymentId);
+
+    // We failed to ASK docker (timeout / busy daemon), so we know nothing about
+    // the container. Reporting a failure here would tear down a healthy cluster.
+    // Skip the tick and leave the last known status standing.
+    if (res.kind === "unknown") continue;
+
+    if (res.kind === "found") absentTicks.delete(d.deploymentId);
+
+    // Docker positively reports the container gone. Require consecutive sightings
+    // before believing it — a lone `absent` is routinely a recreate race.
+    if (res.kind === "absent") {
+      if (d.stopping) { absentTicks.delete(d.deploymentId); continue; }
+      const n = (absentTicks.get(d.deploymentId) ?? 0) + 1;
+      absentTicks.set(d.deploymentId, n);
+      if (n < ABSENT_TICKS_TO_FAIL) continue;
+      absentTicks.delete(d.deploymentId);
+      results.push({
+        deploymentId: d.deploymentId,
+        recipeName: d.recipeName,
+        port: d.port,
+        alive: false,
+        containerRunning: false,
+        requestsRunning: null,
+        requestsWaiting: null,
+        kvCacheUsage: null,
+        tps: null,
+        error: "container missing",
+        rank: d.rank,
+      });
+      continue;
+    }
+
+    const c: DgxrunContainerState = res;
 
     // An intentional stop (cmd:undeploy marked stopping) that already vanished
     // must not be reported as a crash.
-    if (d.stopping && (c == null || c.state !== "running")) continue;
+    if (d.stopping && c.state !== "running") continue;
 
-    const failing = c != null &&
-      (c.restartCount >= CRASH_LOOP_THRESHOLD || (c.state !== "running" && c.state !== "created"));
+    const failing =
+      c.restartCount >= CRASH_LOOP_THRESHOLD || (c.state !== "running" && c.state !== "created");
     if (failing && !d.stopping) {
       const snap = captureCrashedDgxrunLogs(d.deploymentId);
       results.push({
@@ -55,26 +101,7 @@ export async function checkDgxrunDeployments(): Promise<VllmStatus[]> {
       continue;
     }
 
-    // Container gone entirely (removed out-of-band) — report a failure so the
-    // manager tears down the whole mp cluster (one dead rank hangs all).
-    if (c == null && !d.stopping) {
-      results.push({
-        deploymentId: d.deploymentId,
-        recipeName: d.recipeName,
-        port: d.port,
-        alive: false,
-        containerRunning: false,
-        requestsRunning: null,
-        requestsWaiting: null,
-        kvCacheUsage: null,
-        tps: null,
-        error: "container missing",
-        rank: d.rank,
-      });
-      continue;
-    }
-
-    const running = c != null && c.state === "running";
+    const running = c.state === "running";
     const isHead = (d.rank ?? 0) === 0;
     const status: VllmStatus = {
       deploymentId: d.deploymentId,
