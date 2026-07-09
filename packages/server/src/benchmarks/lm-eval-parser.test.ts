@@ -73,4 +73,12 @@ describe("parseLmEvalResults", () => {
   it("throws when the parsed top-level is not an object", () => {
     expect(() => parseLmEvalResults("null", "t", "acc")).toThrow(/results/i);
   });
+
+  it("falls back to a non-'none' filter for the primary metric (e.g. gsm8k strict-match)", () => {
+    const json = JSON.stringify({
+      results: { gsm8k_cot: { "exact_match,strict-match": 0.7, "exact_match_stderr,strict-match": 0.01 } },
+    });
+    const { primaryScore } = parseLmEvalResults(json, "gsm8k_cot", "exact_match");
+    expect(primaryScore).toBeCloseTo(70, 5);
+  });
 });

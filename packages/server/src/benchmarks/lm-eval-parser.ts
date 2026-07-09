@@ -78,9 +78,17 @@ export function parseLmEvalResults(
     }
   }
 
+  // Headline: prefer the `,none` filter, but fall back to whatever filter this
+  // task actually emitted for the primary metric — gsm8k/mmlu_pro/gpqa report
+  // exact_match under strict-match/custom-extract/flexible-extract, not `,none`.
+  // Every filter is still visible in `metrics`; when several exist we take the
+  // first. Still fail-fast if the metric is absent under every filter.
   const primaryEntry = (results as Obj)[primaryTask] as Obj | undefined;
-  const primaryRaw = primaryEntry ? primaryEntry[`${primaryMetric},none`] : undefined;
-  const primary = numOrNull(primaryRaw);
+  let primary = primaryEntry ? numOrNull(primaryEntry[`${primaryMetric},none`]) : null;
+  if (primary === null) {
+    const row = metrics.find((m) => m.task === primaryTask && m.metric === primaryMetric);
+    primary = row ? row.value : null;
+  }
   if (primary === null) {
     throw new Error(
       `lm-eval result missing primary metric: ${primaryTask}/${primaryMetric}`,

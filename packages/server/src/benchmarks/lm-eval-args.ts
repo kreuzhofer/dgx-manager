@@ -12,6 +12,10 @@ export type LmEvalTarget = {
 // endpoint. --gen_kwargs / --limit / --num_fewshot are single-token key=val or
 // scalar flags (not nargs), unlike llama-benchy's list flags.
 export function buildLmEvalArgs(config: AccuracyConfig, target: LmEvalTarget): string[] {
+  // NOTE: modelName is the vLLM served-model id (operator-controlled, from the
+  // DB). It's interpolated into the comma/`=`-delimited model_args; a name
+  // containing `,` or `=` could inject extra model_args. Real served ids are HF
+  // repo ids so this is acceptable for now — revisit if names become arbitrary.
   const modelArgs = [
     `base_url=${target.baseUrl}/chat/completions`,
     `model=${target.modelName}`,

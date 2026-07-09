@@ -84,9 +84,13 @@ function ComparePageBody() {
         </div>
       )}
 
-      <BenchmarkChart series={series} metric="tps" />
-      <BenchmarkChart series={series} metric="ttfrMs" />
-      <BenchmarkChart series={series} metric="e2eTtftMs" />
+      {runs.some((r) => (r.results?.length ?? 0) > 0) && (
+        <>
+          <BenchmarkChart series={series} metric="tps" />
+          <BenchmarkChart series={series} metric="ttfrMs" />
+          <BenchmarkChart series={series} metric="e2eTtftMs" />
+        </>
+      )}
     </div>
   );
 }

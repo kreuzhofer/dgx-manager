@@ -175,6 +175,7 @@ export type RunAccuracyResult = {
   exitCode: number | null;
   summary: LmEvalSummary | null;
   rawOutput: string | null;
+  error: string | null; // parser error message when exitCode 0 but parse failed
 };
 
 export async function runAccuracy(opts: RunAccuracyOpts): Promise<RunAccuracyResult> {
@@ -200,14 +201,16 @@ export async function runAccuracy(opts: RunAccuracyOpts): Promise<RunAccuracyRes
     });
 
     let summary: LmEvalSummary | null = null;
+    let error: string | null = null;
     if (exitCode === 0 && rawOutput !== null) {
       try {
         summary = parseLmEvalResults(rawOutput, opts.config.primaryTask, opts.config.primaryMetric);
       } catch (e) {
-        opts.onLog(`[parser] ${(e as Error).message}`);
+        error = (e as Error).message;
+        opts.onLog(`[parser] ${error}`);
       }
     }
-    return { exitCode, summary, rawOutput };
+    return { exitCode, summary, rawOutput, error };
   } finally {
     if (proxy) await proxy.close();
   }

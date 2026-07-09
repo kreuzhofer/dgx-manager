@@ -399,6 +399,18 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
           });
           const final = await prisma.benchmarkRun.findUnique({ where: { id: run.id } });
           sseBroadcast({ type: "benchmark:status", payload: final });
+        } else if (r.exitCode === 0 && r.error) {
+          // Process succeeded but results couldn't be parsed — surface the real
+          // reason (e.g. a missing primary metric) and keep the raw JSON so the
+          // detail page can show it.
+          await prisma.benchmarkRun.update({
+            where: { id: run.id },
+            data: { status: "failed", completedAt: new Date(), error: r.error, rawOutput: r.rawOutput },
+          });
+          sseBroadcast({
+            type: "benchmark:status",
+            payload: { id: run.id, status: "failed", error: r.error },
+          });
         } else {
           await finishFailed(`lm-eval exited with code ${r.exitCode}`);
         }

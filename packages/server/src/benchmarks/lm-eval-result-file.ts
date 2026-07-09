@@ -22,7 +22,14 @@ export function findLmEvalResultFile(outputDir: string): string | null {
       if (e.isDirectory()) {
         walk(full);
       } else if (RESULTS_RE.test(e.name)) {
-        const m = statSync(full).mtimeMs;
+        // Guard the stat: this runs inside spawnTracked's un-try/caught "close"
+        // listener, so a throw here would leave the run promise unresolved.
+        let m: number;
+        try {
+          m = statSync(full).mtimeMs;
+        } catch {
+          continue; // vanished/inaccessible between readdir and stat — skip it
+        }
         if (m > bestMtime) {
           bestMtime = m;
           best = full;

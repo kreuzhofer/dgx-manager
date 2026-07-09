@@ -298,4 +298,21 @@ describe("runAccuracy", () => {
     expect(argv).toContain("base_url=http://10.0.0.1:8000/v1/chat/completions,model=m,num_concurrent=1,tokenized_requests=False");
     expect(r.summary).toBeNull(); // no result file → no summary
   });
+
+  it("returns the parser error when lm-eval exits 0 but results are unparseable", async () => {
+    const child = makeFakeChild();
+    spawnMock.mockReturnValue(child);
+    findFileMock.mockReturnValue("/o/model/results_x.json");
+    existsSyncMock.mockReturnValue(true);
+    readFileSyncMock.mockReturnValue("not json");
+
+    const promise = runAccuracy({
+      runId: "run_acc_err", config: { ...baseConfig, reasoning: false },
+      endpointV1Url: "http://10.0.0.1:8000/v1", servedModel: "m", outputDir: "/o", onLog: vi.fn(),
+    });
+    child.emit("close", 0);
+    const r = await promise;
+    expect(r.summary).toBeNull();
+    expect(r.error).toMatch(/parse/i);
+  });
 });
