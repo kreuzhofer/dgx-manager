@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 import { parseVllmMetrics, firstErrorLine, computeTps, sparkrunRunningStatus, parseLoadingShards } from "./sparkrun-metrics.js";
 
 // Real Phase 0 shape: metric names carry {labels}; this vLLM uses kv_cache_usage_perc.
@@ -190,8 +190,14 @@ vi.mock("./sparkrun.js", () => ({
   captureCrashedContainerLogs: captureCrashedContainerLogsMock,
 }));
 
-// Override global fetch
+// Override global fetch. Vitest runs this suite's pool as a single shared
+// process (singleFork), so an unrestored stub here leaks into every test
+// file that runs afterward and shadows the real global fetch. Restore it
+// once this file's tests are done.
 vi.stubGlobal("fetch", fetchMock);
+afterAll(() => {
+  vi.unstubAllGlobals();
+});
 
 import { checkSparkrunDeployments } from "./sparkrun-metrics.js";
 
