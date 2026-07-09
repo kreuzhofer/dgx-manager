@@ -18,7 +18,28 @@ export type ToolEvalConfig = {
   seed: number;
 };
 
-export type BenchmarkKind = "throughput" | "tool-eval";
+export type BenchmarkKind = "throughput" | "tool-eval" | "accuracy";
+
+export type AccuracyConfig = {
+  tasks: string[];
+  primaryTask: string;
+  primaryMetric: string;
+  limit: number | null;
+  numFewshot: number | null;
+  maxGenToks: number;
+  applyChatTemplate: boolean;
+  reasoning: boolean;
+  seed: number;
+};
+
+export type AccuracyMetric = {
+  task: string;
+  metric: string;
+  value: number;
+  stderr: number | null;
+  isGroup: boolean;
+  nSamples: number | null;
+};
 
 export type ToolEvalCategory = {
   id: string;
@@ -37,7 +58,7 @@ export type BenchmarkPreset = {
   label: string;
   description: string;
   kind: BenchmarkKind;
-  config: BenchmarkConfig | ToolEvalConfig;
+  config: BenchmarkConfig | ToolEvalConfig | AccuracyConfig;
 };
 
 export type BenchmarkResult = {
@@ -80,6 +101,8 @@ export type BenchmarkRun = {
   toolEvalMaxPoints: number | null;
   toolEvalSafetyWarnings: string | null;
   toolEvalCategories?: ToolEvalCategory[];
+  accuracyScore: number | null;
+  accuracyMetrics: string | null;
   rawOutput: string | null;
   createdAt: string;
   results?: BenchmarkResult[];

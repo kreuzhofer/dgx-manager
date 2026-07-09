@@ -21,7 +21,16 @@ vi.mock("node:fs", async () => {
   };
 });
 
-import { runBenchmark, runToolEval, cancelBenchmark } from "./orchestrator.js";
+const startProxyMock = vi.fn();
+vi.mock("./reasoning-proxy.js", () => ({
+  startReasoningProxy: (...a: unknown[]) => startProxyMock(...a),
+}));
+const findFileMock = vi.fn();
+vi.mock("./lm-eval-result-file.js", () => ({
+  findLmEvalResultFile: (...a: unknown[]) => findFileMock(...a),
+}));
+
+import { runBenchmark, runToolEval, runAccuracy, cancelBenchmark } from "./orchestrator.js";
 
 function makeFakeChild(pid = 4242) {
   const child = new EventEmitter() as EventEmitter & {
@@ -217,5 +226,93 @@ describe("runToolEval", () => {
     const result = await promise;
     expect(result.exitCode).toBe(1);
     expect(result.summary).toBeNull();
+  });
+});
+
+describe("runAccuracy", () => {
+  const baseConfig = {
+    tasks: ["ifeval"], primaryTask: "ifeval", primaryMetric: "prompt_level_strict_acc",
+    limit: 100, numFewshot: null, maxGenToks: 2048,
+    applyChatTemplate: true, reasoning: true, seed: 42,
+  };
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+    readFileSyncMock.mockReset();
+    mkdirSyncMock.mockReset();
+    existsSyncMock.mockReset();
+    startProxyMock.mockReset();
+    findFileMock.mockReset();
+  });
+
+  it("starts the strip proxy, runs uvx lm_eval against it, parses, and closes the proxy", async () => {
+    const child = makeFakeChild();
+    spawnMock.mockReturnValue(child);
+    const closeMock = vi.fn().mockResolvedValue(undefined);
+    startProxyMock.mockResolvedValue({ url: "http://127.0.0.1:5555/v1", close: closeMock });
+    findFileMock.mockReturnValue("/o/model/results_x.json");
+    existsSyncMock.mockReturnValue(true);
+    readFileSyncMock.mockReturnValue(JSON.stringify({
+      results: { ifeval: { "prompt_level_strict_acc,none": 0.5 } },
+    }));
+
+    const promise = runAccuracy({
+      runId: "run_acc", config: baseConfig, endpointV1Url: "http://10.0.0.1:8000/v1",
+      servedModel: "m", outputDir: "/o", onLog: vi.fn(),
+    });
+    // runAccuracy awaits startReasoningProxy before spawning, so the child's
+    // "close" listener isn't attached synchronously (unlike runBenchmark /
+    // runToolEval, which spawn with no prior await). Wait for spawn to have
+    // been called — i.e. for the listener to be attached — before emitting.
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalled());
+    child.emit("close", 0);
+    const r = await promise;
+
+    expect(startProxyMock).toHaveBeenCalledWith("http://10.0.0.1:8000/v1");
+    const [cmd, argv] = spawnMock.mock.calls[0];
+    expect(cmd).toBe("uvx");
+    expect(argv[0]).toBe("--from");
+    expect(argv[1]).toMatch(/^lm-eval\[.+\]/);
+    expect(argv[2]).toBe("lm_eval");
+    expect(argv).toContain("base_url=http://127.0.0.1:5555/v1/chat/completions,model=m,num_concurrent=1,tokenized_requests=False");
+    expect(r.exitCode).toBe(0);
+    expect(r.summary?.primaryScore).toBeCloseTo(50, 5);
+    expect(closeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips the proxy and targets the endpoint directly when reasoning is false", async () => {
+    const child = makeFakeChild();
+    spawnMock.mockReturnValue(child);
+    findFileMock.mockReturnValue(null);
+    existsSyncMock.mockReturnValue(false);
+
+    const promise = runAccuracy({
+      runId: "run_acc2", config: { ...baseConfig, reasoning: false },
+      endpointV1Url: "http://10.0.0.1:8000/v1", servedModel: "m", outputDir: "/o", onLog: vi.fn(),
+    });
+    child.emit("close", 0);
+    const r = await promise;
+
+    expect(startProxyMock).not.toHaveBeenCalled();
+    const [, argv] = spawnMock.mock.calls[0];
+    expect(argv).toContain("base_url=http://10.0.0.1:8000/v1/chat/completions,model=m,num_concurrent=1,tokenized_requests=False");
+    expect(r.summary).toBeNull(); // no result file → no summary
+  });
+
+  it("returns the parser error when lm-eval exits 0 but results are unparseable", async () => {
+    const child = makeFakeChild();
+    spawnMock.mockReturnValue(child);
+    findFileMock.mockReturnValue("/o/model/results_x.json");
+    existsSyncMock.mockReturnValue(true);
+    readFileSyncMock.mockReturnValue("not json");
+
+    const promise = runAccuracy({
+      runId: "run_acc_err", config: { ...baseConfig, reasoning: false },
+      endpointV1Url: "http://10.0.0.1:8000/v1", servedModel: "m", outputDir: "/o", onLog: vi.fn(),
+    });
+    child.emit("close", 0);
+    const r = await promise;
+    expect(r.summary).toBeNull();
+    expect(r.error).toMatch(/parse/i);
   });
 });

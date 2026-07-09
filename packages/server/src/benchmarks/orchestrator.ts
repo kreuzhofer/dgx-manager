@@ -10,6 +10,11 @@ import {
   parseToolEvalResults,
   type ToolEvalSummary,
 } from "./tool-eval-parser.js";
+import { buildLmEvalArgs } from "./lm-eval-args.js";
+import { parseLmEvalResults, type LmEvalSummary } from "./lm-eval-parser.js";
+import { findLmEvalResultFile } from "./lm-eval-result-file.js";
+import { startReasoningProxy, type ReasoningProxy } from "./reasoning-proxy.js";
+import type { AccuracyConfig } from "./presets.js";
 
 const LLAMA_BENCHY_SPEC =
   process.env.LLAMA_BENCHY_VERSION
@@ -21,6 +26,12 @@ const TOOL_EVAL_SPEC =
   process.env.TOOL_EVAL_BENCH_REF ||
   "git+https://github.com/SeraphimSerapis/tool-eval-bench.git@c3868bff099592c9a1045de2c9a3dc24abebb7fb";
 
+// lm-evaluation-harness with the IFEval + MATH scoring extras. Overridable pin.
+const LM_EVAL_SPEC =
+  process.env.LM_EVAL_VERSION
+    ? `lm-eval[ifeval,math]==${process.env.LM_EVAL_VERSION}`
+    : "lm-eval[ifeval,math]";
+
 // In-memory registry of in-flight runs. Lost on restart — see Task 9 for the
 // boot-time reconciliation that marks any orphaned "running" rows as failed.
 const ACTIVE: Map<string, ChildProcess> = new Map();
@@ -31,6 +42,10 @@ type SpawnTrackedOpts = {
   args: string[];    // full argv for the executable
   outputDir: string; // mkdir'd before spawn; must contain the result.json path
   onLog: (line: string) => void;
+  // Resolve the result file to read on exit. Defaults to outputDir/result.json
+  // (llama-benchy / tool-eval-bench). lm-eval passes a locator for its nested
+  // results_*.json.
+  resultFile?: (outputDir: string) => string | null;
 };
 
 type SpawnTrackedResult = { exitCode: number | null; rawOutput: string | null };
@@ -64,9 +79,11 @@ function spawnTracked(opts: SpawnTrackedOpts): Promise<SpawnTrackedResult> {
 
     child.on("close", (code) => {
       ACTIVE.delete(opts.runId);
-      const resultPath = join(opts.outputDir, "result.json");
+      const resultPath = opts.resultFile
+        ? opts.resultFile(opts.outputDir)
+        : join(opts.outputDir, "result.json");
       let rawOutput: string | null = null;
-      if (code === 0 && existsSync(resultPath)) {
+      if (code === 0 && resultPath && existsSync(resultPath)) {
         try {
           rawOutput = readFileSync(resultPath, "utf-8");
         } catch (e) {
@@ -143,6 +160,60 @@ export async function runToolEval(opts: RunToolEvalOpts): Promise<RunToolEvalRes
     }
   }
   return { exitCode, summary, rawOutput };
+}
+
+export type RunAccuracyOpts = {
+  runId: string;
+  config: AccuracyConfig;
+  endpointV1Url: string; // deployment .../v1
+  servedModel: string;
+  outputDir: string;
+  onLog: (line: string) => void;
+};
+
+export type RunAccuracyResult = {
+  exitCode: number | null;
+  summary: LmEvalSummary | null;
+  rawOutput: string | null;
+  error: string | null; // parser error message when exitCode 0 but parse failed
+};
+
+export async function runAccuracy(opts: RunAccuracyOpts): Promise<RunAccuracyResult> {
+  let proxy: ReasoningProxy | null = null;
+  try {
+    const baseUrl = opts.config.reasoning
+      ? (proxy = await startReasoningProxy(opts.endpointV1Url)).url
+      : opts.endpointV1Url;
+
+    const args = buildLmEvalArgs(opts.config, {
+      baseUrl,
+      modelName: opts.servedModel,
+      outputDir: opts.outputDir,
+    });
+
+    const { exitCode, rawOutput } = await spawnTracked({
+      runId: opts.runId,
+      command: "uvx",
+      args: ["--from", LM_EVAL_SPEC, "lm_eval", ...args],
+      outputDir: opts.outputDir,
+      onLog: opts.onLog,
+      resultFile: findLmEvalResultFile,
+    });
+
+    let summary: LmEvalSummary | null = null;
+    let error: string | null = null;
+    if (exitCode === 0 && rawOutput !== null) {
+      try {
+        summary = parseLmEvalResults(rawOutput, opts.config.primaryTask, opts.config.primaryMetric);
+      } catch (e) {
+        error = (e as Error).message;
+        opts.onLog(`[parser] ${error}`);
+      }
+    }
+    return { exitCode, summary, rawOutput, error };
+  } finally {
+    if (proxy) await proxy.close();
+  }
 }
 
 export function cancelBenchmark(runId: string): boolean {

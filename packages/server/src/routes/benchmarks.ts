@@ -8,6 +8,7 @@ import {
   getPreset,
   type BenchmarkConfig,
   type ToolEvalConfig,
+  type AccuracyConfig,
 } from "../benchmarks/presets.js";
 import { buildBenchyArgs } from "../benchmarks/args.js";
 import { buildToolEvalArgs } from "../benchmarks/tool-eval-args.js";
@@ -15,6 +16,7 @@ import { deploymentEndpointUrl, resolveServedModelName } from "../benchmarks/end
 import {
   runBenchmark,
   runToolEval,
+  runAccuracy,
   cancelBenchmark,
 } from "../benchmarks/orchestrator.js";
 
@@ -291,8 +293,8 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
       .json({ error: "a benchmark is already running for this deployment" });
   }
 
-  let kind: "throughput" | "tool-eval" = "throughput";
-  let config: BenchmarkConfig | ToolEvalConfig;
+  let kind: "throughput" | "tool-eval" | "accuracy" = "throughput";
+  let config: BenchmarkConfig | ToolEvalConfig | AccuracyConfig;
   if (presetId) {
     const preset = getPreset(presetId);
     if (!preset) return res.status(400).json({ error: "unknown presetId" });
@@ -372,7 +374,49 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
     });
   };
 
-  if (kind === "tool-eval") {
+  if (kind === "accuracy") {
+    runAccuracy({
+      runId: run.id,
+      config: config as AccuracyConfig,
+      endpointV1Url: endpointUrl,
+      servedModel: servedModelName,
+      outputDir,
+      onLog,
+    })
+      .then(async (r) => {
+        const current = await prisma.benchmarkRun.findUnique({ where: { id: run.id } });
+        if (current?.status === "canceled") return;
+        if (r.exitCode === 0 && r.summary) {
+          await prisma.benchmarkRun.update({
+            where: { id: run.id },
+            data: {
+              status: "completed",
+              completedAt: new Date(),
+              rawOutput: r.rawOutput,
+              accuracyScore: r.summary.primaryScore,
+              accuracyMetrics: JSON.stringify(r.summary.metrics),
+            },
+          });
+          const final = await prisma.benchmarkRun.findUnique({ where: { id: run.id } });
+          sseBroadcast({ type: "benchmark:status", payload: final });
+        } else if (r.exitCode === 0 && r.error) {
+          // Process succeeded but results couldn't be parsed — surface the real
+          // reason (e.g. a missing primary metric) and keep the raw JSON so the
+          // detail page can show it.
+          await prisma.benchmarkRun.update({
+            where: { id: run.id },
+            data: { status: "failed", completedAt: new Date(), error: r.error, rawOutput: r.rawOutput },
+          });
+          sseBroadcast({
+            type: "benchmark:status",
+            payload: { id: run.id, status: "failed", error: r.error },
+          });
+        } else {
+          await finishFailed(`lm-eval exited with code ${r.exitCode}`);
+        }
+      })
+      .catch((e) => finishFailed((e as Error).message));
+  } else if (kind === "tool-eval") {
     const args = buildToolEvalArgs(config as ToolEvalConfig, {
       baseUrl: endpointUrl,
       modelName: servedModelName,

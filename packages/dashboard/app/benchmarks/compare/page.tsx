@@ -59,9 +59,38 @@ function ComparePageBody() {
         </ul>
       </div>
 
-      <BenchmarkChart series={series} metric="tps" />
-      <BenchmarkChart series={series} metric="ttfrMs" />
-      <BenchmarkChart series={series} metric="e2eTtftMs" />
+      {runs.some((r) => r.kind === "accuracy") && (
+        <div className="space-y-2">
+          <h2 className="text-lg font-medium">Accuracy score</h2>
+          {runs
+            .filter((r) => r.kind === "accuracy")
+            .map((r, i) => (
+              <div key={r.id} className="text-sm">
+                <div className="flex justify-between text-xs text-gray-400 mb-0.5">
+                  <span>{r.deployment?.displayName ?? r.modelName} · {r.presetId ?? "custom"}</span>
+                  <span>{r.accuracyScore != null ? `${r.accuracyScore.toFixed(1)}/100` : "—"}</span>
+                </div>
+                <div className="h-2 rounded bg-gray-800 overflow-hidden">
+                  <div
+                    className="h-full"
+                    style={{
+                      width: `${Math.max(0, Math.min(100, r.accuracyScore ?? 0))}%`,
+                      background: PALETTE[i % PALETTE.length],
+                    }}
+                  />
+                </div>
+              </div>
+            ))}
+        </div>
+      )}
+
+      {runs.some((r) => (r.results?.length ?? 0) > 0) && (
+        <>
+          <BenchmarkChart series={series} metric="tps" />
+          <BenchmarkChart series={series} metric="ttfrMs" />
+          <BenchmarkChart series={series} metric="e2eTtftMs" />
+        </>
+      )}
     </div>
   );
 }

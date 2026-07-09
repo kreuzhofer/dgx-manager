@@ -1,0 +1,35 @@
+{
+  "results": {
+    "ifeval": {
+      "alias": "ifeval",
+      "prompt_level_strict_acc,none": 0.42,
+      "prompt_level_strict_acc_stderr,none": 0.021,
+      "inst_level_strict_acc,none": 0.55,
+      "inst_level_strict_acc_stderr,none": "N/A",
+      "prompt_level_loose_acc,none": 0.45,
+      "prompt_level_loose_acc_stderr,none": 0.021
+    },
+    "bbh": {
+      "alias": "bbh",
+      "exact_match,none": 0.6,
+      "exact_match_stderr,none": 0.015
+    },
+    "bbh_boolean_expressions": {
+      "alias": " - boolean_expressions",
+      "exact_match,none": 0.9,
+      "exact_match_stderr,none": 0.03
+    }
+  },
+  "groups": {
+    "bbh": {
+      "alias": "bbh",
+      "exact_match,none": 0.6,
+      "exact_match_stderr,none": 0.015
+    }
+  },
+  "n-samples": {
+    "ifeval": { "original": 541, "effective": 100 },
+    "bbh": { "original": 6511, "effective": 40 },
+    "bbh_boolean_expressions": { "original": 250, "effective": 40 }
+  }
+}

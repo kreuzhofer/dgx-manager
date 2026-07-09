@@ -8,6 +8,7 @@ import {
 import { BenchmarkResultTable } from "@/components/benchmark-result-table";
 import { BenchmarkChart } from "@/components/benchmark-chart";
 import { ToolEvalResultCard } from "@/components/tool-eval-result-card";
+import { AccuracyResultCard } from "@/components/accuracy-result-card";
 import { useSSE, type SseEvent } from "@/lib/sse";
 
 export default function BenchmarkDetailPage({
@@ -84,7 +85,9 @@ export default function BenchmarkDetailPage({
         {run.error && <div className="text-red-400 mt-2">Error: {run.error}</div>}
       </div>
 
-      {run.kind === "tool-eval" ? (
+      {run.kind === "accuracy" ? (
+        run.status === "completed" && <AccuracyResultCard run={run} />
+      ) : run.kind === "tool-eval" ? (
         run.status === "completed" && <ToolEvalResultCard run={run} />
       ) : (
         run.results && run.results.length > 0 && (
@@ -104,7 +107,7 @@ export default function BenchmarkDetailPage({
       {run.rawOutput && (
         <details className="text-sm">
           <summary className="cursor-pointer text-gray-400">
-            Raw {run.kind === "tool-eval" ? "tool-eval-bench" : "llama-benchy"} JSON
+            Raw {run.kind === "tool-eval" ? "tool-eval-bench" : run.kind === "accuracy" ? "lm-eval" : "llama-benchy"} JSON
           </summary>
           <pre className="mt-2 p-3 bg-black rounded text-xs overflow-x-auto max-h-96">{run.rawOutput}</pre>
         </details>

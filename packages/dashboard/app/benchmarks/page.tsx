@@ -124,6 +124,18 @@ export default function BenchmarksPage() {
           <option value="tool-eval-full">tool-eval-full</option>
           <option value="tool-eval-hardmode">tool-eval-hardmode</option>
           <option value="tool-eval-pressure">tool-eval-pressure</option>
+          <option value="acc-ifeval-quick">acc-ifeval-quick</option>
+          <option value="acc-ifeval-full">acc-ifeval-full</option>
+          <option value="acc-mmlu-pro-quick">acc-mmlu-pro-quick</option>
+          <option value="acc-mmlu-pro-full">acc-mmlu-pro-full</option>
+          <option value="acc-gpqa-diamond-quick">acc-gpqa-diamond-quick</option>
+          <option value="acc-gpqa-diamond-full">acc-gpqa-diamond-full</option>
+          <option value="acc-gsm8k-quick">acc-gsm8k-quick</option>
+          <option value="acc-gsm8k-full">acc-gsm8k-full</option>
+          <option value="acc-bbh-quick">acc-bbh-quick</option>
+          <option value="acc-bbh-full">acc-bbh-full</option>
+          <option value="acc-math-hard-quick">acc-math-hard-quick</option>
+          <option value="acc-math-hard-full">acc-math-hard-full</option>
         </select>
         <select
           value={filter.status}
@@ -220,9 +232,11 @@ export default function BenchmarksPage() {
                     </td>
                     <td className="px-4 py-3">
                       <span className={`text-xs px-2 py-0.5 rounded ${
-                        r.kind === "tool-eval" ? "bg-purple-900 text-purple-200" : "bg-sky-900 text-sky-200"
+                        r.kind === "tool-eval" ? "bg-purple-900 text-purple-200"
+                        : r.kind === "accuracy" ? "bg-emerald-900 text-emerald-200"
+                        : "bg-sky-900 text-sky-200"
                       }`}>
-                        {r.kind === "tool-eval" ? "tool-eval" : "throughput"}
+                        {r.kind}
                       </span>
                     </td>
                     <td className="px-4 py-3">
@@ -236,6 +250,8 @@ export default function BenchmarksPage() {
                     <td className="px-4 py-3 text-right font-mono">
                       {r.kind === "tool-eval"
                         ? (r.toolEvalScore != null ? `${r.toolEvalScore}/100` : "—")
+                        : r.kind === "accuracy"
+                        ? (r.accuracyScore != null ? `${r.accuracyScore.toFixed(1)}/100` : "—")
                         : (r.meanTps != null ? r.meanTps.toFixed(1) : "—")}
                     </td>
                     <td className="px-4 py-3 text-right font-mono">

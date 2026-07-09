@@ -60,13 +60,17 @@ export function BenchmarkFormModal({
 
         {!showCustom && (
           <div className="space-y-4">
-            {(["throughput", "tool-eval"] as const).map((kind) => {
+            {(["throughput", "tool-eval", "accuracy"] as const).map((kind) => {
               const group = presets.filter((p) => p.kind === kind);
               if (group.length === 0) return null;
+              const heading =
+                kind === "throughput" ? "Throughput"
+                : kind === "tool-eval" ? "Tool-calling eval"
+                : "Accuracy (lm-eval)";
               return (
                 <div key={kind} className="space-y-2">
                   <div className="text-xs uppercase tracking-wide text-gray-500">
-                    {kind === "throughput" ? "Throughput" : "Tool-calling eval"}
+                    {heading}
                   </div>
                   {group.map((p) => (
                     <label key={p.id} className="block p-3 rounded bg-gray-800 hover:bg-gray-700 cursor-pointer">
@@ -88,6 +92,13 @@ export function BenchmarkFormModal({
                               {" "}depth=[{p.config.depth.join(",")}]
                               {" "}concurrency=[{p.config.concurrency.join(",")}]
                               {" "}runs={p.config.runs}
+                            </div>
+                          )}
+                          {p.kind === "accuracy" && "tasks" in p.config && (
+                            <div className="text-xs text-gray-500 mt-1">
+                              tasks={p.config.tasks.join(",")}
+                              {" "}limit={p.config.limit ?? "full"}
+                              {" "}max_gen_toks={p.config.maxGenToks}
                             </div>
                           )}
                         </div>

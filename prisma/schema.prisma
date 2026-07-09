@@ -290,7 +290,7 @@ model BenchmarkRun {
   // Which benchmark family this run belongs to. "throughput" = llama-benchy
   // (pp/tg/depth/concurrency -> TPS/TTFR rows). "tool-eval" = tool-eval-bench
   // (tool-calling accuracy -> a score + per-category breakdown).
-  kind            String   @default("throughput") // throughput | tool-eval
+  kind            String   @default("throughput") // throughput | tool-eval | accuracy
   error           String?
   startedAt       DateTime?
   completedAt     DateTime?
@@ -311,6 +311,12 @@ model BenchmarkRun {
   toolEvalTotalPoints    Int?    // scores.total_points
   toolEvalMaxPoints      Int?    // scores.max_points
   toolEvalSafetyWarnings String? // JSON-encoded string[] (safety_warnings)
+  // --- accuracy / lm-eval headline + breakdown (null on other kinds) ---
+  // Primary metric ×100 (0–100), surfaced in list/compare like meanTps/toolEvalScore.
+  accuracyScore   Float?
+  // JSON-encoded AccuracyMetricInput[]: per-task/per-subtask breakdown for the
+  // detail page (analogous to the JSON-string toolEvalSafetyWarnings).
+  accuracyMetrics String?
   createdAt       DateTime @default(now())
   deployment      Deployment? @relation(fields: [deploymentId], references: [id], onDelete: SetNull)
   results         BenchmarkResult[]
