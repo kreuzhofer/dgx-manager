@@ -23,6 +23,13 @@ describe("stripReasoning", () => {
     expect(stripReasoning("<THINK>x</THINK>done")).toBe("done");
   });
 
+  it("does not corrupt the answer when non-ASCII precedes a template-injected close tag", () => {
+    // "İ".toLowerCase() expands to 2 code units, so a toLowerCase()-based index
+    // lookup applied back to the original string is off by one and truncates
+    // the answer. Regression test for that corruption.
+    expect(stripReasoning("noiseİ</think>answer")).toBe("answer");
+  });
+
   // Invariant: output never contains a think tag, for any input.
   test.prop([fc.string()])("output never contains a think tag", (s) => {
     const out = stripReasoning(s).toLowerCase();
@@ -32,6 +39,20 @@ describe("stripReasoning", () => {
 
   // Invariant: idempotent.
   test.prop([fc.string()])("is idempotent", (s) => {
+    expect(stripReasoning(stripReasoning(s))).toBe(stripReasoning(s));
+  });
+
+  // Invariant: output never contains a think tag, over full-Unicode input
+  // (including characters whose toLowerCase() is not length-preserving, e.g.
+  // "İ"). Regression coverage for the index-corruption bug above.
+  test.prop([fc.fullUnicodeString()])("output never contains a think tag (full Unicode)", (s) => {
+    const out = stripReasoning(s).toLowerCase();
+    expect(out.includes("<think>")).toBe(false);
+    expect(out.includes("</think>")).toBe(false);
+  });
+
+  // Invariant: idempotent, over full-Unicode input.
+  test.prop([fc.fullUnicodeString()])("is idempotent (full Unicode)", (s) => {
     expect(stripReasoning(stripReasoning(s))).toBe(stripReasoning(s));
   });
 

@@ -8,15 +8,17 @@ export function stripReasoning(content: string): string {
   if (!content) return content;
   let out = content.replace(/<think>[\s\S]*?<\/think>/gi, "");
 
-  const lower = out.toLowerCase();
-  const lastClose = lower.lastIndexOf("</think>");
-  if (lastClose !== -1) {
-    out = out.slice(lastClose + "</think>".length);
+  // Template-injected open tag: only </think> is echoed → keep text after the last close.
+  const closes = [...out.matchAll(/<\/think>/gi)];
+  if (closes.length > 0) {
+    const last = closes[closes.length - 1];
+    out = out.slice(last.index! + last[0].length);
   }
 
-  const openIdx = out.toLowerCase().indexOf("<think>");
-  if (openIdx !== -1) {
-    out = out.slice(0, openIdx);
+  // Truncated mid-think: an open tag with no close → no answer was produced.
+  const open = out.match(/<think>/i);
+  if (open && open.index !== undefined) {
+    out = out.slice(0, open.index);
   }
   return out.trim();
 }
