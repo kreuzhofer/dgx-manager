@@ -14,11 +14,10 @@ defaults:
   port: 8000
   host: 0.0.0.0
   tensor_parallel: 4
-  # vLLM's startup guard requires free >= gmu*total. On GB10 the three vLLM
-  # processes (api server + EngineCore + Worker) reserve ~7 GiB of the unified
-  # pool in CUDA contexts that /proc never shows, so CUDA reports ~102 GiB free
-  # of 121.63 even on an idle node. 0.90 (=109.46 GiB) therefore fails the guard.
-  gpu_memory_utilization: 0.83   # <= 0.838 ceiling set by the startup guard
+  # vLLM's startup guard requires free >= gmu*total. That check only clears once
+  # vm.min_free_kbytes is small (node-prep now sets 1 GiB, not 5) — the kernel
+  # withholds min_free from CUDA too. Confirmed serving at 0.90 on 2026-07-09.
+  gpu_memory_utilization: 0.90
   max_model_len: 262144   # 256K via DCP2
   served_model_name: glm-5.2
 env:
