@@ -31,7 +31,7 @@ describe("startReasoningProxy", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ model: "m", messages: [] }),
     });
-    const body = await resp.json();
+    const body = (await resp.json()) as { choices: { message: { content: string } }[] };
     expect(body.choices[0].message.content).toBe("Answer: B");
 
     await proxy.close();
@@ -46,7 +46,7 @@ describe("startReasoningProxy", () => {
     const proxy = await startReasoningProxy(upstream.v1Url);
 
     const resp = await fetch(`${proxy.url}/models`);
-    const body = await resp.json();
+    const body = (await resp.json()) as { data: { id: string }[] };
     expect(body.data[0].id).toBe("served-model");
 
     await proxy.close();

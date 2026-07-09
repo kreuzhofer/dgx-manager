@@ -79,7 +79,10 @@ export function startReasoningProxy(targetV1Url: string): Promise<ReasoningProxy
       const { port } = server.address() as AddressInfo;
       resolve({
         url: `http://127.0.0.1:${port}/v1`,
-        close: () => new Promise((r) => server.close(() => r())),
+        close: () => new Promise((r) => {
+          server.close(() => r());
+          server.closeAllConnections?.();
+        }),
       });
     });
   });
