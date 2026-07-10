@@ -43,7 +43,9 @@ export function parseSystemctlShow(
   if (active && ACTIVE_STATES.has(active)) return { kind: "active" };
   if (active && FINISHED_STATES.has(active)) {
     const raw = props.get("ExecMainStatus");
-    const code = raw === undefined ? NaN : Number(raw);
+    // Number("") and Number("   ") are 0, not NaN — a truncated/empty ExecMainStatus
+    // must be "unknown", never a false exited(0). Require an explicit integer string.
+    const code = raw !== undefined && /^-?\d+$/.test(raw) ? Number(raw) : NaN;
     if (!Number.isInteger(code)) {
       return { kind: "unknown", reason: `ActiveState=${active} but ExecMainStatus=${raw}` };
     }

@@ -26,6 +26,14 @@ describe("parseSystemctlShow", () => {
     expect(r).toEqual({ kind: "exited", code: 1 });
   });
 
+  it.each([
+    ["empty ExecMainStatus", "LoadState=loaded\nActiveState=failed\nExecMainStatus=\n"],
+    ["whitespace ExecMainStatus", "LoadState=loaded\nActiveState=failed\nExecMainStatus=   \n"],
+    ["hex ExecMainStatus", "LoadState=loaded\nActiveState=failed\nExecMainStatus=0x1\n"],
+  ])("treats a finished unit with a non-integer ExecMainStatus (%s) as unknown, not a false exit", (_label, stdout) => {
+    expect(parseSystemctlShow(0, stdout, "").kind).toBe("unknown");
+  });
+
   it("reports a not-found unit as missing", () => {
     const r = parseSystemctlShow(0, show({ LoadState: "not-found", ActiveState: "inactive", ExecMainStatus: "0" }), "");
     expect(r).toEqual({ kind: "missing" });
@@ -47,17 +55,24 @@ describe("parseSystemctlShow", () => {
    * running benchmark complete and parse a result file that does not exist; the
    * mirror-image mistake (`exited(1)`) killed four healthy GLM-5.2 ranks.
    */
-  test.prop([
-    fc.oneof(fc.constant(null), fc.integer({ min: -1, max: 3 })),
-    fc.string(),
-    fc.string(),
-  ])("never reports exited without an explicit ExecMainStatus", (status, stdout, stderr) => {
-    const r = parseSystemctlShow(status, stdout, stderr);
-    if (r.kind === "exited") {
-      expect(stdout).toMatch(/ExecMainStatus=\d+/);
-      expect(stdout).toMatch(/ActiveState=(inactive|failed|deactivating)/);
-    }
-  });
+  // Build systemctl-show-shaped output so the property actually exercises the
+  // exited/finished branch, instead of bare fc.string() which almost never does.
+  const activeStateArb = fc.constantFrom("active", "activating", "inactive", "failed", "deactivating", "reloading");
+  const execStatusArb = fc.oneof(
+    fc.integer({ min: -1, max: 255 }).map(String), // valid integer
+    fc.constantFrom("", "   ", "0x1", "n/a", "abc"), // non-integer / empty
+  );
+  test.prop([fc.constantFrom("loaded", "not-found"), activeStateArb, execStatusArb])(
+    "never reports exited without an explicit integer ExecMainStatus",
+    (load, active, exec) => {
+      const stdout = `LoadState=${load}\nActiveState=${active}\nExecMainStatus=${exec}\n`;
+      const r = parseSystemctlShow(0, stdout, "");
+      if (r.kind === "exited") {
+        // exited is only legal when ExecMainStatus is an explicit integer string
+        expect(/^-?\d+$/.test(exec)).toBe(true);
+      }
+    },
+  );
 
   /** Invariant: `missing` requires LoadState to positively say not-found. */
   test.prop([fc.string()])("never reports missing without LoadState=not-found", (stdout) => {
