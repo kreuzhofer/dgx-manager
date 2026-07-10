@@ -17,7 +17,11 @@ defaults:
   # vLLM's startup guard requires free >= gmu*total. That check only clears once
   # vm.min_free_kbytes is small (node-prep now sets 1 GiB, not 5) — the kernel
   # withholds min_free from CUDA too. Confirmed serving at 0.90 on 2026-07-09.
-  gpu_memory_utilization: 0.90
+  # 0.88, not 0.90. The guard needs free >= gmu*121.63. At 0.90 that is 109.46 GiB and a
+  # measured startup free of 109.41 GiB FAILED by 0.05 GiB (2026-07-10) — 0.90 clears by
+  # under 100 MiB, i.e. by luck. gmu does not cap allocation here (KV is pinned via
+  # --kv-cache-memory-bytes), so lowering it is free margin.
+  gpu_memory_utilization: 0.88
   # 256K is the CEILING for this config, measured 2026-07-09 by bisection:
   #   KV 7.00 GiB (262144) -> serves.
   #   KV 7.75 GiB (294912) -> kernel OOM-kill of VLLM::Worker_TP during capture.
@@ -29,6 +33,16 @@ defaults:
   # both cost decode speed. Do not raise max_model_len without also raising
   # --kv-cache-memory-bytes below; KV must hold >= max_model_len tokens
   # (7.00 GiB = 274,560 tokens, i.e. only 4.7% slack over 262,144).
+  # DCP4 EXPERIMENT (2026-07-10): --decode-context-parallel-size 4, everything else
+  # identical (KV 7.00 GiB, gmu 0.88). Guard cleared, weights loaded, all 10 torch.compile
+  # steps finished — then the KERNEL OOM-killed VLLM::Worker_TP during cudagraph capture,
+  # before vLLM ever printed "GPU KV cache size". So DCP4 costs MORE peak memory than DCP2
+  # here and the KV multiplier was never measured. It is NOT simply a drop-in for more context.
+  # Promising retry, untested: DCP shards KV, so DCP4 needs ~half the KV bytes for the same
+  # window. Try --kv-cache-memory-bytes ~4 GiB (frees ~3 GiB for capture) and see whether the
+  # reported token capacity still exceeds 274,560. Also note the running image reports
+  # VLLM_DCP_SHARD_DRAFT / VLLM_DCP_GLOBAL_TOPK as "Unknown vLLM environment variable", so the
+  # MTP drafter's KV is likely NOT sharded — a real suspect for the extra capture memory.
   max_model_len: 262144   # 256K via DCP2
   served_model_name: glm-5.2
 env:
