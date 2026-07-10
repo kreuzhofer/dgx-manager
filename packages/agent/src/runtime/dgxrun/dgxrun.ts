@@ -212,11 +212,10 @@ export function inspectDgxrunContainer(deploymentId: string): DgxrunContainerSta
     : null;
 }
 
-/** True when the rank container is running. */
-export function isDgxrunRunning(deploymentId: string): boolean {
-  const c = inspectDgxrunContainer(deploymentId);
-  return c != null && c.state === "running";
-}
+// NOTE: there is deliberately no `isDgxrunRunning(): boolean` helper. Reducing an
+// inspect to a boolean loses the absent/unknown distinction, and callers then read
+// "docker didn't answer" as "the container is gone" — which tore down a healthy
+// four-rank cluster. Use inspectDgxrunContainerResult() and handle `unknown`.
 
 /** Read-only snapshot of the FULL container log (all restarts). */
 export function snapshotDgxrunLogs(deploymentId: string): string {

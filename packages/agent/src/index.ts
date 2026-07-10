@@ -14,7 +14,8 @@ import { classifyDeadContainer, reconcileDeployStatus } from "./runtime/deploy-s
 import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe, resolveHfHome } from "./runtime/sparkrun.js";
 import { buildInventory, deleteCachedRepo, type RepoKind } from "./runtime/hf-cache.js";
 import { checkSparkrunDeployments, sparkrunRunningStatus, parseLoadingShards } from "./runtime/sparkrun-metrics.js";
-import { launchDgxrun, stopDgxrun, isDgxrunRunning } from "./runtime/dgxrun/dgxrun.js";
+import { launchDgxrun, stopDgxrun, inspectDgxrunContainerResult } from "./runtime/dgxrun/dgxrun.js";
+import { reconcileDgxrunAction } from "./runtime/dgxrun/dgxrun-reconcile.js";
 import { deployCancels, launchExitAction } from "./runtime/deploy-cancel.js";
 import { checkDgxrunDeployments } from "./runtime/dgxrun/dgxrun-metrics.js";
 import type { DgxrunRecipe } from "./runtime/dgxrun/dgxrun-args.js";
@@ -243,26 +244,32 @@ function connect() {
     if (dgxrunDeployments.length > 0) {
       console.log(`Reconciling ${dgxrunDeployments.length} dgxrun deployment(s)`);
       for (const d of dgxrunDeployments) {
-        const running = isDgxrunRunning(d.deploymentId);
-        const isHead = (d.rank ?? 0) === 0;
-        const status = running ? (isHead ? "starting" : "running") : "failed";
-        console.log(`[reconcile-dgxrun] ${d.deploymentId}: rank=${d.rank ?? 0} running=${running} → ${status}`);
-        // Head reports "starting" and lets the health loop promote to running
-        // once /metrics binds; workers report "running" on container liveness.
-        // Any rank that isn't running is a failure the manager must act on.
-        if (!running || !isHead) {
-          sendMsg("agent:deployment:status", {
-            deploymentId: d.deploymentId,
-            status,
-            port: running && isHead ? d.port : undefined,
-            error: running ? undefined : "dgxrun rank not running after agent restart",
-          });
-        } else {
+        const rank = d.rank ?? 0;
+        // NB: inspectDgxrunContainerResult, not isDgxrunRunning — the latter
+        // collapses an inconclusive `docker inspect` into "not running", and one
+        // `failed` rank tears down the whole cluster. An agent roll is exactly
+        // when the daemon is busiest. See runtime/dgxrun/dgxrun-reconcile.ts.
+        const action = reconcileDgxrunAction(inspectDgxrunContainerResult(d.deploymentId), {
+          rank, port: d.port,
+        });
+        console.log(`[reconcile-dgxrun] ${d.deploymentId}: rank=${rank} → ${action.kind}`);
+        if (action.kind === "skip") {
+          console.warn(`[reconcile-dgxrun] ${d.deploymentId}: ${action.reason}; leaving to the health loop`);
+          continue;
+        }
+        if (action.kind === "phase") {
           // Head is running but may still be loading/compiling. On a WS reconnect
           // reportPhase drops this "starting" if we've already advanced past it,
           // so the dashboard doesn't snap back to "starting" mid-load.
           reportPhase(d.deploymentId, "starting");
+          continue;
         }
+        sendMsg("agent:deployment:status", {
+          deploymentId: d.deploymentId,
+          status: action.status,
+          port: action.port,
+          error: action.error,
+        });
       }
     }
 
