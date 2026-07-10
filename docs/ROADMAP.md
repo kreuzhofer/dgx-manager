@@ -42,6 +42,15 @@ The server APIs for these features are complete, but the dashboard pages are sti
 
 - [ ] `GET /api/deployments/:id` — single-deployment lookup. Today only the list endpoint exists, so any script/UI watching a specific deployment has to fetch the whole list and filter client-side. Should return the same shape as a list entry (deployment + node + model + clusterNodes), 404 if not found. Trivial to add (mirror finetune.ts pattern), high value for monitoring scripts and the deployment-detail page.
 
+### Known manager bugs (found 2026-07-09/10, all still open)
+
+Each of these cost real debugging time during the GLM-5.2 incident. Ordered by blast radius.
+
+- [ ] **`DELETE /api/deployments/:id` right after `POST` races the launch → orphaned containers.** The agent can process `cmd:undeploy` *before* the queued `cmd:deploy`; undeploy finds nothing, then the launch proceeds. The record walks `removing → stopped` while ~100 GB/node of containers keep running. Symptom: a later deploy is rejected with `Not enough VRAM … only 26 GB free of 122 GB — held by: @dgxrun/…` while `/api/deployments` shows nothing active. A second `DELETE` does **not** help — `routes/deployments.ts` treats `stopped` as terminal. *Fix: tombstone undeployed deploymentIds in the agent so a late `cmd:deploy` for that id is refused; and/or defer undeploy until the deployment leaves `pending`.* Workaround: never stop a dgxrun deploy before it reaches `loading`; clean up with `docker rm -f dgxrun_<deploymentId>` via `POST /api/nodes/:id/exec`.
+- [ ] **`POST /api/deployments/:id/restart` ignores the dgxrun runner** and falls back to sparkrun → `Sparkrun launch failed with exit code 1`, launching nothing. Restart is effectively broken for every dgxrun deploy.
+- [ ] **A vLLM startup failure never reaches `deployment.error`.** The `ValueError: Free memory on device …` that killed two deploys left `status=stopped, error=null` — a failed deploy is indistinguishable from a stopped one in the UI. This is why the incident began as a mystery instead of a stack trace. *Fix: persist the captured container log's first error line on the failure path (the agent already has `firstErrorLine`).*
+- [ ] **`maxoutmem: true` is a silent no-op for dgxrun recipes.** It *is* attempted, then swallowed by the `.catch()` in `routes/deployments.ts` because `maxOutMemoryForDeploy` resolves the recipe from the head node's **sparkrun** cache, where a dgxrun recipe never lives. Harmless today (gdm is already `inactive`), but the flag lies. *Fix: honour it for dgxrun, or drop it from the dgxrun recipes.*
+
 ### Deploy config override UI
 
 - [ ] Deploy form (and fine-tune `Deploy` action) should expose recipe-level config overrides — at minimum `max_model_len`, `gpu_memory_utilization`, `tensor_parallel`. Today recipe defaults (or worse, `recipe.yaml`'s `deploy.max_model_len`) win silently and the only way to override is hand-crafting a `POST /api/finetune/:id/deploy` body with `config: {maxModelLen: …}`. Concrete miss case: the qwen3.6-27b training recipe has `deploy.max_model_len: 4096` as a smoke-test leftover, which shadows `inference.yaml`/`inference-fp8.yaml`'s 128000 default, so every fine-tune deploy lands at 4k context without warning. UI should: (a) show the effective value with provenance (recipe.yaml > inference[ -fp8].yaml > server default), (b) let the user override per-deploy, (c) persist the override on the deployment record so restart preserves it.
@@ -201,6 +210,8 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 - **Heartbeat-staleness sweep ✅** — `AgentHub` runs a 10 s sweep marking any `online` node whose `lastSeen` age > 30 s as `offline` + dropping it from the live agents map + SSE; self-heals to `online` (and re-asserts the agents-map entry, so it stays *reachable*) on the next heartbeat, with a one-time recovery broadcast. A dead/half-open node now reads offline in ~40 s instead of 76 min (the old close-only path). Merged + deployed + **live-verified on `.39`** via a SIGSTOP stall (0 WS close events, `[staleness] marked offline` fired). Fixes memory `node-status-online-unreliable`. Spec: `docs/superpowers/specs/2026-07-05-heartbeat-staleness-sweep-design.md`
 - [ ] **Remaining:** declarative node provision/restore (netplan/fabric/NFS/docker-`default-shm-size`/sudoers) — fixes factory-reset-restore-by-hand
 - [ ] Fast-follow: the recovery self-heal broadcasts `node:status:online`, but the *offline→online* transition still isn't reflected on the Nodes page for a node that recovered via a fresh `register` before its next metric (harmless redundant path); low priority
+- **✅ Agent 0.5.770 (2026-07-10) — the agent was killing healthy deploys.** Blocking `spawnSync("sync; … drop_caches")` on a 500 ms loop parked the event loop for 1–7 s under NFS weight load (missed heartbeats + starved docker probe), and `inspectDgxrunContainer()` collapsed a **timed-out** `docker inspect` into "container gone", tearing down all four ranks. Fixed: async drop + in-flight guard; pure `classifyDockerInspect() → found | absent | unknown` (`unknown` skips the tick, `absent` must repeat). 16 tests.
+- [ ] **Residual: the heartbeat wedge is reduced, not eliminated.** `inspectDgxrunContainer`, `snapshotDgxrunLogs` and `captureCrashedDgxrunLogs` are still `spawnSync`, so `[staleness] … marked offline` still fires during weight load — the deploy now *survives* it because `unknown ≠ absent`. Make the docker inspect async (`checkDgxrunDeployments` is already `async`). **Rule: never call `spawnSync` on the agent's hot path** — third incident of this class.
 
 ### Later phases (specs TBD)
 
@@ -245,18 +256,24 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
   - [ ] Next: re-run 26B LoRA with `target_modules` restricted to attention only (`q_proj,k_proj,v_proj,o_proj`) and scoped to `model.language_model.layers` (exclude vision tower). Cheap sanity check — if ≥ base, confirms the dense-MLP adaptation drove the regression via MoE-routing drift.
   - [ ] After that: write a proper MoE-aware LoRA dispatch — wrap `experts.gate_up_proj` / `experts.down_proj` as per-expert low-rank deltas on the fused 3D tensors, leave `router.*` frozen. Standard PEFT can't do this out of the box.
   - [ ] Harden `fix_clippable_linear_keys()` in `lib/patches.py:119-172` — the "copy any missing key from base" fallback is fragile for MoE; make it log *every* overwrite so a silent expert-key mismatch can't hide.
-- [ ] **Accuracy-eval benchmark kind (lm-eval-harness) as a first-class GUI option** — add an `accuracy`/`lm-eval` `kind` alongside the shipped `throughput` + `tool-eval` kinds (same `POST /api/benchmarks`, deploy dropdown, and `/benchmarks/compare` view). Design decided 2026-07-06:
-  - **Curate, don't wrap all of lm-eval** (4–6 presets): **IFEval** (instruction adherence — the *known* expert-prune failure mode), **MMLU-Pro** + **GPQA** (knowledge tail), **Aider-polyglot** / LiveCodeBench (agentic coding), + the existing SQL eval.
-  - **API-mode** against the deployment `/v1` endpoint (scoring is rule-based, no GPU) — run via lm-eval **dispatched to a node** like fine-tune jobs, to keep torch/heavy deps off the Pi; stream results back. (Pi *can* run it — `python3-venv` installed 2026-07-06 — but node-dispatch is the scalable path.)
-  - **Reasoning-model handling:** per-preset toggle to strip/parse GLM-5.2 thinking tokens (scores tank otherwise).
-  - **Result schema:** reuse the `toolEvalCategories` JSON pattern for per-task/per-subject breakdown — no new columns.
-  - **Motivation:** makes the manual "deploy A → eval → deploy B → eval → compare" one-click + dashboard-comparable — directly serves the **15pct-vs-unpruned** prune-quality decision (in progress) and **fine-tune regression** checks. Validate manually first (IFEval on the 15pct), then spec→plan→build.
+- ✅ **Accuracy-eval benchmark kind (lm-eval-harness)** — shipped 2026-07-09 (merged `2bb7730`). Third `kind` next to `throughput` + `tool-eval`: same `POST /api/benchmarks`, Benchmark button, detail card, list pill/score, and compare bars. **12 presets** (quick + full) across **IFEval, MMLU-Pro, GPQA-Diamond, GSM8K, BBH, MATH-hard** — the HF Open LLM Leaderboard v2 set minus MuSR. 903 tests green; server + dashboard `tsc` clean. Spec/plan: `docs/superpowers/{specs,plans}/2026-07-09-accuracy-eval-lm-eval-benchmark*`.
+  - **Deviated from the design, deliberately:** runs **server-side via `uvx`** (like the other two kinds), not node-dispatched — the GPU nodes are reserved for model hosting; a dedicated benchmark host is the future path. Lineup grew from 4 to 6 (added BBH + MATH-hard).
+  - **Reasoning handling:** an ephemeral localhost **strip proxy** removes `<think>…</think>` before lm-eval scores, so *stock* lm-eval tasks run unmodified (chosen over forking each task's filter pipeline).
+  - **Data model:** two nullable columns (`accuracyScore`, `accuracyMetrics` JSON) on `BenchmarkRun` — no new table.
+  - Final whole-branch review caught two real bugs the per-task reviews could not: the parser hardcoded lm-eval's `,none` metric filter (would have killed `gsm8k_cot`/`mmlu_pro`/`gpqa` on arrival), and a parse failure on a zero-exit run reported the nonsensical "lm-eval exited with code 0".
+  - [ ] **NOT YET VALIDATED END-TO-END.** No real `uvx lm_eval` run has happened. Start with `acc-ifeval-quick` against the live GLM-5.2. Task ids + primary metrics are pinned by intent, not by observation.
+  - [ ] Pin `LM_EVAL_VERSION` — it is **not plumbed into `docker-compose.yml`**, so lm-eval floats to latest PyPI, which is exactly where task-id drift bites.
+  - [ ] Warm the `uvx` cache for lm-eval in `Dockerfile.server` (only llama-benchy is warmed today, so the first run downloads torch before evaluating anything).
+  - [ ] GPQA needs `HF_TOKEN` with access to the gated `Idavidrein/gpqa` (the env var *is* already plumbed through compose).
+  - [ ] **Move the lm-eval runner to `agenthost` (192.168.44.15).** Today `orchestrator.ts` spawns `uvx lm_eval` on the Pi. The endpoint URL is already a parameter and `LM_EVAL_SPEC` is already env-pinned, so this is a *deployment* change, not a rewrite. Open design question: SSH-exec to `.15`, or onboard it as an **agent-only node** (amd64 bundle 0.5.770 exists) and drive it through the capability registry / `POST /api/nodes/:id/exec` — the latter reuses auth, audit and streaming, and avoids a second remote-exec path. It must **not** become a model-hosting node.
+- [ ] **SWE-bench (and other agentic-coding evals) on `agenthost`** — the natural next eval after lm-eval, and the one that actually measures GLM-5.2 as a coding daily driver. Prereqs: **install Docker on `.15`** (absent today; SWE-bench runs each task in a container) and budget disk (874 GB free is enough). Would slot in as a fourth benchmark `kind`, or as its own runner reusing the `BenchmarkRun` row + `accuracyMetrics` JSON breakdown.
 - [ ] Track quality metrics over time with per-model and per-run history
 - [ ] Compare base models against fine-tuned variants in the dashboard (currently only per-job chart)
 - [ ] Dashboard views for benchmark results and regression detection
 - [ ] Upload fine-tuned models to HuggingFace (requires HF_TOKEN)
 - [ ] Multimodal fine-tuning: Gemma 4 as a visual judge (image+text training)
-- [ ] **External-facing write-up (blog / LinkedIn post)** — distinct from `docs/gemma4-fine-tuning-on-dgx-spark.md` (which is the deep technical reference). Audience-focused "so what" framing: what the DGX Manager project says about the author's skills to a hiring manager / CTO / practitioner network. Pending audience + platform decisions.
+- [ ] **External-facing write-up (blog / LinkedIn post)** — distinct from `docs/gemma4-fine-tuning-on-dgx-spark.md` (the deep technical reference). Audience-focused "so what" framing: what DGX Manager says about the author's skills to a hiring manager / CTO / practitioner network. Pending audience + platform decisions.
+  - **Raw material is now captured** in `docs/glm-5.2-256k-to-320k.md` — the 2026-07-09/10 incident-to-320K journey, with every number measured: the reboot-armed `min_free_kbytes` landmine, the reserve that prevented the capture it was meant to protect, `"unknown" ≠ "absent"` tearing down four healthy ranks, DCP4 as a red herring, and the one-line `max-num-batched-tokens` fix found by reading a traceback instead of rebuilding an image. Section 6 ("What generalises") is the spine of the post.
 
 ## Phase 6: User Auth & Multi-Tenancy
 
@@ -277,6 +294,19 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 - Unified dashboard with cluster switching
 
 ---
+
+## Recent work (July 9–10, 2026)
+
+- **✅ Accuracy-eval benchmark kind (lm-eval) shipped + merged** — 12 presets, ephemeral `<think>`-strip proxy, two nullable columns, dashboard card/pill/compare. Built spec→plan→subagent-executed with a review gate per task; the final whole-branch review caught two bugs the per-task reviews structurally could not see. **Never yet run against a live endpoint** — that's the top follow-up.
+- **🔥 GLM-5.2 broke overnight, then came back better — full story in `docs/glm-5.2-256k-to-320k.md`.**
+  - **Root cause of the outage:** `vm.min_free_kbytes` was set to 5 GiB in `scripts/dgx-node-prep.sh` + `/etc/sysctl.d/90-dgx-dcp.conf` on 07-07 to "guarantee capture headroom", but the *running* value had been 1 GiB. **The 07-09 17:50 reboot applied the drop-in for the first time**, arming two walls at once: vLLM's startup guard (`free ≥ gmu×total`, where ~7 GiB of the unified pool sits in CUDA contexts `/proc` never shows), and `torch.compile`'s 5.00 GiB capture allocation — which failed with 9.71 GiB "free" because the kernel withholds `min_free` from vLLM too. **It missed by 0.29 GiB.** The reserve added to protect the capture is what prevented it. Fixed → **1 GiB**, verified to survive a reboot.
+  - **`gmu` 0.90 → 0.88.** A later probe caught startup free at **109.41 GiB vs the 109.46 required** — 0.90 was clearing the guard by under 100 MiB, i.e. by luck. `gmu` does not cap allocation here (KV is pinned; `GPU KV cache size` is identical at 0.88 and 0.90), so it's free margin.
+  - **Agent 0.5.770 — the manager was killing its own healthy deploys.** `dgxrun-dropcache.ts` ran blocking `spawnSync("sync; …drop_caches")` every 500 ms; under a ~400 GB NFS weight stream a single `sync` takes seconds (kernel log: 1–7 s gaps), parking the agent's event loop → missed heartbeats **and** a starved `docker inspect`. `inspectDgxrunContainer()` then returned `null` on *any* non-zero exit, and `dgxrun-metrics.ts` read `null` as "container gone" → tore down all four ranks of a deploy that had just finished `torch.compile`. Fixed: async drop + in-flight guard; pure `classifyDockerInspect()` → `found | absent | unknown` (`unknown` skips, `absent` must repeat). 16 tests. **Residual:** the wedge is reduced, not gone — inspect/log-snapshot are still `spawnSync`, so staleness still fires during load; the deploy now *survives* it.
+  - **✅ 320K context shipped at DCP2, no image rebuild, no speed traded.** The limiter was never the KV cache or the DCP degree: the b12x sparse-indexer **prewarm** allocates `fold_values+fold_indices = (max_num_batched_tokens × total_slices, topk) × 8 B`, i.e. **workspace ∝ mnbt × max_model_len** — exactly 5.00 GiB @ 2048×256K and 10.00 GiB @ 2048×512K (both observed; the model predicts 5.10). **`--max-num-batched-tokens 2048 → 1024`** halves it, paying for KV 7.00 → 8.50 GiB (333,440 tokens). Validated with a **300,036-token needle prompt** (92% of the window, `finish=stop`, 893 tok/s prefill). Cost ~11% prefill on short prompts; **decode unchanged** (23.8 vs 22.3–23.2). cudagraph FULL + MTP drafter retained.
+  - **DCP4 is a dead end on this image** — 3 attempts all OOM-killed on the same prewarm *before* KV allocation, so the multiplier was never measured; `vllm.envs` in `b12x-dcp:probe` contains **no `VLLM_DCP_*` at all (hence the long-standing `Unknown vLLM environment variable: VLLM_DCP_SHARD_DRAFT` warnings). A planned image rebuild for `VLLM_TRITON_MLA_SPARSE_*_CHUNK_SIZE` was abandoned on inspection: those knobs bound the **Triton sparse MLA** backend, not the `B12X_MLA_SPARSE` one the recipe runs.
+  - **Reboot ≠ fix.** Fresh-boot free is 116.0–116.4 GiB, *lower* than the 117.5 GiB after a clean teardown. Fragmentation was never the problem.
+  - **Two recipes now, one trade.** `@dgxrun/glm-5.2-quanttrio-unpruned-dcp2` stays the **SPEED** daily driver (256K, mnbt 2048, prefill ~698 tok/s); `…-dcp2-320k` is the **CONTEXT** sibling (320K, mnbt 1024, prefill 619.5 tok/s). Decode identical. Everything else — DCP2, tp=4, cudagraph FULL, MTP drafter — is the same in both.
+- **🖥️ New eval host `agenthost` @ `192.168.44.15`** — x86_64, 16 cores, 31 GiB RAM, 874 GB free, **no GPU**, passwordless SSH + sudo. Docker **absent**; Python 3.12.3. This is the dedicated benchmark host the accuracy-eval design anticipated (the runner location was deliberately left un-hardwired). GPU nodes stay reserved for model hosting.
 
 ## Recent work (July 7–8, 2026)
 
@@ -350,7 +380,7 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 | Consumer-GPU Recipes | — | — | — | — |
 | Datasets | ✅ | — | ✅ | ✅ |
 | Evaluation | ✅ | — | ✅ (benchmarks) / partial (eval) | ✅ |
-| Benchmarks | ✅ | — | ✅ | ✅ |
+| Benchmarks (throughput / tool-eval / **accuracy**) | ✅ | — | ✅ | ✅ |
 | Resume from Checkpoint | ✅ | ✅ | ✅ | ✅ |
 | Auth & RBAC | — | — | — | — |
 | Multi-Cluster | — | — | — | — |
@@ -361,4 +391,4 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 
 ---
 
-*Last updated: July 8, 2026*
+*Last updated: July 10, 2026*
