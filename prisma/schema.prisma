@@ -24,6 +24,10 @@ model Node {
   ollamaInstalled Boolean          @default(false)
   agentVersion    String?
   arch            String?
+  // What may be DEPLOYED here. "gpu" (default) hosts anything; "eval" is a
+  // benchmark runner (agenthost) that may serve Ollama but never vLLM/dgxrun.
+  // See nodes/role.ts. Enforced server-side in POST /api/deployments.
+  role            String           @default("gpu")
   // Deliberate power intent, distinct from agent-connection `status`.
   // Values: "on" | "rebooting" | "off" | "waking" | "asleep".
   powerState      String           @default("on")
