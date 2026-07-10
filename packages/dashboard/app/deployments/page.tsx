@@ -813,7 +813,10 @@ export default function DeploymentsPage() {
   // default head — the auto-pick (slice 0..N) and the default head (first
   // selected) both take the first entry. Free VRAM is still shown per node.
   const clusterCandidates = nodes
-    .filter((n) => n.status === "online")
+    // Cluster (multi-node TP/PP) deploys are always vLLM/dgxrun — never ollama —
+    // so an eval node (benchmark runner, no CUDA VRAM) must never be a candidate.
+    // The server rejects it with 400 anyway; this keeps it out of the picker.
+    .filter((n) => n.status === "online" && n.role !== "eval")
     .slice()
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
 
