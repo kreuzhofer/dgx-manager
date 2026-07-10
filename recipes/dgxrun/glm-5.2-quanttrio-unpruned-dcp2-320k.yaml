@@ -1,5 +1,6 @@
-# @dgxrun/glm-5.2-quanttrio-unpruned-dcp2 — UNPRUNED QuantTrio Int4-Int8Mix + DCP2, 256K.
-# SPEED variant (the daily driver). For 320K see @dgxrun/glm-5.2-quanttrio-unpruned-dcp2-320k.
+# @dgxrun/glm-5.2-quanttrio-unpruned-dcp2-320k — UNPRUNED QuantTrio Int4-Int8Mix + DCP2, 320K.
+# CONTEXT variant. Sibling of @dgxrun/glm-5.2-quanttrio-unpruned-dcp2 (256K, faster prefill).
+# Pick this one when the window matters more than prefill throughput.
 # The community reference model (best quality). SELF-DRAFTS (built-in MTP head) — no separate
 # drafter, so the spec-config points at the model itself. Config mirrors CosmicRaisins
 # recipes/glm52-quanttrio-unpruned-dcp2-320k.yaml, at 256K / gmu 0.89 (conservative after the
@@ -34,21 +35,23 @@ defaults:
   # both cost decode speed. Do not raise max_model_len without also raising
   # --kv-cache-memory-bytes below; KV must hold >= max_model_len tokens
   # (7.00 GiB = 274,560 tokens, i.e. only 4.7% slack over 262,144).
-  # ================== 256K vs 320K: the one knob that decides it ==================
-  # The context limiter is NOT the KV cache and NOT the DCP degree. The b12x sparse-indexer
-  # PREWARM (sparse_attn_indexer.py::_prewarm_b12x_paged_indexer_prefill ->
+  # ===================== WHY 320K, AND WHAT THE LIMIT REALLY IS =====================
+  # Measured 2026-07-10. The limiter is NOT the KV cache and NOT the DCP degree. The b12x
+  # sparse-indexer PREWARM (sparse_attn_indexer.py::_prewarm_b12x_paged_indexer_prefill ->
   # b12x/attention/indexer/paged.py::index_topk_fp8) allocates
-  #     fold_values + fold_indices = (profile_q_rows x total_slices, topk) x 8 bytes
+  #     fold_values + fold_indices = (profile_q_rows * total_slices, topk) x 8 bytes
   # with profile_q_rows = max_num_batched_tokens and total_slices proportional to max_model_len.
   # So the transient workspace is proportional to  max_num_batched_tokens x max_model_len :
-  #     mnbt 2048 @ 256K -> 5.00 GiB (observed)    mnbt 2048 @ 512K -> 10.00 GiB (observed)
-  # THIS recipe keeps mnbt 2048 for prefill throughput and therefore stays at 256K.
-  # Measured 2026-07-10 (pp=8192, c=1): prefill ~698 tok/s, decode 22.3-23.2 tok/s.
-  # Want 320K? Deploy the -320k sibling: it halves mnbt to 1024 (workspace 6.25 -> 3.12 GiB),
-  # which pays for KV 7.00 -> 8.50 GiB. Cost there: prefill 619.5 tok/s (-11%); decode unchanged.
-  # Do NOT raise max_model_len here without also halving mnbt AND raising kv-cache-memory-bytes.
-  # ==============================================================================
-  max_model_len: 262144   # 256K via DCP2
+  #     mnbt 2048 @ 256K -> 5.00 GiB   (observed exactly)
+  #     mnbt 2048 @ 512K -> 10.00 GiB  (observed exactly)
+  # That single allocation OOM-killed 288K, 320K and every DCP4 attempt. Halving mnbt to 1024
+  # halves it (3.12 GiB @ 320K), which more than pays for the +1.50 GiB of extra KV.
+  # Cost: ~11% prefill on short prompts (619 vs 698 tok/s @ pp=8192); decode UNCHANGED (23.8).
+  # Validated: a 300,036-token prompt (92% of the window) retrieved a buried needle, finish=stop,
+  # 893 tok/s prefill. Steady free while serving: ~1.7-1.9 GiB (was ~2.9 GiB at 256K).
+  # To go further, halve mnbt again (512 -> 1.56 GiB @ 320K) or raise KV; each step costs prefill.
+  # =================================================================================
+  max_model_len: 327680   # 320K via DCP2
   served_model_name: glm-5.2
 env:
   HF_HOME: /cache/huggingface
@@ -86,4 +89,4 @@ env:
   NCCL_DEBUG: WARN
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
 command: |
-  vllm serve {model} --served-model-name {served_model_name} --host {host} --port {port} --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --enable-prefix-caching --speculative-config '{"model":"CosmicRaisins/GLM-5.2-MTP-INT4-aligned","method":"mtp","draft_attention_backend":"B12X_MLA_SPARSE","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' -tp {tensor_parallel} --pipeline-parallel-size 1 --decode-context-parallel-size 2 --dcp-kv-cache-interleave-size 1 --attention-backend B12X_MLA_SPARSE --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}' --max-model-len {max_model_len} --max-num-seqs 1 --max-num-batched-tokens 2048 --gpu-memory-utilization {gpu_memory_utilization} --kv-cache-dtype fp8_ds_mla --kv-cache-memory-bytes 7516192768 --async-scheduling --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"FULL","max_cudagraph_capture_size":10}'
+  vllm serve {model} --served-model-name {served_model_name} --host {host} --port {port} --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --enable-prefix-caching --speculative-config '{"model":"CosmicRaisins/GLM-5.2-MTP-INT4-aligned","method":"mtp","draft_attention_backend":"B12X_MLA_SPARSE","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' -tp {tensor_parallel} --pipeline-parallel-size 1 --decode-context-parallel-size 2 --dcp-kv-cache-interleave-size 1 --attention-backend B12X_MLA_SPARSE --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}' --max-model-len {max_model_len} --max-num-seqs 1 --max-num-batched-tokens 1024 --gpu-memory-utilization {gpu_memory_utilization} --kv-cache-dtype fp8_ds_mla --kv-cache-memory-bytes 9126805504 --async-scheduling --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"FULL","max_cudagraph_capture_size":10}'
