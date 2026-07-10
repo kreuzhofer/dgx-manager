@@ -163,9 +163,9 @@ export function makeJobCaps(depsIn?: Partial<JobCapDeps>): Capability[] {
       // `exit` LAST, so its presence proves the job finished and result.json is final.
       if (parsed.kind === "missing" || parsed.kind === "active") {
         const raw = d.readTextFile(p.exit);
-        if (raw !== null && raw.trim() !== "") {
-          const code = Number(raw.trim());
-          if (Number.isInteger(code)) return { kind: "exited", code } satisfies JobStatus;
+        const t = raw?.trim();
+        if (t && /^-?\d+$/.test(t)) {
+          return { kind: "exited", code: Number(t) } satisfies JobStatus;
         }
       }
       return parsed;

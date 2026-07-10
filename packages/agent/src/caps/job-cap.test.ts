@@ -35,6 +35,9 @@ function deps(over: Partial<JobCapDeps> = {}): JobCapDeps {
     mkdir: vi.fn(),
     readFileSlice: vi.fn(() => ({ chunk: "", size: 0 })),
     readTextFile: vi.fn(() => null),
+    now: () => 1_000_000_000_000,
+    listJobDirs: () => [],
+    removeDir: vi.fn(),
     ...over,
   };
 }
@@ -156,6 +159,18 @@ describe("job.cancel", () => {
       makeJobCaps(deps({ spawnFn: fakeSpawn({ code: 5, stderr: "not loaded" }, []) })),
     );
     await expect(caps["job.cancel"].handle({ runId: "r1" }, noopCtx)).resolves.toEqual({ stopped: true });
+  });
+});
+
+describe("job.result", () => {
+  it("returns the raw result file contents", async () => {
+    const caps = capsByName(makeJobCaps(deps({ readTextFile: () => '{"x":1}' })));
+    await expect(caps["job.result"].handle({ runId: "r1" }, noopCtx)).resolves.toEqual({ raw: '{"x":1}' });
+  });
+
+  it("returns null when the result file is absent", async () => {
+    const caps = capsByName(makeJobCaps(deps({ readTextFile: () => null })));
+    await expect(caps["job.result"].handle({ runId: "r1" }, noopCtx)).resolves.toEqual({ raw: null });
   });
 });
 
