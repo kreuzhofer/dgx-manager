@@ -11,7 +11,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execSync } from "child_process";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import express from "express";
@@ -20,6 +20,10 @@ import request from "supertest";
 const TMP_DIR = mkdtempSync(join(tmpdir(), "dgx-dgxrun-test-"));
 const DB_PATH = join(TMP_DIR, "test.db");
 process.env.DATABASE_URL = `file:${DB_PATH}`;
+// Point the in-repo dgxrun catalog at a fixture dir. Read at module import time by
+// dgxrun-catalog.ts, so it must be set before the router below is imported.
+const RECIPES_DIR = join(TMP_DIR, "recipes");
+process.env.DGXRUN_RECIPES_DIR = RECIPES_DIR;
 
 let prisma: typeof import("../../prisma.js").prisma;
 let deploymentsRouter: typeof import("../../routes/deployments.js").deploymentsRouter;
@@ -71,11 +75,15 @@ function makeStubHub() {
   return { hub, sent };
 }
 
-function makeApp(hub: unknown) {
+type SshCall = { host: string; cmd: string };
+function makeApp(hub: unknown, sshCalls?: SshCall[]) {
   const app = express();
   app.use(express.json());
   app.set("agentHub", hub);
-  app.set("sshExec", async () => ({ code: 0, stdout: "false", stderr: "" }));
+  app.set("sshExec", async (host: string, cmd: string) => {
+    sshCalls?.push({ host, cmd });
+    return { code: 0, stdout: "false", stderr: "" };
+  });
   app.use("/api/deployments", deploymentsRouter);
   return app;
 }
@@ -249,5 +257,63 @@ describe("deployment.error round-trips to the API", () => {
     });
     const res = await request(makeApp(makeStubHub().hub)).get("/api/deployments");
     expect(res.body[0].error).toBeNull();
+  });
+});
+
+describe("maxoutmem on a dgxrun deploy", () => {
+  // The flag lives in recipe YAML the manager reads itself. The old code only
+  // probed the head node's sparkrun registry cache — where dgxrun recipes never
+  // are — so `maxoutmem: true` reclaimed nothing, silently (2026-07-10).
+  it("reclaims memory on every node when the recipe asks for it", async () => {
+    await wipeAll();
+    const ids = await seedCluster(2);
+    const sshCalls: SshCall[] = [];
+
+    const res = await request(makeApp(makeStubHub().hub, sshCalls))
+      .post("/api/deployments")
+      .send({ nodeIds: ids, recipeYaml: `maxoutmem: true\n${DGXRUN_YAML}` });
+
+    expect(res.status).toBe(201);
+    // One reclaim per node, and never the sparkrun-cache flag probe.
+    expect(sshCalls).toHaveLength(2);
+    for (const c of sshCalls) expect(c.cmd).not.toContain("registries/");
+    expect(sshCalls.every((c) => c.cmd.includes("drop_caches"))).toBe(true);
+  });
+
+  it("does not touch the nodes when the recipe omits the flag", async () => {
+    await wipeAll();
+    const ids = await seedCluster(2);
+    const sshCalls: SshCall[] = [];
+
+    const res = await request(makeApp(makeStubHub().hub, sshCalls))
+      .post("/api/deployments")
+      .send({ nodeIds: ids, recipeYaml: DGXRUN_YAML });
+
+    expect(res.status).toBe(201);
+    expect(sshCalls).toHaveLength(0);
+  });
+});
+
+describe("maxoutmem via an @dgxrun/ recipeFile", () => {
+  // The case that actually bit us: recipes/dgxrun/glm-5.2-*.yaml declare
+  // `maxoutmem: true`, but the old probe searched the head node's sparkrun
+  // registry cache — which holds no dgxrun recipes — and quietly got `false`.
+  it("reads the flag from the manager's own catalog, not the head node's cache", async () => {
+    await wipeAll();
+    const ids = await seedCluster(2);
+    mkdirSync(RECIPES_DIR, { recursive: true });
+    writeFileSync(join(RECIPES_DIR, "glm-probe.yaml"), `maxoutmem: true\n${DGXRUN_YAML}`);
+
+    const sshCalls: SshCall[] = [];
+    const res = await request(makeApp(makeStubHub().hub, sshCalls))
+      .post("/api/deployments")
+      .send({ nodeIds: ids, recipeFile: "@dgxrun/glm-probe" });
+
+    expect(res.status).toBe(201);
+    expect(sshCalls).toHaveLength(2);
+    for (const c of sshCalls) {
+      expect(c.cmd).not.toContain("registries/"); // never probes sparkrun's cache
+      expect(c.cmd).toContain("drop_caches");
+    }
   });
 });

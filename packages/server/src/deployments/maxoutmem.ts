@@ -73,6 +73,24 @@ export function parseMaxOutMem(stdout: string): boolean {
   return stdout.trim() === "true";
 }
 
+/** Matches a `maxoutmem: true` line. Mirrors the grep in {@link readMaxOutMemCmd}. */
+const MAXOUTMEM_LINE = /^[ \t]*maxoutmem[ \t]*:[ \t]*true[ \t]*$/im;
+
+/**
+ * Pure: read the `maxoutmem` flag straight from recipe YAML the manager already
+ * holds — dgxrun (`@dgxrun/…`), inline `recipeYaml`, or a `recipePath` on shared
+ * storage.
+ *
+ * `readMaxOutMemCmd` can only find recipes in the head node's *sparkrun registry
+ * cache*. dgxrun recipes live in this repo's `recipes/dgxrun/`, never in that
+ * cache, so the probe's `find` matched nothing and printed `false` — the
+ * `maxoutmem: true` in our GLM recipes was silently ignored, and the unified
+ * memory it was meant to reclaim had to be freed by hand (2026-07-10).
+ */
+export function parseMaxOutMemYaml(text: string): boolean {
+  return MAXOUTMEM_LINE.test(text);
+}
+
 /**
  * Pure: best-effort shell to free memory on ONE node. Must never hang or
  * hard-fail — `sudo -n` avoids a password prompt, every step is `|| true`,
@@ -125,6 +143,13 @@ export type MaxOutMemoryOpts = {
     options?: { timeout?: number },
   ) => Promise<SshExecResult>;
   log?: (msg: string) => void;
+  /**
+   * Pre-resolved `maxoutmem` flag. Pass it whenever the manager can read the
+   * recipe YAML itself (see {@link parseMaxOutMemYaml}) — the SSH probe is then
+   * skipped entirely, which is the only way the flag works for dgxrun recipes.
+   * Omit to fall back to reading it from the head node's sparkrun cache.
+   */
+  enabled?: boolean;
 };
 
 export type MaxOutMemoryResult = {
@@ -147,19 +172,28 @@ export async function maxOutMemoryForDeploy(
   const { recipeRef, headIp, nodeIps, sshExec } = opts;
   const log = opts.log ?? (() => {});
 
-  // Read the flag from the head node's recipe cache. The head node is
-  // reachable during a real deploy, so this is fast; the short cap just
-  // bounds the worst case so a flaky node can't stall the deploy.
-  let enabled = false;
-  try {
-    const read = await sshExec(headIp, readMaxOutMemCmd(recipeRef), { timeout: 8_000 });
-    enabled = parseMaxOutMem(read.stdout);
-  } catch (e) {
-    log(`[maxoutmem] flag read failed (${(e as Error).message}); skipping reclaim`);
-    return { applied: false, perNode: [] };
+  // Prefer the caller's pre-resolved flag (manager read the YAML itself). Only
+  // fall back to the head node's sparkrun recipe cache when we have nothing —
+  // that probe cannot see dgxrun recipes. The head node is reachable during a
+  // real deploy, so this is fast; the short cap just bounds the worst case so a
+  // flaky node can't stall the deploy.
+  let enabled: boolean;
+  if (opts.enabled !== undefined) {
+    enabled = opts.enabled;
+  } else {
+    try {
+      const read = await sshExec(headIp, readMaxOutMemCmd(recipeRef), { timeout: 8_000 });
+      enabled = parseMaxOutMem(read.stdout);
+    } catch (e) {
+      log(`[maxoutmem] flag read failed (${(e as Error).message}); skipping reclaim`);
+      return { applied: false, perNode: [] };
+    }
   }
 
   if (!enabled) {
+    // Observable, per Principle 3: a recipe that meant to reclaim memory and
+    // didn't must say so, rather than look identical to one that never asked.
+    log(`[maxoutmem] ${recipeRef} does not request maxoutmem; skipping reclaim`);
     return { applied: false, perNode: [] };
   }
 

@@ -6,7 +6,9 @@ import {
   reclaimMemoryCmd,
   parseReclaimDetail,
   maxOutMemoryForDeploy,
+  parseMaxOutMemYaml,
 } from "./maxoutmem.js";
+import { test, fc } from "@fast-check/vitest";
 
 describe("parseRecipeRef", () => {
   it("parses a valid @registry/basename ref", () => {
@@ -189,5 +191,74 @@ describe("maxOutMemoryForDeploy", () => {
     expect(res.applied).toBe(true);
     expect(res.perNode[0].ok).toBe(false);
     expect(res.perNode[0].detail).toBe("boom");
+  });
+});
+
+
+describe("parseMaxOutMemYaml", () => {
+  // The manager already holds the YAML for dgxrun / inline / recipePath deploys.
+  // Reading the flag locally is what makes `maxoutmem: true` in recipes/dgxrun/*.yaml
+  // actually take effect — the SSH probe looks in sparkrun's registry cache, where
+  // dgxrun recipes do not exist, so it always answered `false` (2026-07-10).
+  it.each([
+    ["maxoutmem: true", true],
+    ["  maxoutmem:   true  ", true],
+    ["MaxOutMem: TRUE", true],
+    ["maxoutmem: false", false],
+    ["# maxoutmem: true", false],
+    ["notmaxoutmem: true", false],
+    ["maxoutmem: truthy", false],
+    ["", false],
+  ])("parses %j as %s", (yaml, expected) => {
+    expect(parseMaxOutMemYaml(yaml)).toBe(expected);
+  });
+
+  it("finds the flag among other keys", () => {
+    const yaml = ["runner: dgxrun", "maxoutmem: true", "gpu_memory_utilization: 0.88"].join("\n");
+    expect(parseMaxOutMemYaml(yaml)).toBe(true);
+  });
+
+  // Invariant: agrees with the shell grep in readMaxOutMemCmd on the key line.
+  test.prop([fc.constantFrom("maxoutmem", "MAXOUTMEM", "MaxOutMem"), fc.constantFrom("", " ", "  ")])(
+    "accepts any case and leading whitespace",
+    (key, indent) => {
+      expect(parseMaxOutMemYaml(`${indent}${key}: true`)).toBe(true);
+    },
+  );
+});
+
+describe("maxOutMemoryForDeploy with a pre-resolved flag", () => {
+  const sshOk = vi.fn(async () => ({ code: 0, stdout: "freed", stderr: "" }));
+
+  it("skips the SSH flag probe entirely when `enabled` is passed", async () => {
+    const ssh = vi.fn(async (_host: string, _cmd: string) => ({ code: 0, stdout: "freed", stderr: "" }));
+    const r = await maxOutMemoryForDeploy({
+      recipeRef: "@dgxrun/glm-5.2", headIp: "10.0.0.1", nodeIps: ["10.0.0.1"],
+      sshExec: ssh, enabled: true,
+    });
+    expect(r.applied).toBe(true);
+    // one call: the reclaim. Never the flag read.
+    expect(ssh).toHaveBeenCalledTimes(1);
+    expect(ssh.mock.calls[0][1]).not.toContain("maxoutmem");
+  });
+
+  it("does no SSH at all when the pre-resolved flag is false", async () => {
+    const ssh = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
+    const r = await maxOutMemoryForDeploy({
+      recipeRef: "@dgxrun/glm-5.2", headIp: "10.0.0.1", nodeIps: ["10.0.0.1"],
+      sshExec: ssh, enabled: false,
+    });
+    expect(r.applied).toBe(false);
+    expect(ssh).not.toHaveBeenCalled();
+  });
+
+  // Principle 3: no silent no-op. Skipping must be observable.
+  it("logs why it skipped instead of returning silently", async () => {
+    const lines: string[] = [];
+    await maxOutMemoryForDeploy({
+      recipeRef: "@dgxrun/glm-5.2", headIp: "10.0.0.1", nodeIps: ["10.0.0.1"],
+      sshExec: sshOk, enabled: false, log: (m) => lines.push(m),
+    });
+    expect(lines.join("\n")).toMatch(/maxoutmem/i);
   });
 });

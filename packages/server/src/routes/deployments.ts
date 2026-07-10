@@ -14,7 +14,7 @@ import { resolveRecipePath } from "../deployments/recipe-path.js";
 import { validateInlineRecipe, parseInlineRecipeModel } from "../deployments/recipe-inline.js";
 import { deploymentRepoKeys } from "../hf-cache/grouping.js";
 import { recordRepoDeployment } from "../hf-cache/repo-deployment.js";
-import { maxOutMemoryForDeploy } from "../deployments/maxoutmem.js";
+import { maxOutMemoryForDeploy, parseMaxOutMemYaml } from "../deployments/maxoutmem.js";
 import { sshExec } from "../ssh/executor.js";
 import { resolveDgxrunRecipe, type DgxrunResolvedRecipe } from "../deployments/dgxrun-recipe.js";
 import { buildDgxrunDeploys, DEFAULT_MASTER_PORT } from "../deployments/dgxrun-dispatch.js";
@@ -244,6 +244,10 @@ deploymentsRouter.post("/", async (req, res) => {
   // in the agent's sparkrun cache, not on the manager) and falls through
   // unchanged to the sparkrun path.
   let dgxrunRecipe: DgxrunResolvedRecipe | undefined;
+  // `maxoutmem` read from YAML the manager holds. undefined => we never saw the
+  // recipe here, so the reclaim step falls back to probing the head node's
+  // sparkrun cache. See the maxoutmem block further down.
+  let maxOutMemFlag: boolean | undefined;
   if (!isOllama) {
     let recipeText: string | undefined;
     if (inlineRecipeYaml) {
@@ -258,6 +262,7 @@ deploymentsRouter.post("/", async (req, res) => {
       }
     }
     if (recipeText) {
+      maxOutMemFlag = parseMaxOutMemYaml(recipeText);
       const resolved = resolveDgxrunRecipe(recipeText);
       if (resolved.isDgxrun && resolved.error) {
         return res.status(400).json({ error: resolved.error });
@@ -550,7 +555,10 @@ deploymentsRouter.post("/", async (req, res) => {
   // `maxoutmem: true`, free unified memory on the target nodes (stop gdm, etc.)
   // BEFORE sparkrun launches the vLLM containers, so the headroom is available
   // at KV-cache init. Best-effort: never blocks or fails the deploy.
-  if (!isOllama && recipeFile) {
+  // recipeFile OR a flag we already read locally (inline / recipePath deploys have
+  // no recipeFile, but we did see their YAML — so `enabled` is always defined there
+  // and the SSH probe below is never reached with a missing ref).
+  if (!isOllama && (recipeFile || maxOutMemFlag === true)) {
     let targetIps: string[] = [];
     if (isCluster) {
       targetIps = clusterNodeIps ?? [];
@@ -563,10 +571,14 @@ deploymentsRouter.post("/", async (req, res) => {
       // stay hermetic — no live SSH to fake node IPs.
       const sshExecFn = (req.app.get("sshExec") as typeof sshExec) ?? sshExec;
       await maxOutMemoryForDeploy({
-        recipeRef: recipeFile,
+        recipeRef: recipeFile ?? "<inline recipe>",
         headIp: targetIps[0],
         nodeIps: targetIps,
         sshExec: sshExecFn,
+        // Read above from the recipe YAML when the manager could see it (dgxrun,
+        // inline, recipePath). undefined for plain sparkrun refs, whose YAML only
+        // exists in the head node's cache — those still take the SSH probe.
+        enabled: maxOutMemFlag,
         log: (m) => console.log(m),
       }).catch((e) => {
         console.error("[maxoutmem] skipped:", e);
