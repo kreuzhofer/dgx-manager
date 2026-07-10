@@ -46,6 +46,8 @@ interface Node {
   arch?: "amd64" | "arm64";
   vramTotal?: number;
   metrics?: { vramUsed: number }[];
+  /** "gpu" (default) or "eval". An eval node may only host ollama. */
+  role?: string;
 }
 
 interface ClusterNodeInfo {
@@ -773,8 +775,8 @@ export default function DeploymentsPage() {
       setGpuMem(String(recipe.defaults.gpu_memory_utilization ?? ""));
     }
     // Auto-select first idle node for solo recipes
-    if (!recipe?.cluster_only && idleNodes.length > 0) {
-      setSelectedNode(idleNodes[0].id);
+    if (!recipe?.cluster_only && selectableNodes.length > 0) {
+      setSelectedNode(selectableNodes[0].id);
     }
   };
 
@@ -845,9 +847,16 @@ export default function DeploymentsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedClusterNodes]);
 
+  // An eval node (agenthost) may only host ollama. Server-side admission is the
+  // real boundary (routes/deployments.ts); this just keeps it out of the picker
+  // so nobody selects a node that will be refused.
+  const selectableNodes = idleNodes.filter(
+    (n) => runtimeMode === "ollama" || n.role !== "eval",
+  );
+
   const canDeploy = needsCluster
     ? selectedClusterNodes.size === requiredNodes
-    : !!selectedNode || idleNodes.length >= 1;
+    : !!selectedNode || selectableNodes.length >= 1;
 
   if (loading) return <p className="text-gray-400">Loading...</p>;
 
@@ -1045,12 +1054,12 @@ export default function DeploymentsPage() {
                 onChange={(e) => setSelectedNode(e.target.value)}
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
               >
-                {idleNodes.length === 0 ? (
+                {selectableNodes.length === 0 ? (
                   <option value="">No idle nodes available</option>
                 ) : (
                   <>
                     {!selectedNode && <option value="">Select a node...</option>}
-                    {idleNodes.map((n) => (
+                    {selectableNodes.map((n) => (
                       <option key={n.id} value={n.id}>
                         {n.name} ({n.ipAddress})
                       </option>
