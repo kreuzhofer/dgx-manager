@@ -1,4 +1,4 @@
-# @dgxrun/glm-5.2-quanttrio-unpruned-dcp2 — UNPRUNED QuantTrio Int4-Int8Mix + DCP2, 256K.
+# @dgxrun/glm-5.2-quanttrio-unpruned-dcp2 — UNPRUNED QuantTrio Int4-Int8Mix + DCP2, 320K.
 # The community reference model (best quality). SELF-DRAFTS (built-in MTP head) — no separate
 # drafter, so the spec-config points at the model itself. Config mirrors CosmicRaisins
 # recipes/glm52-quanttrio-unpruned-dcp2-320k.yaml, at 256K / gmu 0.89 (conservative after the
@@ -33,27 +33,23 @@ defaults:
   # both cost decode speed. Do not raise max_model_len without also raising
   # --kv-cache-memory-bytes below; KV must hold >= max_model_len tokens
   # (7.00 GiB = 274,560 tokens, i.e. only 4.7% slack over 262,144).
-  # ============================ WHY 256K IS THE CEILING ============================
-  # Measured 2026-07-10. The limiter is NOT the KV cache and NOT the DCP degree.
-  # The sparse-MLA attention workspace is a single allocation of ~20.0 KB/token:
-  #     max_model_len 262144 -> "Tried to allocate  5.00 GiB"
-  #     max_model_len 524288 -> "Tried to allocate 10.00 GiB"
-  # It scales linearly with context and is unaffected by --kv-cache-memory-bytes or
-  # by --decode-context-parallel-size. It is what OOM-killed every attempt past 256K:
-  #     288K (KV 7.75)                  -> kernel OOM at capture
-  #     320K (KV 8.50)                  -> kernel OOM at capture
-  #     DCP4 + KV 7.00 + FULL   @256K   -> kernel OOM at capture
-  #     DCP4 + KV 4.00 + FULL   @256K   -> free fell to 1.8 GB, rank stalled, head fork-starved
-  #     DCP4 + KV 7.00 + PIECEWISE @512K-> torch OOM: tried to allocate 10.00 GiB
-  # ROADMAP.md:296 names the config-only lever (VLLM_TRITON_MLA_SPARSE_{QUERY,TOPK}_CHUNK_SIZE),
-  # but THIS IMAGE DOES NOT HAVE IT. `vllm.envs` in vllm-node-tf5-glm52-b12x-dcp:probe exposes only
-  # VLLM_SPARSE_INDEXER_MAX_LOGITS_MB and VLLM_USE_B12X_SPARSE_INDEXER — no chunk-size knobs, and no
-  # VLLM_DCP_* at all (hence "Unknown vLLM environment variable: VLLM_DCP_SHARD_DRAFT"). Those knobs
-  # live in the older b12x image used by @dgxrun/glm-5.2-awq-15pct-144k.
-  # => Going past 256K needs an IMAGE REBUILD (sparse chunk knobs + real DCP env plumbing),
-  #    not a recipe change. Do not re-litigate this with recipe tweaks.
-  # ==============================================================================
-  max_model_len: 262144   # 256K via DCP2
+  # ===================== WHY 320K, AND WHAT THE LIMIT REALLY IS =====================
+  # Measured 2026-07-10. The limiter is NOT the KV cache and NOT the DCP degree. The b12x
+  # sparse-indexer PREWARM (sparse_attn_indexer.py::_prewarm_b12x_paged_indexer_prefill ->
+  # b12x/attention/indexer/paged.py::index_topk_fp8) allocates
+  #     fold_values + fold_indices = (profile_q_rows * total_slices, topk) x 8 bytes
+  # with profile_q_rows = max_num_batched_tokens and total_slices proportional to max_model_len.
+  # So the transient workspace is proportional to  max_num_batched_tokens x max_model_len :
+  #     mnbt 2048 @ 256K -> 5.00 GiB   (observed exactly)
+  #     mnbt 2048 @ 512K -> 10.00 GiB  (observed exactly)
+  # That single allocation OOM-killed 288K, 320K and every DCP4 attempt. Halving mnbt to 1024
+  # halves it (3.12 GiB @ 320K), which more than pays for the +1.50 GiB of extra KV.
+  # Cost: ~11% prefill on short prompts (619 vs 698 tok/s @ pp=8192); decode UNCHANGED (23.8).
+  # Validated: a 300,036-token prompt (92% of the window) retrieved a buried needle, finish=stop,
+  # 893 tok/s prefill. Steady free while serving: ~1.7-1.9 GiB (was ~2.9 GiB at 256K).
+  # To go further, halve mnbt again (512 -> 1.56 GiB @ 320K) or raise KV; each step costs prefill.
+  # =================================================================================
+  max_model_len: 327680   # 320K via DCP2
   served_model_name: glm-5.2
 env:
   HF_HOME: /cache/huggingface
@@ -91,4 +87,4 @@ env:
   NCCL_DEBUG: WARN
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
 command: |
-  vllm serve {model} --served-model-name {served_model_name} --host {host} --port {port} --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --enable-prefix-caching --speculative-config '{"model":"CosmicRaisins/GLM-5.2-MTP-INT4-aligned","method":"mtp","draft_attention_backend":"B12X_MLA_SPARSE","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' -tp {tensor_parallel} --pipeline-parallel-size 1 --decode-context-parallel-size 2 --dcp-kv-cache-interleave-size 1 --attention-backend B12X_MLA_SPARSE --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}' --max-model-len {max_model_len} --max-num-seqs 1 --max-num-batched-tokens 2048 --gpu-memory-utilization {gpu_memory_utilization} --kv-cache-dtype fp8_ds_mla --kv-cache-memory-bytes 7516192768 --async-scheduling --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"FULL","max_cudagraph_capture_size":10}'
+  vllm serve {model} --served-model-name {served_model_name} --host {host} --port {port} --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --enable-prefix-caching --speculative-config '{"model":"CosmicRaisins/GLM-5.2-MTP-INT4-aligned","method":"mtp","draft_attention_backend":"B12X_MLA_SPARSE","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' -tp {tensor_parallel} --pipeline-parallel-size 1 --decode-context-parallel-size 2 --dcp-kv-cache-interleave-size 1 --attention-backend B12X_MLA_SPARSE --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}' --max-model-len {max_model_len} --max-num-seqs 1 --max-num-batched-tokens 1024 --gpu-memory-utilization {gpu_memory_utilization} --kv-cache-dtype fp8_ds_mla --kv-cache-memory-bytes 9126805504 --async-scheduling --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"FULL","max_cudagraph_capture_size":10}'
