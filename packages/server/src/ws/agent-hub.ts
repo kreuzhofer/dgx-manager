@@ -12,6 +12,7 @@ import { normalizeMac } from "../nodes/power.js";
 import { coordinatedDgxrunTeardown } from "../deployments/dgxrun-teardown.js";
 import { CapClient } from "../caps/cap-client.js";
 import { selectStaleNodes } from "./staleness.js";
+import { deploymentStatusUpdate, isTerminalDeploymentStatus } from "./deployment-status.js";
 
 const STALE_THRESHOLD_MS = 30_000;
 const SWEEP_INTERVAL_MS = 10_000;
@@ -580,21 +581,19 @@ export class AgentHub {
           case "agent:deployment:status": {
             const { deploymentId, status, port, error, deleteAfter, vramActual } = msg.payload;
             try {
-              const isStopped = ["stopped", "failed", "evicted"].includes(status as string);
+              // deploymentStatusUpdate persists `error` (so a failed deploy is not
+              // indistinguishable from a stopped one) without letting the teardown
+              // tick that follows a crash erase it. See ws/deployment-status.ts.
               await prisma.deployment.update({
                 where: { id: deploymentId },
-                data: {
-                  status,
-                  port: port ?? undefined,
-                  vramActual: isStopped ? 0 : (vramActual ? Number(vramActual) : undefined),
-                },
+                data: deploymentStatusUpdate({ status, port, error, vramActual }),
               });
             } catch {
               // Deployment may already be deleted
               break;
             }
             if (error) console.error(`Deployment ${deploymentId} error: ${error}`);
-            const isStopped = ["stopped", "failed", "evicted"].includes(status as string);
+            const isStopped = isTerminalDeploymentStatus(status as string);
             sseBroadcast({ type: "deployment:status", payload: { deploymentId, status, port, error, vramActual: isStopped ? 0 : (vramActual ? Number(vramActual) : undefined) } });
 
             // Update cluster node statuses when deployment changes

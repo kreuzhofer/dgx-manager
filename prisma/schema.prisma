@@ -85,6 +85,12 @@ model Deployment {
   nodeId       String
   modelId      String
   status       String                 @default("pending")
+  // Why the deployment last failed. Written from the agent's `agent:deployment:status`
+  // report (which carries the container's first error line). Cleared when the
+  // deployment reaches `running`. Without this a failed deploy was indistinguishable
+  // from a stopped one in the UI — a vLLM startup ValueError surfaced as a silent
+  // `stopped` (2026-07-09).
+  error        String?
   port         Int?
   config       String?
   clusterMode  Boolean                @default(false)

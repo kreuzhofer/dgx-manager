@@ -125,6 +125,26 @@ describe("POST /api/deployments/:id/restart — arbitrary variant ids", () => {
     expect(saved.artifactVariant).toBe("int4");
   });
 
+  // A restart reuses the deployment row. If the previous failure reason survived,
+  // the dashboard would show a stale "Failure reason" banner over a deployment that
+  // is in fact loading fine.
+  it("clears the previous failure reason on restart", async () => {
+    const dep = await seedFineTuneDeployment();
+    await prisma.deployment.update({
+      where: { id: dep.id },
+      data: { error: "ValueError: Free memory on device cuda:0" },
+    });
+
+    const res = await request(makeApp(makeStubHub().hub))
+      .post(`/api/deployments/${dep.id}/restart`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    const after = await prisma.deployment.findUnique({ where: { id: dep.id } });
+    expect(after!.status).toBe("restarting");
+    expect(after!.error).toBeNull();
+  });
+
   it("rejects malformed variant slugs with 400", async () => {
     const dep = await seedFineTuneDeployment();
     const { hub } = makeStubHub();

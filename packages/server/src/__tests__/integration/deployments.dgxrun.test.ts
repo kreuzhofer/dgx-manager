@@ -216,3 +216,38 @@ describe("dgxrun coordinated teardown", () => {
     expect(sent).toHaveLength(0);
   });
 });
+
+describe("deployment.error round-trips to the API", () => {
+  // The regression: a vLLM startup ValueError reached the dashboard as an
+  // indistinguishable `stopped` because Deployment had no `error` column at all.
+  it("GET /api/deployments exposes a persisted failure reason", async () => {
+    await wipeAll();
+    await prisma.node.create({
+      data: { id: "n-err", name: "n-err", ipAddress: "192.168.44.51", vramTotal: 122_502, status: "online" },
+    });
+    const model = await prisma.model.create({ data: { name: "m-err", runtime: "vllm" } });
+    const reason = "ValueError: Free memory on device cuda:0 (103.51/121.63 GiB) on startup";
+    await prisma.deployment.create({
+      data: { nodeId: "n-err", modelId: model.id, status: "failed", error: reason },
+    });
+
+    const res = await request(makeApp(makeStubHub().hub)).get("/api/deployments");
+    expect(res.status).toBe(200);
+    const row = res.body.find((d: { status: string }) => d.status === "failed");
+    expect(row).toBeDefined();
+    expect(row.error).toBe(reason);
+  });
+
+  it("a healthy deployment reports no error", async () => {
+    await wipeAll();
+    await prisma.node.create({
+      data: { id: "n-ok", name: "n-ok", ipAddress: "192.168.44.52", vramTotal: 122_502, status: "online" },
+    });
+    const model = await prisma.model.create({ data: { name: "m-ok", runtime: "vllm" } });
+    await prisma.deployment.create({
+      data: { nodeId: "n-ok", modelId: model.id, status: "running", port: 8000 },
+    });
+    const res = await request(makeApp(makeStubHub().hub)).get("/api/deployments");
+    expect(res.body[0].error).toBeNull();
+  });
+});

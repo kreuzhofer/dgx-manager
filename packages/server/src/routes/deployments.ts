@@ -940,6 +940,10 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
     where: { id: req.params.id },
     data: {
       status: "restarting",
+      // A restart reuses this row, so the reason the *previous* attempt died must go
+      // with it — otherwise the dashboard shows a stale failure banner over a
+      // deployment that is loading fine. It is re-populated if this attempt also fails.
+      error: null,
       // Persist the merged config so future restarts (or the agent's own
       // reconciliation) see the updated overrides.
       ...(Object.keys(overrides).length > 0 ? { config: JSON.stringify(config) } : {}),

@@ -61,6 +61,9 @@ interface Deployment {
   nodeId: string;
   modelId: string;
   status: string;
+  /** Why the deployment last failed — the container's first error line, persisted
+   *  server-side so it survives a page reload (a live-only [ERROR] log line did not). */
+  error: string | null;
   port: number | null;
   config: string | null;
   clusterMode: boolean;
@@ -318,7 +321,16 @@ export default function DeploymentsPage() {
       setDeployments((prev) =>
         prev.map((d) =>
           d.id === deploymentId
-            ? { ...d, status, port: port ?? d.port, vramActual: vramActual ?? d.vramActual }
+            ? {
+                ...d,
+                status,
+                port: port ?? d.port,
+                vramActual: vramActual ?? d.vramActual,
+                // Same rule the server persists by (ws/deployment-status.ts): keep a
+                // reported error, clear it only once the deployment is healthy again.
+                // The teardown tick after a crash carries no error and must not erase it.
+                error: error || (status === "running" ? null : d.error),
+              }
             : d
         )
       );
@@ -1509,6 +1521,20 @@ export default function DeploymentsPage() {
                     )}
                   </div>
                 </div>
+
+                {/* Why it died. Without this a vLLM startup ValueError was
+                    indistinguishable from a clean stop. Terminal statuses only — while
+                    a deployment is restarting or loading, the last run's error is stale. */}
+                {d.error && ["failed", "stopped", "evicted"].includes(d.status) && (
+                  <div className="mt-3 rounded border border-red-900/50 bg-red-950/30 px-3 py-2">
+                    <p className="text-[10px] uppercase tracking-wide text-red-400/80 mb-0.5">
+                      Failure reason
+                    </p>
+                    <p className="text-xs text-red-200 font-mono break-words whitespace-pre-wrap">
+                      {d.error}
+                    </p>
+                  </div>
+                )}
 
                 {/* Edit-and-restart form — appears when "Edit & restart" is clicked
                     on a stopped/failed/evicted deployment. Pre-filled from the
