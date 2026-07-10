@@ -806,6 +806,9 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
       // failing them with "No recipeFile specified".
       model: { include: { finetuneJob: true } },
       clusterNodes: { include: { node: true } },
+      // The dgxrun re-fan needs the head's management IP even for a solo deploy,
+      // which has no ClusterNode rows.
+      node: true,
     },
   });
   if (!deployment) return res.status(404).json({ error: "Deployment not found" });
@@ -890,6 +893,88 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
       });
     }
   }
+  // dgxrun deployments must be re-fanned per rank, exactly as the POST path does.
+  // Falling through to the single-node cmd:deploy below drives the agent's
+  // sparkrun branch, which launches nothing ("Sparkrun launch failed with exit
+  // code 1") — restart was broken for every dgxrun deploy until 2026-07-10.
+  // Everything needed is already persisted in config by the original POST.
+  const isDgxrunRestart = config.runner === "dgxrun";
+  if (isDgxrunRestart && !isOllamaRestart) {
+    const recipe = config.dgxrunRecipe as DgxrunResolvedRecipe | undefined;
+    if (!recipe) {
+      return res.status(409).json({
+        error: "dgxrun deployment has no persisted dgxrunRecipe in its config; delete and re-create it",
+      });
+    }
+    // Rank 0 must be the head. ClusterNode has a `role`, not a rank, so order
+    // head-first and sort the (symmetric) workers by id for a stable assignment.
+    const head = deployment.clusterNodes.find(
+      (cn) => cn.role === "head" || cn.nodeId === deployment.nodeId,
+    );
+    const workers = deployment.clusterNodes
+      .filter((cn) => cn.nodeId !== head?.nodeId)
+      .sort((a, b) => a.nodeId.localeCompare(b.nodeId));
+    const ordered = head ? [head, ...workers] : workers;
+
+    const nodeIds = ordered.length > 0 ? ordered.map((cn) => cn.nodeId) : [deployment.nodeId];
+    const rawIps = ordered.length > 0
+      ? ordered.map((cn) => cn.node.ipAddress)
+      : [deployment.node.ipAddress];
+    // Node.ipAddress is nullable. A missing one would become `masterAddr: null`
+    // and every rank would fail rendezvous — refuse instead.
+    if (rawIps.some((ip) => !ip)) {
+      const missing = nodeIds.filter((_, i) => !rawIps[i]);
+      return res.status(409).json({
+        error: `dgxrun restart: node(s) without a management IP: ${missing.join(", ")}`,
+      });
+    }
+    const nodeIps = rawIps as string[];
+
+    // `config` is the persisted blob, so it carries dgxrun bookkeeping alongside
+    // the user's recipe params. Those keys are not recipe placeholders — strip them.
+    const BOOKKEEPING = new Set(["runner", "masterPort", "dgxrunRecipe", "recipeFile"]);
+    const params: Record<string, string | number> = {};
+    for (const [k, v] of Object.entries(config)) {
+      if (BOOKKEEPING.has(k)) continue;
+      if (typeof v === "string" || typeof v === "number") params[k] = v;
+    }
+    if (newDisplayName) params.servedModelName = newDisplayName;
+
+    let deploys;
+    try {
+      deploys = buildDgxrunDeploys({
+        deploymentId: deployment.id,
+        recipe,
+        clusterNodeIds: nodeIds,
+        clusterNodeIps: nodeIps,
+        masterPort: typeof config.masterPort === "number" ? config.masterPort : DEFAULT_MASTER_PORT,
+        params,
+      });
+    } catch (e) {
+      return res.status(409).json({ error: `dgxrun restart: ${(e as Error).message}` });
+    }
+    // The agent's launchDgxrun does `docker rm -f dgxrun_<id>` before `docker run`,
+    // so no explicit undeploy is needed — each rank replaces its own container.
+    for (const d of deploys) {
+      agentHub.sendToAgent(d.nodeId, { type: "cmd:deploy", payload: d.payload });
+    }
+
+    await prisma.deployment.update({
+      where: { id: req.params.id },
+      data: {
+        status: "restarting",
+        error: null,
+        ...(Object.keys(overrides).length > 0 ? { config: JSON.stringify(config) } : {}),
+        ...(newDisplayName !== deployment.displayName ? { displayName: newDisplayName } : {}),
+      },
+    });
+    sseBroadcast({
+      type: "deployment:status",
+      payload: { deploymentId: deployment.id, status: "restarting" },
+    });
+    return res.json({ status: "restarting", ranks: deploys.length });
+  }
+
   // Fine-tune deployments route through cmd:finetune:deploy — they have no
   // recipeFile in saved config (the recipe lives on the FineTuneJob), and
   // the agent's finetune handler reads jobId/modelPath/baseModel/recipeFile

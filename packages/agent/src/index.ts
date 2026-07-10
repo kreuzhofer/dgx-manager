@@ -15,6 +15,7 @@ import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, rem
 import { buildInventory, deleteCachedRepo, type RepoKind } from "./runtime/hf-cache.js";
 import { checkSparkrunDeployments, sparkrunRunningStatus, parseLoadingShards } from "./runtime/sparkrun-metrics.js";
 import { launchDgxrun, stopDgxrun, isDgxrunRunning } from "./runtime/dgxrun/dgxrun.js";
+import { deployCancels, launchExitAction } from "./runtime/deploy-cancel.js";
 import { checkDgxrunDeployments } from "./runtime/dgxrun/dgxrun-metrics.js";
 import type { DgxrunRecipe } from "./runtime/dgxrun/dgxrun-args.js";
 import { loadDeployments, saveDeployment } from "./runtime/deployment-store.js";
@@ -721,6 +722,9 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
           });
           break;
         }
+        // A fresh launch supersedes any cancel left over from a previous stop of
+        // this id (restart reuses the id). Must precede launchDgxrun.
+        deployCancels.beginDeploy(deploymentId);
         // Only the head drives lifecycle status; workers are silent unless they fail.
         if (rank === 0) reportPhase(deploymentId, "starting");
         // Port override arrives via params (server folds config into params for
@@ -743,15 +747,32 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
               }
             },
             (code) => {
-              // docker run -d returns after the container starts. 0 = launched
-              // (health loop confirms serving); non-zero = launch failure, which
-              // the manager treats as a dead rank → coordinated teardown.
-              if (code !== 0) {
+              // `docker run -d` has exited, so the container provably exists (or
+              // provably failed). This is the only safe point to observe a stop
+              // that raced the launch: cmd:undeploy's own `docker rm -f` may have
+              // run while the container was still being created, removing nothing
+              // and leaving it orphaned (2026-07-09). See runtime/deploy-cancel.ts.
+              const action = launchExitAction({
+                code, rank, cancel: deployCancels.pendingCancel(deploymentId),
+              });
+              if (action.kind === "running") return; // health loop confirms serving
+              if (action.kind === "failed") {
+                // The manager treats a dead rank as a coordinated teardown trigger.
                 sendMsg("agent:deployment:status", {
-                  deploymentId, status: "failed",
-                  error: `dgxrun rank ${rank} launch failed (exit ${code})`,
+                  deploymentId, status: "failed", error: action.error,
                 });
+                return;
               }
+              sendMsg("agent:deployment:log", {
+                deploymentId,
+                log: `\n=== Stop raced the launch — tearing down rank ${rank} ===\n`,
+              });
+              try { stopDgxrun(deploymentId); }
+              catch (e) { console.warn(`[deploy] cancel teardown error (continuing): ${e}`); }
+              deployCancels.forget(deploymentId);
+              sendMsg("agent:deployment:status", {
+                deploymentId, status: "stopped", deleteAfter: action.deleteAfter,
+              });
             },
           );
         } catch (err) {
@@ -905,6 +926,10 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
       };
       sendMsg("agent:deployment:status", { deploymentId, status: "stopping" });
       clearPhaseTracking(deploymentId); // reset forward-only phase tracking for this id
+      // Record the cancel SYNCHRONOUSLY, before yielding: a launch whose
+      // `docker run -d` is still in flight re-checks this at exit and tears the
+      // container down. Nothing here can await before the flag is set.
+      deployCancels.requestCancel(deploymentId, deleteAfter || false);
 
       // Stop asynchronously so we can report progress
       (async () => {
@@ -961,7 +986,13 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
             return;
           }
 
-          // No tracked deployment found — report stopped (idempotent)
+          // No tracked deployment found. Do NOT just report stopped: an orphaned
+          // dgxrun container from a raced launch is untracked by definition, and
+          // reporting stopped without removing it is why a second DELETE never
+          // cleaned one up. `docker rm -f dgxrun_<id>` is idempotent and a no-op
+          // for every other runtime.
+          try { stopDgxrun(deploymentId); }
+          catch (e) { console.warn(`[undeploy] orphan sweep error (continuing): ${e}`); }
           sendMsg("agent:deployment:status", {
             deploymentId,
             status: "stopped",

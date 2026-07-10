@@ -317,3 +317,71 @@ describe("maxoutmem via an @dgxrun/ recipeFile", () => {
     }
   });
 });
+
+describe("POST /api/deployments/:id/restart — dgxrun runner", () => {
+  // Restart used to fall through to the single-node sparkrun path
+  // (`cmd:deploy` with recipeRef), so it launched nothing and the agent replied
+  // "Sparkrun launch failed with exit code 1". A dgxrun deploy must be re-fanned
+  // per rank, exactly as POST does.
+  it("re-fans one per-rank cmd:deploy instead of a sparkrun deploy", async () => {
+    await wipeAll();
+    const ids = await seedCluster(4);
+
+    // Create it the real way, so saved config is exactly what production stores.
+    const created = await request(makeApp(makeStubHub().hub))
+      .post("/api/deployments")
+      .send({ nodeIds: ids, recipeYaml: DGXRUN_YAML });
+    expect(created.status).toBe(201);
+    const depId = created.body.id;
+
+    const { hub, sent } = makeStubHub();
+    const res = await request(makeApp(hub)).post(`/api/deployments/${depId}/restart`).send({});
+    expect(res.status).toBe(200);
+
+    expect(sent).toHaveLength(4);
+    for (const s of sent) {
+      expect(s.message.type).toBe("cmd:deploy");
+      expect(s.message.payload.kind).toBe("dgxrun");
+      // The sparkrun branch is keyed on recipeRef/inlineRecipeYaml — neither may appear.
+      expect(s.message.payload.recipeRef).toBeUndefined();
+      expect(s.message.payload.inlineRecipeYaml).toBeUndefined();
+    }
+    // Head is rank 0 and every rank agrees on the master address.
+    expect(sent.map((s) => s.message.payload.rank)).toEqual([0, 1, 2, 3]);
+    expect(sent[0].nodeId).toBe(ids[0]);
+    const masters = new Set(sent.map((s) => s.message.payload.masterAddr));
+    expect(masters.size).toBe(1);
+    expect(sent.every((s) => s.message.payload.nnodes === 4)).toBe(true);
+    expect(sent.map((s) => s.message.payload.headless)).toEqual([false, true, true, true]);
+  });
+
+  it("keeps the persisted masterPort across a restart", async () => {
+    await wipeAll();
+    const ids = await seedCluster(2);
+    const created = await request(makeApp(makeStubHub().hub))
+      .post("/api/deployments")
+      .send({ nodeIds: ids, recipeYaml: DGXRUN_YAML });
+    const depId = created.body.id;
+    const savedPort = JSON.parse((await prisma.deployment.findUnique({ where: { id: depId } }))!.config!).masterPort;
+
+    const { hub, sent } = makeStubHub();
+    await request(makeApp(hub)).post(`/api/deployments/${depId}/restart`).send({});
+    expect(sent.every((s) => s.message.payload.masterPort === savedPort)).toBe(true);
+  });
+
+  // dgxrun bookkeeping keys live in saved config; they are not recipe placeholders.
+  it("does not leak runner/dgxrunRecipe bookkeeping into the rank params", async () => {
+    await wipeAll();
+    const ids = await seedCluster(2);
+    const created = await request(makeApp(makeStubHub().hub))
+      .post("/api/deployments")
+      .send({ nodeIds: ids, recipeYaml: DGXRUN_YAML });
+
+    const { hub, sent } = makeStubHub();
+    await request(makeApp(hub)).post(`/api/deployments/${created.body.id}/restart`).send({});
+    const params = sent[0].message.payload.params as Record<string, unknown>;
+    for (const k of ["runner", "dgxrunRecipe", "masterPort", "recipeFile"]) {
+      expect(params).not.toHaveProperty(k);
+    }
+  });
+});
