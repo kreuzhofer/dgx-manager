@@ -17,6 +17,9 @@ services:
       - HF_TOKEN=${HF_TOKEN:-}
       - SHARED_STORAGE_PATH=${SHARED_STORAGE_PATH:-/mnt/tank}
       - LLAMA_BENCHY_VERSION=${LLAMA_BENCHY_VERSION:-0.3.7}
+      # Pin lm-eval: task ids and metric filter names drift across releases, and the
+      # accuracy presets hardcode both. 0.4.12 is what the first validated run used.
+      - LM_EVAL_VERSION=${LM_EVAL_VERSION:-0.4.12}
     volumes:
       - dgx-data:/app/data
       - ${HOME}/.ssh:/root/.ssh:ro

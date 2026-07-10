@@ -272,7 +272,16 @@ describe("runAccuracy", () => {
     const [cmd, argv] = spawnMock.mock.calls[0];
     expect(cmd).toBe("uvx");
     expect(argv[0]).toBe("--from");
-    expect(argv[1]).toMatch(/^lm-eval\[.+\]/);
+    // The extras are load-bearing, not cosmetic. `api` supplies tenacity/aiohttp for
+    // lm-eval's local-chat-completions model — without it the run dies with
+    // "Attempted to use an API model, but the required packages ['tenacity'] are not
+    // installed". Only a real `uvx lm_eval` run caught this (2026-07-10); the old
+    // /^lm-eval\[.+\]/ assertion was too loose to notice. `ifeval` = IFEval scorers,
+    // `math` = sympy for MATH-hard.
+    expect(argv[1]).toMatch(/^lm-eval\[[^\]]+\]/);
+    for (const extra of ["api", "ifeval", "math"]) {
+      expect(argv[1]).toContain(extra);
+    }
     expect(argv[2]).toBe("lm_eval");
     expect(argv).toContain("base_url=http://127.0.0.1:5555/v1/chat/completions,model=m,num_concurrent=1,tokenized_requests=False");
     expect(r.exitCode).toBe(0);

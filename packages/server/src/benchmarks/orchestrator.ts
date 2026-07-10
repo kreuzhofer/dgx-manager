@@ -26,11 +26,18 @@ const TOOL_EVAL_SPEC =
   process.env.TOOL_EVAL_BENCH_REF ||
   "git+https://github.com/SeraphimSerapis/tool-eval-bench.git@c3868bff099592c9a1045de2c9a3dc24abebb7fb";
 
-// lm-evaluation-harness with the IFEval + MATH scoring extras. Overridable pin.
+// lm-evaluation-harness. Every extra here is load-bearing:
+//   api    -> tenacity/aiohttp, required by the `local-chat-completions` model. Without
+//             it lm-eval dies at startup with "Attempted to use an API model, but the
+//             required packages ['tenacity'] are not installed" (caught by the first
+//             real run, 2026-07-10 — the unit tests could not have found it).
+//   ifeval -> IFEval's scorers (langdetect, immutabledict, nltk)
+//   math   -> sympy / antlr4, for MATH-hard answer checking
+// Pin via LM_EVAL_VERSION (compose defaults it) — task ids drift across releases.
 const LM_EVAL_SPEC =
   process.env.LM_EVAL_VERSION
-    ? `lm-eval[ifeval,math]==${process.env.LM_EVAL_VERSION}`
-    : "lm-eval[ifeval,math]";
+    ? `lm-eval[api,ifeval,math]==${process.env.LM_EVAL_VERSION}`
+    : "lm-eval[api,ifeval,math]";
 
 // In-memory registry of in-flight runs. Lost on restart — see Task 9 for the
 // boot-time reconciliation that marks any orphaned "running" rows as failed.
