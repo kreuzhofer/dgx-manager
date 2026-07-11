@@ -151,3 +151,35 @@ describe("runTrackedRemote", () => {
     expect(offsets.at(-1)).toBe(3);
   });
 });
+
+describe("runTrackedRemote reattach (skipStart)", () => {
+  const base = { runId: "r1", nodeId: "n1", argv: ["uvx", "x"], pollMs: 1, onLog: () => {} };
+
+  it("does not call job.start when skipStart is set", async () => {
+    const seen: string[] = [];
+    const invoke = vi.fn(async (_n: string, name: string) => {
+      seen.push(name);
+      if (name === "job.logs") return { ok: true, data: { chunk: "", nextOffset: 0, truncated: false } };
+      if (name === "job.status") return { ok: true, data: { kind: "exited", code: 0 } };
+      if (name === "job.result") return { ok: true, data: { raw: "{}" } };
+      throw new Error("unexpected " + name);
+    });
+    const r = await runTrackedRemote({ ...base, invoke, skipStart: true, startOffset: 42 });
+    expect(seen).not.toContain("job.start");
+    expect(r.exitCode).toBe(0);
+  });
+
+  it("still calls job.start when skipStart is absent", async () => {
+    const seen: string[] = [];
+    const invoke = vi.fn(async (_n: string, name: string) => {
+      seen.push(name);
+      if (name === "job.start") return { ok: true, data: { unit: "u", jobDir: "/j" } };
+      if (name === "job.logs") return { ok: true, data: { chunk: "", nextOffset: 0, truncated: false } };
+      if (name === "job.status") return { ok: true, data: { kind: "exited", code: 0 } };
+      if (name === "job.result") return { ok: true, data: { raw: "{}" } };
+      throw new Error("unexpected " + name);
+    });
+    await runTrackedRemote({ ...base, invoke });
+    expect(seen[0]).toBe("job.start");
+  });
+});

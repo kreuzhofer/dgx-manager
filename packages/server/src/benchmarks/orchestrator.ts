@@ -110,7 +110,7 @@ async function dispatch(opts: {
   runId: string; command: string; args: string[]; outputDir: string;
   onLog: (l: string) => void; resultFile?: (dir: string) => string | null;
   resultGlob?: string; runnerNodeId?: string; invoke?: CapInvoker; startOffset?: number;
-  onOffset?: (o: number) => void;
+  onOffset?: (o: number) => void; skipStart?: boolean;
 }): Promise<SpawnTrackedResult> {
   if (RUNNER === "local") return spawnTracked(opts);
   if (!opts.runnerNodeId || !opts.invoke) {
@@ -122,6 +122,7 @@ async function dispatch(opts: {
       runId: opts.runId, nodeId: opts.runnerNodeId, invoke: opts.invoke,
       argv: [opts.command, ...opts.args], resultGlob: opts.resultGlob,
       onLog: opts.onLog, onOffset: opts.onOffset, startOffset: opts.startOffset,
+      skipStart: opts.skipStart,
     });
   } finally {
     REMOTE_ACTIVE.delete(opts.runId);
@@ -137,6 +138,7 @@ export type RunBenchmarkOpts = {
   invoke?: CapInvoker;
   startOffset?: number;
   onOffset?: (offset: number) => void;
+  skipStart?: boolean;
 };
 
 export type RunBenchmarkResult = {
@@ -158,6 +160,7 @@ export async function runBenchmark(opts: RunBenchmarkOpts): Promise<RunBenchmark
     invoke: opts.invoke,
     startOffset: opts.startOffset,
     onOffset: opts.onOffset,
+    skipStart: opts.skipStart,
   });
 
   let results: BenchmarkResultInput[] = [];
@@ -180,6 +183,7 @@ export type RunToolEvalOpts = {
   invoke?: CapInvoker;
   startOffset?: number;
   onOffset?: (offset: number) => void;
+  skipStart?: boolean;
 };
 
 export type RunToolEvalResult = {
@@ -200,6 +204,7 @@ export async function runToolEval(opts: RunToolEvalOpts): Promise<RunToolEvalRes
     invoke: opts.invoke,
     startOffset: opts.startOffset,
     onOffset: opts.onOffset,
+    skipStart: opts.skipStart,
   });
 
   let summary: ToolEvalSummary | null = null;
@@ -224,6 +229,7 @@ export type RunAccuracyOpts = {
   invoke?: CapInvoker;
   startOffset?: number;
   onOffset?: (offset: number) => void;
+  skipStart?: boolean;
 };
 
 export type RunAccuracyResult = {
@@ -258,6 +264,7 @@ export async function runAccuracy(opts: RunAccuracyOpts): Promise<RunAccuracyRes
       invoke: opts.invoke,
       startOffset: opts.startOffset,
       onOffset: opts.onOffset,
+      skipStart: opts.skipStart,
     });
 
     let summary: LmEvalSummary | null = null;

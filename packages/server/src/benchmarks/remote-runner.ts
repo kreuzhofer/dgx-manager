@@ -22,6 +22,8 @@ export interface RemoteRunOpts {
   onOffset?: (offset: number) => void;
   /** Where to resume from after a manager restart. */
   startOffset?: number;
+  /** Reattach: skip job.start (the systemd unit already exists) and go straight to polling. */
+  skipStart?: boolean;
 }
 
 /**
@@ -58,10 +60,12 @@ export async function runTrackedRemote(
 ): Promise<{ exitCode: number | null; rawOutput: string | null }> {
   const pollMs = o.pollMs ?? 3_000;
 
-  const started = await o.invoke(o.nodeId, "job.start", {
-    runId: o.runId, argv: o.argv, resultGlob: o.resultGlob ?? "result.json",
-  });
-  if (!started.ok) throw new Error(`job.start failed: ${started.error}`);
+  if (!o.skipStart) {
+    const started = await o.invoke(o.nodeId, "job.start", {
+      runId: o.runId, argv: o.argv, resultGlob: o.resultGlob ?? "result.json",
+    });
+    if (!started.ok) throw new Error(`job.start failed: ${started.error}`);
+  }
 
   let offset = o.startOffset ?? 0;
 
