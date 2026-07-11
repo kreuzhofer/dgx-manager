@@ -91,6 +91,9 @@ export type BenchmarkRun = {
   completedAt: string | null;
   meanTps: number | null;
   meanTtfrMs: number | null;
+  /** Where the run executed. null = a legacy run measured on the manager (the Pi).
+   *  Throughput/latency depend on the client host, so cross-runner runs aren't comparable. */
+  runnerNodeId: string | null;
   kind: BenchmarkKind;
   toolEvalScore: number | null;
   toolEvalRating: string | null;
