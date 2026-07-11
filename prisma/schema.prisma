@@ -24,6 +24,10 @@ model Node {
   ollamaInstalled Boolean          @default(false)
   agentVersion    String?
   arch            String?
+  // What may be DEPLOYED here. "gpu" (default) hosts anything; "eval" is a
+  // benchmark runner (agenthost) that may serve Ollama but never vLLM/dgxrun.
+  // See nodes/role.ts. Enforced server-side in POST /api/deployments.
+  role            String           @default("gpu")
   // Deliberate power intent, distinct from agent-connection `status`.
   // Values: "on" | "rebooting" | "off" | "waking" | "asleep".
   powerState      String           @default("on")
@@ -297,6 +301,12 @@ model BenchmarkRun {
   // (pp/tg/depth/concurrency -> TPS/TTFR rows). "tool-eval" = tool-eval-bench
   // (tool-calling accuracy -> a score + per-category breakdown).
   kind            String   @default("throughput") // throughput | tool-eval | accuracy
+  // WHERE this run executed. null = a legacy run on the manager (the Pi).
+  // Provenance, not bookkeeping: throughput measures tok/s and TTFR from the
+  // client, so runs from different hosts are not comparable.
+  runnerNodeId    String?
+  jobUnit         String?   // systemd transient unit on the runner (set in Task 13)
+  logOffset       Int      @default(0)  // bytes of the remote log already persisted
   error           String?
   startedAt       DateTime?
   completedAt     DateTime?

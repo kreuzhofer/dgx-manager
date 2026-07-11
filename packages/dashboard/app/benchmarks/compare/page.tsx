@@ -86,6 +86,14 @@ function ComparePageBody() {
 
       {runs.some((r) => (r.results?.length ?? 0) > 0) && (
         <>
+          {new Set(
+            runs.filter((r) => (r.results?.length ?? 0) > 0).map((r) => r.runnerNodeId ?? "manager"),
+          ).size > 1 && (
+            <p className="text-xs text-amber-300 bg-amber-950/30 border border-amber-900/50 rounded px-3 py-2">
+              These runs were measured from different hosts. Throughput and TTFR depend on the
+              client&apos;s network path, so the numbers are not directly comparable.
+            </p>
+          )}
           <BenchmarkChart series={series} metric="tps" />
           <BenchmarkChart series={series} metric="ttfrMs" />
           <BenchmarkChart series={series} metric="e2eTtftMs" />

@@ -1945,15 +1945,22 @@ describe("nextPollAction", () => {
     },
   );
 
-  /** Invariant: only an explicit `exited` ever finishes a run. */
+  // A unit systemd reports gone, but a result file the wrapper writes just before
+  // exiting DOES exist: the job finished, the unit was just already reaped. Finish,
+  // don't fail — this is the belt-and-braces the server adds on top of the agent's
+  // own exit-file resolution.
+  it("finishes a missing unit when a result file exists", () => {
+    expect(nextPollAction({ kind: "missing" }, true)).toBe("finish");
+  });
+
+  /** Invariant: active and unknown never finish — only exited, or missing+result. */
   test.prop([
     fc.oneof(
       fc.constant({ kind: "active" as const }),
-      fc.constant({ kind: "missing" as const }),
       fc.string().map((reason) => ({ kind: "unknown" as const, reason })),
     ),
     fc.boolean(),
-  ])("never finishes without an exited status", (status, hasExit) => {
+  ])("active and unknown never finish, whatever the exit-file flag", (status, hasExit) => {
     expect(nextPollAction(status, hasExit)).not.toBe("finish");
   });
 });
@@ -2014,6 +2021,33 @@ describe("runTrackedRemote", () => {
   it("throws when the job cannot be started", async () => {
     const invoke = vi.fn(async () => ({ ok: false, error: "sudo: a password is required" }));
     await expect(runTrackedRemote({ ...baseOpts, invoke })).rejects.toThrow(/password is required/);
+  });
+
+  // The unit was reaped before we polled, but the wrapper had already written
+  // result.json — the run finished, do not fail it.
+  it("finishes when the unit is gone but a result file exists", async () => {
+    const invoke = vi.fn(async (_n: string, name: string) => {
+      if (name === "job.start") return { ok: true, data: { unit: "u", jobDir: "/j" } };
+      if (name === "job.logs") return { ok: true, data: { chunk: "", nextOffset: 0, truncated: false } };
+      if (name === "job.status") return { ok: true, data: { kind: "missing" } };
+      if (name === "job.result") return { ok: true, data: { raw: '{"results":{}}' } };
+      throw new Error("unexpected " + name);
+    });
+    const r = await runTrackedRemote({ ...baseOpts, invoke });
+    expect(r.exitCode).toBe(0);
+    expect(r.rawOutput).toBe('{"results":{}}');
+  });
+
+  // Genuinely orphaned: unit gone AND no result. This must throw.
+  it("throws when the unit is gone with no result", async () => {
+    const invoke = vi.fn(async (_n: string, name: string) => {
+      if (name === "job.start") return { ok: true, data: { unit: "u", jobDir: "/j" } };
+      if (name === "job.logs") return { ok: true, data: { chunk: "", nextOffset: 0, truncated: false } };
+      if (name === "job.status") return { ok: true, data: { kind: "missing" } };
+      if (name === "job.result") return { ok: true, data: { raw: null } };
+      throw new Error("unexpected " + name);
+    });
+    await expect(runTrackedRemote({ ...baseOpts, invoke })).rejects.toThrow(/vanished/);
   });
 
   it("persists the log offset as it advances, so a restart can reattach", async () => {
@@ -2127,16 +2161,33 @@ export async function runTrackedRemote(
   for (;;) {
     await drain();
     const status = await call<JobStatus>(o.invoke, o.nodeId, "job.status", { runId: o.runId });
-    // A null status means the capability call itself failed → unknown → keep going.
-    const action = nextPollAction(status ?? { kind: "unknown", reason: "cap call failed" }, false);
+    const s: JobStatus = status ?? { kind: "unknown", reason: "cap call failed" };
+
+    // Belt-and-braces before declaring a run dead. The agent already resolves the
+    // exit file inside job.status, so a `missing` here is almost always real — but
+    // the wrapper writes result.json just before it exits, and a `job.result` probe
+    // is a second, independent check against a race where the unit is gone yet the
+    // job genuinely finished. This is the ONLY place `hasExitFile` is non-false.
+    let hasResult = false;
+    let finishedResult: { raw: string | null } | null = null;
+    if (s.kind === "missing") {
+      finishedResult = await call<{ raw: string | null }>(o.invoke, o.nodeId, "job.result", { runId: o.runId });
+      hasResult = finishedResult?.raw != null;
+    }
+
+    const action = nextPollAction(s, hasResult);
     if (action === "fail") {
-      throw new Error(`job ${o.runId} vanished on ${o.nodeId} (unit gone, no exit file)`);
+      throw new Error(`job ${o.runId} vanished on ${o.nodeId} (unit gone, no exit file, no result)`);
     }
     if (action === "finish") {
       await drain(); // final tail
-      const code = (status as { kind: "exited"; code: number }).code;
-      const result = await call<{ raw: string | null }>(o.invoke, o.nodeId, "job.result", { runId: o.runId });
-      return { exitCode: code, rawOutput: code === 0 ? (result?.raw ?? null) : null };
+      if (s.kind === "exited") {
+        const result = await call<{ raw: string | null }>(o.invoke, o.nodeId, "job.result", { runId: o.runId });
+        return { exitCode: s.code, rawOutput: s.code === 0 ? (result?.raw ?? null) : null };
+      }
+      // Finished via the missing+result path: the unit was gone but a result file
+      // exists, so the run completed. Treat as success (the parser validates it).
+      return { exitCode: 0, rawOutput: finishedResult?.raw ?? null };
     }
     await sleep(pollMs);
   }

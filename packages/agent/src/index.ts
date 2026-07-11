@@ -30,6 +30,7 @@ import { applyOllamaFirewall } from "./firewall.js";
 import { powerCommand, powerUnitName, powerLaunchCommand, type PowerAction } from "./runtime/power.js";
 import { CapRegistry } from "./caps/registry.js";
 import { makeExecCap } from "./caps/exec-cap.js";
+import { makeJobCaps } from "./caps/job-cap.js";
 import { collectDiag } from "./sysinfo/diag.js";
 import { readSysInfo } from "./sysinfo/proc-read.js";
 import { launchUpdater } from "./update-launch.js";
@@ -127,6 +128,8 @@ const deployLastStatus = new Map<string, string>(); // deploymentId → last rep
 const caps = new CapRegistry();
 caps.register({ name: "diag.collect", handle: async () => collectDiag() });
 caps.register(makeExecCap(undefined, (a) => sendMsg("agent:audit", { cap: "exec", ...a })));
+// Long-running benchmark jobs, owned by systemd so they outlive agent rolls.
+for (const c of makeJobCaps()) caps.register(c);
 
 function connect() {
   console.log(`Connecting to ${MANAGER_URL}...`);

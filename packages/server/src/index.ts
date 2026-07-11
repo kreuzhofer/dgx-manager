@@ -27,6 +27,7 @@ import { sseHandler } from "./sse.js";
 import { startMetricRetention } from "./metric-retention.js";
 import { sshExec } from "./ssh/executor.js";
 import { sendMagicPacket } from "./nodes/wol.js";
+import { reconcileStaleRuns } from "./benchmarks/boot-reconcile.js";
 
 const app = express();
 const server = createServer(app);
@@ -97,17 +98,10 @@ app.get("/api/health", (_req, res) => {
 const PORT = process.env.PORT || 4000;
 
 async function main() {
-  // Any benchmark row left in "pending"/"running" across a restart is orphaned
-  // (the in-memory ACTIVE map in the orchestrator was lost). Mark them failed
-  // so the dashboard doesn't show stale spinners forever.
-  await prisma.benchmarkRun.updateMany({
-    where: { status: { in: ["pending", "running"] } },
-    data: {
-      status: "failed",
-      error: "server restarted before run completed",
-      completedAt: new Date(),
-    },
-  });
+  // Reconcile benchmark runs across a restart. Legacy local runs are failed;
+  // remote systemd jobs on the eval node are resumed. Fire-and-forget so an
+  // offline eval agent can't block startup. See benchmarks/boot-reconcile.ts.
+  void reconcileStaleRuns((nodeId, name, input) => agentHub.capClient.invoke(nodeId, name, input));
 
   try {
     const seeded = await seedDefaultRegistries(prisma);

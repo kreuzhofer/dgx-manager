@@ -21,6 +21,7 @@ import { buildDgxrunDeploys, DEFAULT_MASTER_PORT } from "../deployments/dgxrun-d
 import { resolveDgxrunRecipeFile, DGXRUN_RECIPES_DIR } from "../deployments/dgxrun-catalog.js";
 import { deploymentEndpointUrl, resolveServedModelName } from "../benchmarks/endpoint.js";
 import { buildClaudeLaunchSnippet, CLAUDE_AUTH_TOKEN } from "../deployments/claude-launch.js";
+import { runtimeAllowedOnNode, evalNodeRejectionMessage } from "../nodes/role.js";
 
 export const deploymentsRouter = Router();
 
@@ -304,10 +305,15 @@ deploymentsRouter.post("/", async (req, res) => {
 
   // Auto-resolve idle nodes
   if (nodeId === "auto" || nodeIds === "auto") {
-    const idleNodes = await prisma.node.findMany({
+    // An `eval` node (agenthost) may only serve Ollama — see the role-admission
+    // check below. It must never be a candidate for a vLLM/dgxrun auto-deploy,
+    // or a name that happens to sort first alphabetically (e.g. "agenthost")
+    // gets auto-picked and then 400s at the role guard instead of falling
+    // through to a real GPU node.
+    const idleNodes = (await prisma.node.findMany({
       where: { status: "online" },
       orderBy: { name: "asc" },
-    });
+    })).filter((n) => isOllama || n.role !== "eval");
 
     if (idleNodes.length === 0) {
       return res.status(409).json({ error: "No online nodes available" });
@@ -349,6 +355,22 @@ deploymentsRouter.post("/", async (req, res) => {
     return res.status(400).json({ error: "nodeId or nodeIds required" });
   }
 
+  // Role admission — fail fast, BEFORE any deployment/clusterNode row is created.
+  // An `eval` node (agenthost) is a benchmark runner: it may serve small Ollama
+  // models but must never host a vLLM/dgxrun deployment. Enforced here server-side,
+  // not left to the dashboard picker or to VRAM/arch admission happening to reject it.
+  {
+    const roleTargetIds = isCluster ? (nodeIds as string[]) : [headNodeId];
+    const targets = await prisma.node.findMany({
+      where: { id: { in: roleTargetIds } },
+      select: { name: true, role: true },
+    });
+    const effectiveRuntime = isOllama ? "ollama" : (isDgxrun ? "dgxrun" : "vllm");
+    const offender = targets.find((n) => !runtimeAllowedOnNode(n.role, effectiveRuntime));
+    if (offender) {
+      return res.status(400).json({ error: evalNodeRejectionMessage(offender.name, effectiveRuntime) });
+    }
+  }
 
   let vramEstimate = 0;
 

@@ -15,6 +15,7 @@ import { parseLmEvalResults, type LmEvalSummary } from "./lm-eval-parser.js";
 import { findLmEvalResultFile } from "./lm-eval-result-file.js";
 import { startReasoningProxy, type ReasoningProxy } from "./reasoning-proxy.js";
 import type { AccuracyConfig } from "./presets.js";
+import { runTrackedRemote, type CapInvoker } from "./remote-runner.js";
 
 const LLAMA_BENCHY_SPEC =
   process.env.LLAMA_BENCHY_VERSION
@@ -102,11 +103,42 @@ function spawnTracked(opts: SpawnTrackedOpts): Promise<SpawnTrackedResult> {
   });
 }
 
+const RUNNER = process.env.BENCH_RUNNER ?? "remote";
+const REMOTE_ACTIVE = new Map<string, { nodeId: string; invoke: CapInvoker }>();
+
+async function dispatch(opts: {
+  runId: string; command: string; args: string[]; outputDir: string;
+  onLog: (l: string) => void; resultFile?: (dir: string) => string | null;
+  resultGlob?: string; runnerNodeId?: string; invoke?: CapInvoker; startOffset?: number;
+  onOffset?: (o: number) => void; skipStart?: boolean;
+}): Promise<SpawnTrackedResult> {
+  if (RUNNER === "local") return spawnTracked(opts);
+  if (!opts.runnerNodeId || !opts.invoke) {
+    throw new Error("remote runner requires runnerNodeId + invoke (set BENCH_RUNNER=local for dev)");
+  }
+  REMOTE_ACTIVE.set(opts.runId, { nodeId: opts.runnerNodeId, invoke: opts.invoke });  // before await: a mid-run cancel must find it
+  try {
+    return await runTrackedRemote({
+      runId: opts.runId, nodeId: opts.runnerNodeId, invoke: opts.invoke,
+      argv: [opts.command, ...opts.args], resultGlob: opts.resultGlob,
+      onLog: opts.onLog, onOffset: opts.onOffset, startOffset: opts.startOffset,
+      skipStart: opts.skipStart,
+    });
+  } finally {
+    REMOTE_ACTIVE.delete(opts.runId);
+  }
+}
+
 export type RunBenchmarkOpts = {
   runId: string;
   args: string[];     // llama-benchy argv (from buildBenchyArgs)
   outputDir: string;
   onLog: (line: string) => void;
+  runnerNodeId?: string;
+  invoke?: CapInvoker;
+  startOffset?: number;
+  onOffset?: (offset: number) => void;
+  skipStart?: boolean;
 };
 
 export type RunBenchmarkResult = {
@@ -117,12 +149,18 @@ export type RunBenchmarkResult = {
 };
 
 export async function runBenchmark(opts: RunBenchmarkOpts): Promise<RunBenchmarkResult> {
-  const { exitCode, rawOutput } = await spawnTracked({
+  const { exitCode, rawOutput } = await dispatch({
     runId: opts.runId,
     command: "uvx",
     args: ["--from", LLAMA_BENCHY_SPEC, "llama-benchy", ...opts.args],
     outputDir: opts.outputDir,
     onLog: opts.onLog,
+    resultGlob: "result.json",
+    runnerNodeId: opts.runnerNodeId,
+    invoke: opts.invoke,
+    startOffset: opts.startOffset,
+    onOffset: opts.onOffset,
+    skipStart: opts.skipStart,
   });
 
   let results: BenchmarkResultInput[] = [];
@@ -141,6 +179,11 @@ export type RunToolEvalOpts = {
   args: string[];     // tool-eval-bench argv (from buildToolEvalArgs)
   outputDir: string;
   onLog: (line: string) => void;
+  runnerNodeId?: string;
+  invoke?: CapInvoker;
+  startOffset?: number;
+  onOffset?: (offset: number) => void;
+  skipStart?: boolean;
 };
 
 export type RunToolEvalResult = {
@@ -150,12 +193,18 @@ export type RunToolEvalResult = {
 };
 
 export async function runToolEval(opts: RunToolEvalOpts): Promise<RunToolEvalResult> {
-  const { exitCode, rawOutput } = await spawnTracked({
+  const { exitCode, rawOutput } = await dispatch({
     runId: opts.runId,
     command: "uvx",
     args: ["--from", TOOL_EVAL_SPEC, "tool-eval-bench", ...opts.args],
     outputDir: opts.outputDir,
     onLog: opts.onLog,
+    resultGlob: "result.json",
+    runnerNodeId: opts.runnerNodeId,
+    invoke: opts.invoke,
+    startOffset: opts.startOffset,
+    onOffset: opts.onOffset,
+    skipStart: opts.skipStart,
   });
 
   let summary: ToolEvalSummary | null = null;
@@ -176,6 +225,11 @@ export type RunAccuracyOpts = {
   servedModel: string;
   outputDir: string;
   onLog: (line: string) => void;
+  runnerNodeId?: string;
+  invoke?: CapInvoker;
+  startOffset?: number;
+  onOffset?: (offset: number) => void;
+  skipStart?: boolean;
 };
 
 export type RunAccuracyResult = {
@@ -198,13 +252,19 @@ export async function runAccuracy(opts: RunAccuracyOpts): Promise<RunAccuracyRes
       outputDir: opts.outputDir,
     });
 
-    const { exitCode, rawOutput } = await spawnTracked({
+    const { exitCode, rawOutput } = await dispatch({
       runId: opts.runId,
       command: "uvx",
       args: ["--from", LM_EVAL_SPEC, "lm_eval", ...args],
       outputDir: opts.outputDir,
       onLog: opts.onLog,
       resultFile: findLmEvalResultFile,
+      resultGlob: "results_*.json",
+      runnerNodeId: opts.runnerNodeId,
+      invoke: opts.invoke,
+      startOffset: opts.startOffset,
+      onOffset: opts.onOffset,
+      skipStart: opts.skipStart,
     });
 
     let summary: LmEvalSummary | null = null;
@@ -224,6 +284,13 @@ export async function runAccuracy(opts: RunAccuracyOpts): Promise<RunAccuracyRes
 }
 
 export function cancelBenchmark(runId: string): boolean {
+  const remote = REMOTE_ACTIVE.get(runId);
+  if (remote) {
+    remote.invoke(remote.nodeId, "job.cancel", { runId })
+      .then((r) => { if (!r.ok) console.error(`[cancel] job.cancel for ${runId} failed: ${r.error}`); })
+      .catch((e) => console.error(`[cancel] job.cancel for ${runId} threw: ${e}`));
+    return true;
+  }
   const child = ACTIVE.get(runId);
   if (!child) return false;
   // Signal the whole process group — we spawned with detached:true, so the CLI

@@ -65,6 +65,7 @@ beforeEach(async () => {
 function makeApp() {
   const app = express();
   app.use(express.json());
+  app.set("benchRunner", "local");   // <-- these tests predate the eval runner
   app.use("/api/benchmarks", benchmarksRouter);
   return app;
 }
