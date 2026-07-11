@@ -305,10 +305,15 @@ deploymentsRouter.post("/", async (req, res) => {
 
   // Auto-resolve idle nodes
   if (nodeId === "auto" || nodeIds === "auto") {
-    const idleNodes = await prisma.node.findMany({
+    // An `eval` node (agenthost) may only serve Ollama — see the role-admission
+    // check below. It must never be a candidate for a vLLM/dgxrun auto-deploy,
+    // or a name that happens to sort first alphabetically (e.g. "agenthost")
+    // gets auto-picked and then 400s at the role guard instead of falling
+    // through to a real GPU node.
+    const idleNodes = (await prisma.node.findMany({
       where: { status: "online" },
       orderBy: { name: "asc" },
-    });
+    })).filter((n) => isOllama || n.role !== "eval");
 
     if (idleNodes.length === 0) {
       return res.status(409).json({ error: "No online nodes available" });

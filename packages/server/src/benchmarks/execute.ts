@@ -151,17 +151,24 @@ export function executeRun(
   const startOffset = skipStart ? row.logOffset : undefined;
   const common = { runId: row.id, outputDir, onLog, onOffset, runnerNodeId, invoke, skipStart, startOffset };
 
+  // Remote tools run with cwd=jobDir on the eval node and write into jobDir/out,
+  // which the wrapper's `find` scans. SHARED_STORAGE (the manager's /mnt/tank) is
+  // not mounted there, so a remote run must use a job-dir-relative path.
+  const remote = runnerNodeId != null;
+  const toolOutputPath = remote ? "out/result.json" : resultPath; // benchy / tool-eval
+  const toolOutputDir = remote ? "out" : outputDir;                // lm-eval --output_path
+
   if (row.kind === "accuracy") {
-    runAccuracy({ ...common, config: config as AccuracyConfig, endpointV1Url: row.endpointUrl, servedModel: row.servedModelName })
+    runAccuracy({ ...common, outputDir: toolOutputDir, config: config as AccuracyConfig, endpointV1Url: row.endpointUrl, servedModel: row.servedModelName })
       .then((r) => finalizeAccuracy(row.id, r))
       .catch((e) => finishFailed(row.id, (e as Error).message));
   } else if (row.kind === "tool-eval") {
-    const args = buildToolEvalArgs(config as ToolEvalConfig, { baseUrl: row.endpointUrl, modelName: row.servedModelName, outputPath: resultPath });
+    const args = buildToolEvalArgs(config as ToolEvalConfig, { baseUrl: row.endpointUrl, modelName: row.servedModelName, outputPath: toolOutputPath });
     runToolEval({ ...common, args })
       .then((r) => finalizeToolEval(row.id, r))
       .catch((e) => finishFailed(row.id, (e as Error).message));
   } else {
-    const args = buildBenchyArgs(config as BenchmarkConfig, { baseUrl: row.endpointUrl, modelName: row.servedModelName, outputPath: resultPath });
+    const args = buildBenchyArgs(config as BenchmarkConfig, { baseUrl: row.endpointUrl, modelName: row.servedModelName, outputPath: toolOutputPath });
     runBenchmark({ ...common, args })
       .then((r) => finalizeThroughput(row.id, r))
       .catch((e) => finishFailed(row.id, (e as Error).message));
