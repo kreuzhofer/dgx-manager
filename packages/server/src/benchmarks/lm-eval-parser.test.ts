@@ -82,3 +82,33 @@ describe("parseLmEvalResults", () => {
     expect(primaryScore).toBeCloseTo(70, 5);
   });
 });
+
+describe("multi-filter headline selection (GPQA-style)", () => {
+  it("prefers flexible-extract over a strict-match 0, not 'the first'", () => {
+    const raw = JSON.stringify({ results: { gpqa_diamond_cot_zeroshot: {
+      "exact_match,strict-match": 0.0,
+      "exact_match_stderr,strict-match": 0.0,
+      "exact_match,flexible-extract": 0.6767676767676768,
+      "exact_match_stderr,flexible-extract": 0.0333,
+      "alias": "gpqa_diamond_cot_zeroshot",
+    } } });
+    const out = parseLmEvalResults(raw, "gpqa_diamond_cot_zeroshot", "exact_match");
+    expect(out.primaryScore).toBeCloseTo(67.6767, 2);
+  });
+
+  it("falls back to the highest filter when neither none nor flexible-extract exists", () => {
+    const raw = JSON.stringify({ results: { t: {
+      "exact_match,strict-match": 0.1,
+      "exact_match,custom-extract": 0.4,
+    } } });
+    const out = parseLmEvalResults(raw, "t", "exact_match");
+    expect(out.primaryScore).toBeCloseTo(40, 5);
+  });
+
+  it("still prefers ,none when present", () => {
+    const raw = JSON.stringify({ results: { t: {
+      "exact_match,none": 0.5, "exact_match,flexible-extract": 0.9,
+    } } });
+    expect(parseLmEvalResults(raw, "t", "exact_match").primaryScore).toBeCloseTo(50, 5);
+  });
+});

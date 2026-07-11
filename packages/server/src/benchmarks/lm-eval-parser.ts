@@ -78,13 +78,25 @@ export function parseLmEvalResults(
     }
   }
 
-  // Headline: prefer the `,none` filter, but fall back to whatever filter this
-  // task actually emitted for the primary metric — gsm8k/mmlu_pro/gpqa report
-  // exact_match under strict-match/custom-extract/flexible-extract, not `,none`.
-  // Every filter is still visible in `metrics`; when several exist we take the
-  // first. Still fail-fast if the metric is absent under every filter.
+  // Headline: prefer the `,none` filter, else `,flexible-extract`, else the
+  // highest-scoring filter. gsm8k/mmlu_pro/gpqa report exact_match under multiple
+  // extraction filters — `,strict-match` is often 0.0 because a reasoning model
+  // doesn't hit the exact template, while `,flexible-extract` is the meaningful
+  // number (GPQA-Diamond: strict 0.0 vs flexible 0.68). Taking "the first" filter
+  // let a format-mismatch 0 masquerade as the score. Every filter stays in
+  // `metrics`; fail fast only if the metric is absent under every filter.
   const primaryEntry = (results as Obj)[primaryTask] as Obj | undefined;
-  let primary = primaryEntry ? numOrNull(primaryEntry[`${primaryMetric},none`]) : null;
+  let primary: number | null = null;
+  if (primaryEntry) {
+    const keys = Object.keys(primaryEntry).filter(
+      (k) => (k === primaryMetric || k.startsWith(`${primaryMetric},`)) && !k.includes("_stderr"),
+    );
+    const chosen =
+      keys.find((k) => k === `${primaryMetric},none`) ??
+      keys.find((k) => k.endsWith(",flexible-extract")) ??
+      keys.slice().sort((a, b) => (numOrNull(primaryEntry[b]) ?? -1) - (numOrNull(primaryEntry[a]) ?? -1))[0];
+    if (chosen !== undefined) primary = numOrNull(primaryEntry[chosen]);
+  }
   if (primary === null) {
     const row = metrics.find((m) => m.task === primaryTask && m.metric === primaryMetric);
     primary = row ? row.value : null;
