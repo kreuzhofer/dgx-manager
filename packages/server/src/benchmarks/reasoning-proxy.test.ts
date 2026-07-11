@@ -53,3 +53,17 @@ describe("startReasoningProxy", () => {
     await upstream.close();
   });
 });
+
+describe("startReasoningProxy advertiseHost", () => {
+  it("uses loopback by default (local runs)", async () => {
+    const proxy = await startReasoningProxy("http://example.invalid/v1");
+    try { expect(proxy.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/v1$/); }
+    finally { await proxy.close(); }
+  });
+
+  it("advertises the given host so a remote eval node can reach it", async () => {
+    const proxy = await startReasoningProxy("http://example.invalid/v1", "192.168.44.14");
+    try { expect(proxy.url).toMatch(/^http:\/\/192\.168\.44\.14:\d+\/v1$/); }
+    finally { await proxy.close(); }
+  });
+});

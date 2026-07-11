@@ -40,7 +40,17 @@ function rewriteChatBody(text: string): string {
 // <think>…</think> from /v1/chat/completions responses before returning them, so
 // lm-eval scores the final answer. Non-streaming only (lm-eval uses
 // non-streaming completions).
-export function startReasoningProxy(targetV1Url: string): Promise<ReasoningProxy> {
+// `advertiseHost`: when set (remote eval runs), bind on all interfaces and hand
+// the runner the manager's LAN IP — a job on the eval node can't reach the
+// manager's 127.0.0.1. Omit for local runs (loopback only, unchanged). The proxy
+// only strips <think> and forwards to the (already LAN-exposed) model endpoint,
+// so 0.0.0.0 on the internal fabric adds no new exposure.
+export function startReasoningProxy(
+  targetV1Url: string,
+  advertiseHost?: string,
+): Promise<ReasoningProxy> {
+  const bindHost = advertiseHost ? "0.0.0.0" : "127.0.0.1";
+  const urlHost = advertiseHost || "127.0.0.1";
   return new Promise((resolve) => {
     const server = http.createServer(async (req, res) => {
       try {
@@ -75,10 +85,10 @@ export function startReasoningProxy(targetV1Url: string): Promise<ReasoningProxy
       }
     });
 
-    server.listen(0, "127.0.0.1", () => {
+    server.listen(0, bindHost, () => {
       const { port } = server.address() as AddressInfo;
       resolve({
-        url: `http://127.0.0.1:${port}/v1`,
+        url: `http://${urlHost}:${port}/v1`,
         close: () => new Promise((r) => {
           server.close(() => r());
           server.closeAllConnections?.();

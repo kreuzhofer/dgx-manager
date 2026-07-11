@@ -242,8 +242,12 @@ export type RunAccuracyResult = {
 export async function runAccuracy(opts: RunAccuracyOpts): Promise<RunAccuracyResult> {
   let proxy: ReasoningProxy | null = null;
   try {
+    // A remote run's lm-eval executes on the eval node, which cannot reach the
+    // manager's 127.0.0.1 proxy — advertise the manager's LAN host so the reasoning
+    // proxy is reachable across the fabric. Local runs keep loopback.
+    const proxyHost = opts.runnerNodeId ? process.env.MANAGER_ADVERTISE_HOST : undefined;
     const baseUrl = opts.config.reasoning
-      ? (proxy = await startReasoningProxy(opts.endpointV1Url)).url
+      ? (proxy = await startReasoningProxy(opts.endpointV1Url, proxyHost)).url
       : opts.endpointV1Url;
 
     const args = buildLmEvalArgs(opts.config, {
