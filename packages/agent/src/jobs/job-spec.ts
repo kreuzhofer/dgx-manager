@@ -60,6 +60,12 @@ export function buildWrapperScript(o: {
  * privileges straight back with `-p User=`, so the job's caches land in the
  * agent user's home rather than root's.
  *
+ * A transient unit does NOT inherit the agent service's environment, and
+ * systemd's default PATH omits `~/.local/bin` — where `uv install` drops `uvx`.
+ * Without an explicit PATH the benchmark dies with `uvx: not found` (exit 127),
+ * invisible to unit tests because they stub the spawn. So set PATH (with the
+ * user's `.local/bin` first) and HOME explicitly, mirroring dgx-agent.service.
+ *
  * `--collect` is deliberately omitted: it garbage-collects the unit on exit, and
  * we need `systemctl show` to still answer afterwards.
  */
@@ -69,12 +75,15 @@ export function buildSystemdRunArgv(o: {
   user: string;
   scriptPath: string;
 }): string[] {
+  const home = `/home/${o.user}`;
   return [
     "sudo", "-n", "systemd-run",
     `--unit=${o.unit}`,
     "-p", `User=${o.user}`,
     "-p", `WorkingDirectory=${o.jobDir}`,
     "-p", "RemainAfterExit=yes",
+    "-p", `Environment=HOME=${home}`,
+    "-p", `Environment=PATH=${home}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
     "/bin/sh", o.scriptPath,
   ];
 }

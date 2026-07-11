@@ -94,6 +94,16 @@ describe("buildSystemdRunArgv", () => {
     expect(argv).not.toContain("--collect");
   });
 
+  it("puts the user's ~/.local/bin on PATH so uvx is found, and sets HOME", () => {
+    expect(argv).toContain("-p");
+    expect(argv).toContain("Environment=HOME=/home/daniel");
+    const pathEnv = argv.find((a) => a.startsWith("Environment=PATH="));
+    expect(pathEnv).toBeDefined();
+    expect(pathEnv).toContain("/home/daniel/.local/bin");
+    // .local/bin must come first so a user-installed uvx wins.
+    expect(pathEnv!.indexOf("/home/daniel/.local/bin")).toBeLessThan(pathEnv!.indexOf("/usr/bin"));
+  });
+
   it("execs the wrapper via sh", () => {
     expect(argv.slice(-2)).toEqual(["/bin/sh", "/j/cmd.sh"]);
   });
