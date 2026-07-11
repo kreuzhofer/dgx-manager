@@ -3,6 +3,8 @@ import { SHARED_STORAGE } from "../env.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import { macCaptureCmd, normalizeMac } from "../nodes/power.js";
 import { prisma } from "../prisma.js";
+import { checksForRole, evalSudoCheck } from "./eval-profile.js";
+import { isEvalNode } from "../nodes/role.js";
 
 // ---------------------------------------------------------------------------
 // sparkrun command-string builders (pure, exported for callers + tests)
@@ -124,7 +126,7 @@ async function check(host: string, cmd: string): Promise<SshResult> {
   }
 }
 
-export async function auditNode(host: string, nodeId?: string): Promise<ProvisionReport> {
+export async function auditNode(host: string, nodeId?: string, role?: string | null): Promise<ProvisionReport> {
   const emit = (step: string, status: string, detail?: string) => {
     if (nodeId) {
       sseBroadcast({ type: "node:provision", payload: { nodeId, step, status, detail } });
@@ -247,12 +249,20 @@ export async function auditNode(host: string, nodeId?: string): Promise<Provisio
     },
   ];
 
-  for (const item of checkItems) {
+  const activeItems = checksForRole(checkItems, role);
+
+  for (const item of activeItems) {
     emit(item.name, "checking");
     const result = await check(host, item.cmd);
     const prereq = item.eval(result);
     checks.push(prereq);
     emit(item.name, prereq.status, prereq.detail);
+  }
+
+  if (isEvalNode(role)) {
+    const sudoCheck = evalSudoCheck(sudoAvailable);
+    checks.push(sudoCheck);
+    emit(sudoCheck.name, sudoCheck.status, sudoCheck.detail);
   }
 
   if (nodeId) {

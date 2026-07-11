@@ -365,20 +365,23 @@ nodesRouter.get("/:id", async (req, res) => {
  *         description: name is required
  */
 nodesRouter.post("/", async (req, res) => {
-  const { name, ipAddress } = req.body;
+  const { name, ipAddress, role } = req.body;
   if (!name) {
     return res.status(400).json({ error: "name is required" });
   }
+  if (role !== undefined && role !== "gpu" && role !== "eval") {
+    return res.status(400).json({ error: `Invalid role: ${role} (must be "gpu" or "eval")` });
+  }
 
   const node = await prisma.node.create({
-    data: { name, ipAddress: ipAddress || null },
+    data: { name, ipAddress: ipAddress || null, role: role || "gpu" },
   });
 
   // Run audit in background (only for SSH-managed nodes with an IP)
   if (!ipAddress) {
     return res.status(201).json(node);
   }
-  auditNode(ipAddress, node.id).then(async (report) => {
+  auditNode(ipAddress, node.id, node.role).then(async (report) => {
     await prisma.node.update({
       where: { id: node.id },
       data: {
@@ -514,7 +517,7 @@ nodesRouter.post("/:id/provision", async (req, res) => {
   // Provision in background
   provisionNode(node.ipAddress, report.checks, node.id).then(async (log) => {
     // Re-audit after provisioning
-    const newReport = await auditNode(node.ipAddress!, node.id);
+    const newReport = await auditNode(node.ipAddress!, node.id, node.role);
     await prisma.node.update({
       where: { id: node.id },
       data: {
