@@ -383,6 +383,20 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
   };
   const resultPath = join(outputDir, "result.json");
 
+  // Bridge to the eval node's capability channel. undefined in tests (orchestrator
+  // is mocked there) and in local mode (dispatch uses spawnTracked and ignores it).
+  const hubForRun = req.app.get("agentHub") as { capClient: { invoke: (n: string, name: string, i: unknown) => Promise<{ ok: boolean; data?: unknown; error?: string }> } } | undefined;
+  const invoke = hubForRun
+    ? (nodeId: string, name: string, input: unknown) => hubForRun.capClient.invoke(nodeId, name, input)
+    : undefined;
+  // Persist the log offset as the remote run advances, so a manager restart can reattach (Task 14).
+  const onOffset = (offset: number) => {
+    void prisma.benchmarkRun.update({ where: { id: run.id }, data: { logOffset: offset } }).catch(() => {});
+  };
+  // `runnerNodeId` (string | null) was already resolved above and persisted onto
+  // `run`; the runner opts want `string | undefined`.
+  const dispatchNodeId = runnerNodeId ?? undefined;
+
   const finishFailed = async (message: string) => {
     await prisma.benchmarkRun.update({
       where: { id: run.id },
@@ -402,6 +416,9 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
       servedModel: servedModelName,
       outputDir,
       onLog,
+      runnerNodeId: dispatchNodeId,
+      invoke,
+      onOffset,
     })
       .then(async (r) => {
         const current = await prisma.benchmarkRun.findUnique({ where: { id: run.id } });
@@ -442,7 +459,7 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
       modelName: servedModelName,
       outputPath: resultPath,
     });
-    runToolEval({ runId: run.id, args, outputDir, onLog })
+    runToolEval({ runId: run.id, args, outputDir, onLog, runnerNodeId: dispatchNodeId, invoke, onOffset })
       .then(async (r) => {
         const current = await prisma.benchmarkRun.findUnique({ where: { id: run.id } });
         if (current?.status === "canceled") return;
@@ -481,7 +498,7 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
       modelName: servedModelName,
       outputPath: resultPath,
     });
-    runBenchmark({ runId: run.id, args, outputDir, onLog })
+    runBenchmark({ runId: run.id, args, outputDir, onLog, runnerNodeId: dispatchNodeId, invoke, onOffset })
       .then(async (r) => {
         // SIGTERM from cancel exits the child non-zero; if the row was already
         // flipped to "canceled" by the cancel route, leave it alone.

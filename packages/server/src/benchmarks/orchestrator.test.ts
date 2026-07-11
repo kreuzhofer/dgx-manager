@@ -1,5 +1,22 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterAll } from "vitest";
 import { EventEmitter } from "node:events";
+
+// dispatch()'s module-level RUNNER const (in orchestrator.ts) is read once,
+// at import time, from BENCH_RUNNER — defaulting to "remote". Every test
+// below except the last predates the eval-node dispatch and exercises the
+// *local* spawnTracked path (uvx argv construction, mkdirSync, detached
+// SIGTERM group-kill) via the spawnMock/fs mocks in this file, so force
+// local mode for orchestrator.js's one static import. Plain top-level code
+// would run too late — ESM hoists `import` declarations above ordinary
+// statements regardless of source order — so this has to go through
+// vi.hoisted to actually land before "./orchestrator.js" evaluates.
+// Restored in afterAll since vitest.config.ts runs the whole suite in one
+// shared fork (poolOptions.forks.singleFork): an unrestored env var here
+// would leak into whichever test file imports orchestrator.js next.
+const PRE_BENCH_RUNNER = process.env.BENCH_RUNNER;
+vi.hoisted(() => {
+  process.env.BENCH_RUNNER = "local";
+});
 
 // Mock node:child_process so spawn hits our fake.
 const spawnMock = vi.fn();
@@ -31,6 +48,11 @@ vi.mock("./lm-eval-result-file.js", () => ({
 }));
 
 import { runBenchmark, runToolEval, runAccuracy, cancelBenchmark } from "./orchestrator.js";
+
+afterAll(() => {
+  if (PRE_BENCH_RUNNER === undefined) delete process.env.BENCH_RUNNER;
+  else process.env.BENCH_RUNNER = PRE_BENCH_RUNNER;
+});
 
 function makeFakeChild(pid = 4242) {
   const child = new EventEmitter() as EventEmitter & {
@@ -323,5 +345,46 @@ describe("runAccuracy", () => {
     const r = await promise;
     expect(r.summary).toBeNull();
     expect(r.error).toMatch(/parse/i);
+  });
+
+  it("asks the remote wrapper to resolve lm-eval's nested result file", async () => {
+    // Every other test in this file runs against the module instance loaded
+    // at the top with BENCH_RUNNER forced to "local" (see the vi.hoisted()
+    // block above), so its dispatch() always takes the local spawnTracked
+    // branch regardless of runnerNodeId/invoke. To exercise the *remote*
+    // branch — where dispatch() defers to runTrackedRemote() and never
+    // touches node:child_process — reset the module registry and reimport
+    // orchestrator.js with BENCH_RUNNER=remote, which is production's actual
+    // default (unset env). Flip the env back to "local" immediately after
+    // the fresh import captures it, so it doesn't leak into any later test.
+    process.env.BENCH_RUNNER = "remote";
+    vi.resetModules();
+    const { runAccuracy: runAccuracyRemote } = await import("./orchestrator.js");
+    process.env.BENCH_RUNNER = "local";
+
+    const invoke = vi.fn(async (_nodeId: string, name: string, _input: unknown) => {
+      if (name === "job.start") return { ok: true, data: {} };
+      if (name === "job.logs") return { ok: true, data: { chunk: "", nextOffset: 0, truncated: false } };
+      if (name === "job.status") return { ok: true, data: { kind: "exited", code: 0 } };
+      if (name === "job.result") {
+        return {
+          ok: true,
+          data: { raw: JSON.stringify({ results: { ifeval: { "prompt_level_strict_acc,none": 0.5 } } }) },
+        };
+      }
+      return { ok: false, error: `unexpected cap ${name}` };
+    });
+
+    const r = await runAccuracyRemote({
+      runId: "run_remote", config: { ...baseConfig, reasoning: false },
+      endpointV1Url: "http://10.0.0.1:8000/v1", servedModel: "m", outputDir: "/o",
+      onLog: vi.fn(), runnerNodeId: "eval-node-1", invoke,
+    });
+
+    expect(spawnMock).not.toHaveBeenCalled();
+    const startCall = invoke.mock.calls.find(([, name]) => name === "job.start");
+    expect(startCall?.[2]).toMatchObject({ resultGlob: "results_*.json" });
+    expect(r.exitCode).toBe(0);
+    expect(r.summary?.primaryScore).toBeCloseTo(50, 5);
   });
 });
