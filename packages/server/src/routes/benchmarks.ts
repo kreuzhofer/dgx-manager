@@ -10,6 +10,7 @@ import {
   type ToolEvalConfig,
   type AccuracyConfig,
 } from "../benchmarks/presets.js";
+import { resolveEvalNode } from "../benchmarks/eval-node.js";
 import { buildBenchyArgs } from "../benchmarks/args.js";
 import { buildToolEvalArgs } from "../benchmarks/tool-eval-args.js";
 import { deploymentEndpointUrl, resolveServedModelName } from "../benchmarks/endpoint.js";
@@ -293,6 +294,24 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
       .json({ error: "a benchmark is already running for this deployment" });
   }
 
+  // Runner mode is injectable (app.set) so tests pick it per-app without leaking
+  // process.env across vitest's shared pool; falls back to env, default "remote".
+  const runnerMode = (req.app.get("benchRunner") as string | undefined)
+    ?? process.env.BENCH_RUNNER ?? "remote";
+  let runnerNodeId: string | null = null;
+  if (runnerMode !== "local") {
+    // Resolve the eval runner. Fail fast: a throughput number whose runner you
+    // cannot identify is worse than no number, so never fall back to the manager.
+    const runnerNodes = await prisma.node.findMany({
+      select: { id: true, name: true, role: true, status: true },
+    });
+    const resolved = resolveEvalNode(runnerNodes, process.env.EVAL_NODE_ID);
+    if (!resolved.ok) {
+      return res.status(503).json({ error: `eval runner unavailable: ${resolved.detail}` });
+    }
+    runnerNodeId = resolved.nodeId;
+  }
+
   let kind: "throughput" | "tool-eval" | "accuracy" = "throughput";
   let config: BenchmarkConfig | ToolEvalConfig | AccuracyConfig;
   if (presetId) {
@@ -332,6 +351,7 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
       servedModelName,
       config: JSON.stringify(config),
       status: "pending",
+      runnerNodeId,
     },
   });
   sseBroadcast({ type: "benchmark:created", payload: run });

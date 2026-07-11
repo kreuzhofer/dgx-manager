@@ -301,6 +301,12 @@ model BenchmarkRun {
   // (pp/tg/depth/concurrency -> TPS/TTFR rows). "tool-eval" = tool-eval-bench
   // (tool-calling accuracy -> a score + per-category breakdown).
   kind            String   @default("throughput") // throughput | tool-eval | accuracy
+  // WHERE this run executed. null = a legacy run on the manager (the Pi).
+  // Provenance, not bookkeeping: throughput measures tok/s and TTFR from the
+  // client, so runs from different hosts are not comparable.
+  runnerNodeId    String?
+  jobUnit         String?   // systemd transient unit on the runner (set in Task 13)
+  logOffset       Int      @default(0)  // bytes of the remote log already persisted
   error           String?
   startedAt       DateTime?
   completedAt     DateTime?
