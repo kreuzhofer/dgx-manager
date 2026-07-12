@@ -16,10 +16,16 @@ export function buildLmEvalArgs(config: AccuracyConfig, target: LmEvalTarget): s
   // DB). It's interpolated into the comma/`=`-delimited model_args; a name
   // containing `,` or `=` could inject extra model_args. Real served ids are HF
   // repo ids so this is acceptable for now — revisit if names become arbitrary.
+  // Concurrent requests. Sanitize to a positive int (it's interpolated into the
+  // comma-delimited model_args) and default to 1. Set higher (matching the eval
+  // deployment's --max-num-seqs) to batch requests against the eval recipe.
+  const nc = Number.isInteger(config.numConcurrent) && (config.numConcurrent as number) > 0
+    ? (config.numConcurrent as number)
+    : 1;
   const modelArgs = [
     `base_url=${target.baseUrl}/chat/completions`,
     `model=${target.modelName}`,
-    "num_concurrent=1",
+    `num_concurrent=${nc}`,
     "tokenized_requests=False",
   ].join(",");
 

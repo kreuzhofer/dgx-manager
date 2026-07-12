@@ -290,7 +290,8 @@ describe("runAccuracy", () => {
     child.emit("close", 0);
     const r = await promise;
 
-    expect(startProxyMock).toHaveBeenCalledWith("http://10.0.0.1:8000/v1");
+    // Local run (no runnerNodeId) → proxy binds loopback, so advertiseHost is undefined.
+    expect(startProxyMock).toHaveBeenCalledWith("http://10.0.0.1:8000/v1", undefined);
     const [cmd, argv] = spawnMock.mock.calls[0];
     expect(cmd).toBe("uvx");
     expect(argv[0]).toBe("--from");

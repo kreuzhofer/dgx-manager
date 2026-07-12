@@ -28,6 +28,10 @@ export type AccuracyConfig = {
   applyChatTemplate: boolean;
   reasoning: boolean;
   seed: number;
+  /** lm-eval concurrent requests. Match the deployment's --max-num-seqs: 1 for the
+   *  latency-tuned serving recipe, higher (e.g. 16) for the batched eval recipe.
+   *  Optional/omitted => 1. */
+  numConcurrent?: number;
 };
 
 export type BenchmarkKind = "throughput" | "tool-eval" | "accuracy";

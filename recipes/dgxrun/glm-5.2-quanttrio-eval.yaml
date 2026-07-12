@@ -1,0 +1,67 @@
+recipe_version: "2"
+runner: dgxrun
+maxoutmem: true
+# High-throughput BATCHED eval variant of glm-5.2-quanttrio-unpruned-dcp2-320k.
+# Same container/model/DCP2 topology — only the serve knobs change. Trades single-
+# stream latency (and 320K context) for concurrency, to run benchmark campaigns
+# ~5-8x faster. NOT for interactive use; deploy via campaign-swap (see the spec:
+# docs/superpowers/specs/2026-07-12-glm52-eval-recipe-variant.md).
+#
+# Key differences from the 320K serving recipe:
+#   - NO MTP speculative-config: MTP wins at batch=1 (memory-bound, spare compute
+#     verifies drafts cheaply) but LOSES at high batch (compute-bound; rejected
+#     drafts waste compute other requests need). Removing it also frees the
+#     drafter's VRAM for KV.
+#   - --max-num-seqs 16 (was 1): the core change — batch concurrent eval requests.
+#   - max_model_len 65536 (was 327680): evals don't need 320K; smaller per-seq KV.
+#   - --max-num-batched-tokens 8192 (was 1024): prewarm is far smaller at 64K.
+#   - --kv-cache-memory-bytes 24 GiB: ~16 concurrent typical (<10K) eval requests;
+#     full 16x64K would need ~27 GiB. VALIDATE/tune against the startup guard.
+#   - cudagraph capture 16 (was 10): cover the batch sizes used.
+model: QuantTrio/GLM-5.2-Int4-Int8Mix
+runtime: vllm
+container: vllm-node-tf5-glm52-b12x-dcp:probe
+cluster_only: true
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 4
+  gpu_memory_utilization: 0.88
+  max_model_len: 65536   # 64K — ample for GPQA/AIME (<10K) and mini-SWE-agent (~32-64K)
+  served_model_name: glm-5.2
+env:
+  HF_HOME: /cache/huggingface
+  HF_HUB_OFFLINE: "1"
+  LD_PRELOAD: /cache/huggingface/nccl-2.30.4/libnccl.so.2
+  TRITON_CACHE_DIR: /root/glm-jit/triton
+  TORCHINDUCTOR_CACHE_DIR: /root/glm-jit/inductor
+  VLLM_CACHE_ROOT: /root/glm-jit/vllm
+  FLASHINFER_JIT_DIR: /root/glm-jit/flashinfer-jit
+  FLASHINFER_WORKSPACE_DIR: /root/glm-jit/flashinfer-ws
+  FLASHINFER_AUTOTUNE_DIR: /root/glm-jit/flashinfer-autotune
+  FLASHINFER_AUTOTUNER_LOAD_FROM_FILE: "1"
+  TORCHINDUCTOR_COMPILE_THREADS: "1"
+  MAX_JOBS: "2"
+  NVCC_THREADS: "1"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "5400"
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+  VLLM_USE_B12X_SPARSE_INDEXER: "1"
+  VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: "256"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  VLLM_DCP_GLOBAL_TOPK: "1"
+  # VLLM_DCP_SHARD_DRAFT dropped — no MTP drafter to shard.
+  TORCH_CUDA_ARCH_LIST: "12.1a"
+  GLM52_BIND_HOST_TRITON: "0"
+  NCCL_NET: IB
+  NCCL_IB_DISABLE: "0"
+  NCCL_IB_HCA: "rocep1s0f0,roceP2p1s0f0"
+  NCCL_SOCKET_IFNAME: "enP7s7,enp1s0f0np0,enP2p1s0f0np0"
+  GLOO_SOCKET_IFNAME: enp1s0f0np0
+  NCCL_IB_GID_INDEX: "3"
+  NCCL_CROSS_NIC: "1"
+  NCCL_CUMEM_ENABLE: "0"
+  NCCL_IGNORE_CPU_AFFINITY: "1"
+  NCCL_DEBUG: WARN
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+command: |
+  vllm serve {model} --served-model-name {served_model_name} --host {host} --port {port} --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --enable-prefix-caching -tp {tensor_parallel} --pipeline-parallel-size 1 --decode-context-parallel-size 2 --dcp-kv-cache-interleave-size 1 --attention-backend B12X_MLA_SPARSE --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}' --max-model-len {max_model_len} --max-num-seqs 16 --max-num-batched-tokens 8192 --gpu-memory-utilization {gpu_memory_utilization} --kv-cache-dtype fp8_ds_mla --kv-cache-memory-bytes 25769803776 --async-scheduling --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"FULL","max_cudagraph_capture_size":16}'

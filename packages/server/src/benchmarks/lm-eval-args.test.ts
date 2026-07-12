@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildLmEvalArgs } from "./lm-eval-args.js";
 import type { AccuracyConfig } from "./presets.js";
+import { buildLmEvalArgs } from "./lm-eval-args.js";
 
 const base: AccuracyConfig = {
   tasks: ["ifeval"],
@@ -52,5 +52,22 @@ describe("buildLmEvalArgs", () => {
     expect(buildLmEvalArgs({ ...base, numFewshot: null }, target)).not.toContain("--num_fewshot");
     expect(valueAfter(buildLmEvalArgs({ ...base, numFewshot: 0 }, target), "--num_fewshot")).toBe("0");
     expect(valueAfter(buildLmEvalArgs({ ...base, numFewshot: 5 }, target), "--num_fewshot")).toBe("5");
+  });
+});
+
+describe("num_concurrent plumbing", () => {
+  const base: AccuracyConfig = { tasks:["ifeval"], primaryTask:"ifeval", primaryMetric:"x", limit:null, numFewshot:null, maxGenToks:2048, applyChatTemplate:true, reasoning:false, seed:1 };
+  const tgt = { baseUrl:"http://h/v1", modelName:"glm-5.2", outputDir:"/o" };
+  const ma = (cfg: AccuracyConfig) => { const a=buildLmEvalArgs(cfg, tgt); return a[a.indexOf("--model_args")+1]; };
+  it("defaults to num_concurrent=1 when unset", () => {
+    expect(ma(base)).toContain("num_concurrent=1");
+  });
+  it("uses the configured numConcurrent", () => {
+    expect(ma({...base, numConcurrent:16})).toContain("num_concurrent=16");
+  });
+  it("ignores a bogus numConcurrent (falls back to 1)", () => {
+    expect(ma({...base, numConcurrent:0})).toContain("num_concurrent=1");
+    expect(ma({...base, numConcurrent:-4})).toContain("num_concurrent=1");
+    expect(ma({...base, numConcurrent:2.5})).toContain("num_concurrent=1");
   });
 });

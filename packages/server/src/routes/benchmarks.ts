@@ -318,6 +318,18 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
     config = customConfig!;
   }
 
+  // Optional per-run concurrency override for accuracy runs — match the eval
+  // deployment's --max-num-seqs (1 for serving, e.g. 16 for the batched eval
+  // recipe) without needing separate presets. Validated positive int.
+  const ncOverride = (req.body as { numConcurrent?: unknown }).numConcurrent;
+  if (kind === "accuracy" && ncOverride !== undefined) {
+    const n = Number(ncOverride);
+    if (!Number.isInteger(n) || n < 1 || n > 256) {
+      return res.status(400).json({ error: "numConcurrent must be an integer between 1 and 256" });
+    }
+    config = { ...(config as AccuracyConfig), numConcurrent: n };
+  }
+
   let endpointUrl: string;
   try {
     // llama-benchy follows the OpenAI client convention where `--base-url`
