@@ -20,11 +20,14 @@ maxoutmem: true
 #     per-seq KV leaves room for 16 sequences.
 #   - --max-num-batched-tokens 4096 (was 1024): larger batched prefill; keeps the
 #     b12x indexer prewarm (∝ mnbt x max_model_len) small enough to fit.
-#   - --kv-cache-memory-bytes 12 GiB (was 8.5 in 320K): the ~94 GiB/node weights
-#     dominate, so KV headroom is tight. 24 GiB OOM'd during capture (2026-07-12);
-#     12 GiB fits and still holds ~470K KV tokens shared across the 16 seqs — ample
-#     for <10K-token eval requests. Raise only if the startup log shows free
-#     headroom after "Initial free memory".
+#   - --kv-cache-memory-bytes 6 GiB: the ~94 GiB/node weights + 16-seq activation
+#     leave only ~6-8 GiB for KV under gmu 0.88 (the 320K recipe fit 8.5 GiB only
+#     because it runs 1 seq). Both 24 and 12 GiB OOM'd at KV init on 2026-07-12
+#     (12 GiB reached 107.6 GiB in use, 1.65 GiB free, then OOM'd on a 150 MiB
+#     alloc). 6 GiB fits with headroom for PIECEWISE capture; ~235K KV tokens
+#     across 16 seqs — ample for <10K-token eval requests (fewer concurrent for
+#     long SWE contexts). Raise cautiously only if the startup log shows free
+#     headroom after KV init.
 #   - cudagraph PIECEWISE, capture 16 (320K used FULL): the B12X indexer backend
 #     only supports piecewise cudagraphs (AttentionCGSupport.UNIFORM_BATCH).
 #     Forcing FULL makes vLLM fall back to FULL_AND_PIECEWISE, which the backend
@@ -76,4 +79,4 @@ env:
   NCCL_DEBUG: WARN
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
 command: |
-  vllm serve {model} --served-model-name {served_model_name} --host {host} --port {port} --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --enable-prefix-caching -tp {tensor_parallel} --pipeline-parallel-size 1 --decode-context-parallel-size 2 --dcp-kv-cache-interleave-size 1 --attention-backend B12X_MLA_SPARSE --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}' --max-model-len {max_model_len} --max-num-seqs 16 --max-num-batched-tokens 4096 --gpu-memory-utilization {gpu_memory_utilization} --kv-cache-dtype fp8_ds_mla --kv-cache-memory-bytes 12884901888 --async-scheduling --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"PIECEWISE","max_cudagraph_capture_size":16}'
+  vllm serve {model} --served-model-name {served_model_name} --host {host} --port {port} --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --enable-prefix-caching -tp {tensor_parallel} --pipeline-parallel-size 1 --decode-context-parallel-size 2 --dcp-kv-cache-interleave-size 1 --attention-backend B12X_MLA_SPARSE --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}' --max-model-len {max_model_len} --max-num-seqs 16 --max-num-batched-tokens 4096 --gpu-memory-utilization {gpu_memory_utilization} --kv-cache-dtype fp8_ds_mla --kv-cache-memory-bytes 6442450944 --async-scheduling --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"PIECEWISE","max_cudagraph_capture_size":16}'
