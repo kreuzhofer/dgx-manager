@@ -1,6 +1,6 @@
 # DGX Manager Roadmap
 
-*Last updated: 2026-07-11*
+*Last updated: 2026-07-12*
 
 > A full-stack system for managing DGX Spark GPU clusters — node provisioning, model deployment, inference, fine-tuning, and beyond.
 
@@ -288,6 +288,7 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 - [ ] Track quality metrics over time with per-model and per-run history
 - [ ] Compare base models against fine-tuned variants in the dashboard (currently only per-job chart)
 - [ ] Dashboard views for benchmark results and regression detection
+- [ ] **30-min moving-average curve layered on the live TPS graph.** Overlay a 30-minute rolling-average tokens/sec curve on the raw per-tick throughput graph. Raw aggregate TPS is spiky under batched serving — requests complete in waves (the concurrent `c16-64k` eval recipe showed ~16 finishing together, 2026-07-12), so the instantaneous number is hard to read. A 30-min moving average shows the *sustained* throughput and makes recipe / batch-size comparisons legible. *(requested 2026-07-12)*
 - [ ] Upload fine-tuned models to HuggingFace (requires HF_TOKEN)
 - [ ] Multimodal fine-tuning: Gemma 4 as a visual judge (image+text training)
 - [ ] **External-facing write-up (blog / LinkedIn post)** — distinct from `docs/gemma4-fine-tuning-on-dgx-spark.md` (the deep technical reference). Audience-focused "so what" framing: what DGX Manager says about the author's skills to a hiring manager / CTO / practitioner network. Pending audience + platform decisions.
