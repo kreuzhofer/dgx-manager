@@ -1,21 +1,25 @@
 recipe_version: "2"
 runner: dgxrun
 maxoutmem: true
-# High-throughput BATCHED eval variant of glm-5.2-quanttrio-unpruned-dcp2-320k.
+# Concurrency-optimized serving recipe: serves MANY requests at once, where
+# glm-5.2-quanttrio-unpruned-dcp2-320k serves one at a time at the lowest latency.
 # Same container/model/DCP2 topology — only the serve knobs change. Trades single-
-# stream latency (and 320K context) for concurrency, to run benchmark campaigns
-# ~5-8x faster. NOT for interactive use; deploy via campaign-swap (see the spec:
-# docs/superpowers/specs/2026-07-12-glm52-eval-recipe-variant.md).
+# stream latency (and 320K context) for aggregate throughput, so a batch of work
+# (benchmark suites, batch jobs, several users at once) finishes ~5-8x faster.
+# Only one recipe can hold the 4-node GPU pool at a time, so run this in place of
+# the 320K recipe while you need concurrency, then redeploy the 320K one. See the
+# spec: docs/superpowers/specs/2026-07-12-glm52-eval-recipe-variant.md.
 #
 # Key differences from the 320K serving recipe:
 #   - NO MTP speculative-config: MTP wins at batch=1 (memory-bound, spare compute
 #     verifies drafts cheaply) but LOSES at high batch (compute-bound; rejected
 #     drafts waste compute other requests need). Removing it also frees the
 #     drafter's VRAM for KV.
-#   - --max-num-seqs 16 (was 1): the core change — batch concurrent eval requests.
-#   - max_model_len 65536 (was 327680): evals don't need 320K; smaller per-seq KV.
+#   - --max-num-seqs 16 (was 1): the core change — serve up to 16 requests at once.
+#   - max_model_len 65536 (was 327680): concurrent jobs rarely need 320K; smaller
+#     per-seq KV leaves room for 16 sequences.
 #   - --max-num-batched-tokens 8192 (was 1024): prewarm is far smaller at 64K.
-#   - --kv-cache-memory-bytes 24 GiB: ~16 concurrent typical (<10K) eval requests;
+#   - --kv-cache-memory-bytes 24 GiB: ~16 concurrent typical (<10K) requests;
 #     full 16x64K would need ~27 GiB. VALIDATE/tune against the startup guard.
 #   - cudagraph capture 16 (was 10): cover the batch sizes used.
 model: QuantTrio/GLM-5.2-Int4-Int8Mix

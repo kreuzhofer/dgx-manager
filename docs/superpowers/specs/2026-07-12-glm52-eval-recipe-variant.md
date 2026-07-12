@@ -34,7 +34,7 @@ latency and long context — both of which evals don't need.
 - Long context. Evals need far less than 320K (GPQA/AIME prompts <10K;
   mini-SWE-agent context ~32–64K).
 
-## Recipe: `recipes/dgxrun/glm-5.2-quanttrio-eval.yaml`
+## Recipe: `recipes/dgxrun/glm-5.2-quanttrio-concurrent.yaml`
 
 Same container, model, DCP2 topology, and env as `…-dcp2-320k.yaml` (no rebuild).
 Only the serve knobs change. Diff from the 320K recipe:
@@ -70,7 +70,7 @@ of** the 320K deployment for the duration of an eval campaign:
 
 1. Stop the 320K deployment (`POST /:id/restart` won't switch recipes — DELETE +
    re-POST with the eval recipe, or add recipe-swap support to restart).
-2. Deploy `@dgxrun/glm-5.2-quanttrio-eval`.
+2. Deploy `@dgxrun/glm-5.2-quanttrio-concurrent`.
 3. Run the eval batch (GPQA / AIME / SWE-bench) at high concurrency.
 4. Delete the eval deployment, redeploy the 320K serving recipe.
 
