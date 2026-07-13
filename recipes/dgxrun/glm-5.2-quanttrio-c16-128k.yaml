@@ -23,11 +23,11 @@ maxoutmem: true
 #     more of the pool => FEWER long requests run concurrently than at 64K. This
 #     trades concurrency for per-request context, deliberately.
 #
-# STATUS: derived from the c16-64k validation via the prewarm-constant math above,
-# but NOT yet load-tested on hardware. On first deploy, watch the startup log for an
-# OOM at the indexer prewarm / KV init (same failure mode c16-64k hit at 24/12 GiB
-# KV). If it OOMs, the prewarm estimate was off — drop mnbt to 1024 (halves prewarm
-# again) before touching KV.
+# STATUS: VALIDATED on hardware 2026-07-13 — loaded clean on the 4 dgx-spark nodes
+# (13 min weight load, torch.compile 40.6 s, PIECEWISE capture 0.55 GiB, serves at
+# max_model_len 131072), exactly as the prewarm-constant math predicted; no OOM. If
+# a future deploy DOES OOM at the indexer prewarm / KV init, drop mnbt to 1024
+# (halves prewarm again) before touching KV.
 model: QuantTrio/GLM-5.2-Int4-Int8Mix
 runtime: vllm
 container: vllm-node-tf5-glm52-b12x-dcp:probe
