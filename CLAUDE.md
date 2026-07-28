@@ -185,3 +185,22 @@ Prisma 7 refuses `db push --force-reset` and similar destructive operations when
 9. **Don't Break Contracts**: Preserve existing public APIs, schemas, and behavioral contracts unless explicitly instructed otherwise. If breaking changes are required, provide migration steps and compatibility tests.
 
 10. **Risk-Scaled Rigor**: Scale rigor with impact: (1) Low risk — unit tests, lint/format. (2) Medium risk — integration tests, edge cases, rollback awareness. (3) High risk (security, auth, money, data loss, core flows) — explicit approval before destructive actions, targeted tests, minimal refactoring.
+
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs live as GitHub issues in `kreuzhofer/dgx-manager`, managed with the
+`gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles use their default label strings — `needs-triage`,
+`needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See
+`docs/agents/domain.md`.
