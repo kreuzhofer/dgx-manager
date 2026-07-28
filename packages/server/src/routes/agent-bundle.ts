@@ -291,34 +291,58 @@ else
   log "Node.js installed: \$(node --version)"
 fi
 
-# Step 4b: Install Ollama (binary + systemd unit + drop-in override)
-if systemctl list-unit-files ollama.service &>/dev/null && systemctl is-enabled ollama &>/dev/null; then
+# Step 4b: Install Ollama (binary + systemd unit) and ALWAYS ensure the drop-in.
+# Delimited so tests can execute this section in isolation against stubs.
+# >>> ollama-dropin
+OLLAMA_DROPIN_DIR="\${OLLAMA_DROPIN_DIR:-/etc/systemd/system/ollama.service.d}"
+if systemctl list-unit-files ollama.service >/dev/null 2>&1 && systemctl is-enabled ollama >/dev/null 2>&1; then
+  OLLAMA_PREEXISTING=1
   log "Ollama service already installed"
 else
+  OLLAMA_PREEXISTING=0
   log "Installing Ollama..."
   curl -fsSL https://ollama.com/install.sh | sh
-  # Drop-in override: run as the agent user, listen on all interfaces, point
-  # models at /mnt/tank when the NFS share is mounted (so the cache is shared
-  # across the cluster); otherwise fall back to Ollama's default path.
-  mkdir -p /etc/systemd/system/ollama.service.d
-  OVERRIDE=/etc/systemd/system/ollama.service.d/override.conf
-  {
-    echo "[Service]"
+fi
+
+# The drop-in is ensured on EVERY run, not only when we install Ollama.
+# A pre-existing Ollama keeps its default loopback bind, which silently makes
+# the node unreachable by the manager — the deployment still reports "running"
+# because the model loads fine (agenthost, 2026-07-28).
+#
+# User/HOME/OLLAMA_MODELS are claimed ONLY for an Ollama we installed
+# ourselves: adopting an existing service would repoint it at a different HOME
+# and orphan the model store it already has on local disk.
+mkdir -p "\$OLLAMA_DROPIN_DIR"
+OVERRIDE="\$OLLAMA_DROPIN_DIR/override.conf"
+OVERRIDE_NEW="\$(mktemp)"
+{
+  echo "[Service]"
+  if [ "\$OLLAMA_PREEXISTING" = "0" ]; then
     echo "User=\${AGENT_USER}"
     echo "Environment=HOME=/home/\${AGENT_USER}"
-    echo "Environment=OLLAMA_HOST=0.0.0.0"
-    echo "Environment=OLLAMA_MAX_LOADED_MODELS=0"
-    if mountpoint -q /mnt/tank; then
-      echo "Environment=OLLAMA_MODELS=/mnt/tank/models/ollama"
-      mkdir -p /mnt/tank/models/ollama
-      chown -R "\${AGENT_USER}":"\${AGENT_USER}" /mnt/tank/models/ollama 2>/dev/null || true
-    fi
-  } > "\$OVERRIDE"
+  fi
+  echo "Environment=OLLAMA_HOST=0.0.0.0"
+  echo "Environment=OLLAMA_MAX_LOADED_MODELS=0"
+  if [ "\$OLLAMA_PREEXISTING" = "0" ] && mountpoint -q /mnt/tank; then
+    echo "Environment=OLLAMA_MODELS=/mnt/tank/models/ollama"
+    mkdir -p /mnt/tank/models/ollama
+    chown -R "\${AGENT_USER}":"\${AGENT_USER}" /mnt/tank/models/ollama 2>/dev/null || true
+  fi
+} > "\$OVERRIDE_NEW"
+
+# Restart only on a real change, so re-running the installer can't bounce an
+# Ollama that is currently serving a deployment.
+if cmp -s "\$OVERRIDE_NEW" "\$OVERRIDE" 2>/dev/null; then
+  rm -f "\$OVERRIDE_NEW"
+  log "Ollama drop-in already current"
+else
+  mv "\$OVERRIDE_NEW" "\$OVERRIDE"
   systemctl daemon-reload
   systemctl enable ollama
   systemctl restart ollama
-  log "Ollama installed and started"
+  log "Ollama drop-in written; service restarted"
 fi
+# <<< ollama-dropin
 
 # Step 5: Download agent bundle (arch-specific)
 log "Downloading \${BUNDLE_ARCH} agent bundle from \${SERVER_URL}..."
