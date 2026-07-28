@@ -29,6 +29,15 @@ export function resolveHfHome(env: NodeJS.ProcessEnv = process.env): string {
   return env.HF_HOME ?? `${SHARED_STORAGE}/models`;
 }
 
+/** True when resolveHfHome took the env value rather than the shared-storage
+ *  default. Callers use this to tell a real misconfiguration (a configured
+ *  HF_HOME that is missing) from a node that simply has no shared cache —
+ *  eval / Ollama-only hosts never mount `${SHARED_STORAGE}`. Mirrors the `??`
+ *  above: only null/undefined falls back. */
+export function isHfHomeExplicit(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.HF_HOME != null;
+}
+
 /** Kill a detached child's whole process group (negative pid), so the launcher
  *  and its hf-download children all die. No-op if the pid is gone / group
  *  already reaped. */

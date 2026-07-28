@@ -11,7 +11,7 @@ import { discoverRecipes, updateRegistries } from "./recipes.js";
 import { writeRegistriesFile, type RegistryWire } from "./registries.js";
 import { untrackDeployment } from "./runtime/vllm.js";
 import { classifyDeadContainer, reconcileDeployStatus } from "./runtime/deploy-status.js";
-import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe, resolveHfHome } from "./runtime/sparkrun.js";
+import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe, resolveHfHome, isHfHomeExplicit } from "./runtime/sparkrun.js";
 import { buildInventory, deleteCachedRepo, type RepoKind } from "./runtime/hf-cache.js";
 import { checkSparkrunDeployments, sparkrunRunningStatus, parseLoadingShards } from "./runtime/sparkrun-metrics.js";
 import { launchDgxrun, stopDgxrun, inspectDgxrunContainerResult } from "./runtime/dgxrun/dgxrun.js";
@@ -598,7 +598,7 @@ function sendSelfAudit() {
 function sendHfCacheInventory(error?: string) {
   const hfHome = resolveHfHome();
   try {
-    const inventory = buildInventory(hfHome);
+    const inventory = buildInventory(hfHome, { explicit: isHfHomeExplicit() });
     sendMsg("agent:hf-cache", { ...inventory, ...(error ? { error } : {}) });
   } catch (err) {
     // cacheId "" → the server falls back to a per-node group for error rows

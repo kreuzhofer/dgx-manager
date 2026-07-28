@@ -168,7 +168,13 @@ export default function ModelsPage() {
             <div className="flex items-baseline justify-between mb-2">
               <h2 className="text-lg font-semibold">{title}</h2>
               <span className="text-sm text-gray-400">
-                {formatBytes(cache.totalBytes)} used · {formatBytes(cache.diskFreeBytes)} free ·{" "}
+                {/* Byte counts on an unconfigured node would read as "mounted
+                    but empty/full" — there is no filesystem to report on. */}
+                {!cache.unconfigured && (
+                  <>
+                    {formatBytes(cache.totalBytes)} used · {formatBytes(cache.diskFreeBytes)} free ·{" "}
+                  </>
+                )}
                 <span className="font-mono">{cache.hfHome}</span> · scanned {fmtDate(cache.scannedAt)}
               </span>
             </div>
@@ -179,7 +185,15 @@ export default function ModelsPage() {
               </div>
             )}
 
-            {cache.repos.length === 0 && !cache.error && (
+            {cache.unconfigured && !cache.error && (
+              <div className="mb-3 px-3 py-2 rounded border border-gray-800 bg-gray-900 text-gray-400 text-sm">
+                No shared model cache on this node — <span className="font-mono">HF_HOME</span> is
+                not set and <span className="font-mono">{cache.hfHome}</span> is not mounted. Nodes
+                that only run benchmarks or Ollama don&apos;t need one.
+              </div>
+            )}
+
+            {cache.repos.length === 0 && !cache.error && !cache.unconfigured && (
               <p className="text-gray-500 text-sm">Cache is empty.</p>
             )}
 

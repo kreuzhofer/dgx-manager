@@ -19,6 +19,9 @@ export interface HfCacheNodeInventory {
   totalBytes: number;
   diskFreeBytes: number;
   error?: string;
+  /** Node has no HF cache at all (HF_HOME unset, shared storage not mounted).
+   *  Not a failure — eval / Ollama-only nodes are expected to look like this. */
+  unconfigured?: boolean;
   repos: HfCacheRepo[];
 }
 

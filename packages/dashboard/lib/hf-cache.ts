@@ -23,6 +23,9 @@ export interface CacheGroup {
   totalBytes: number;
   diskFreeBytes: number;
   error?: string;
+  /** Node has no HF cache at all — HF_HOME unset and shared storage not
+   *  mounted. Informational, not a failure (eval / Ollama-only nodes). */
+  unconfigured?: boolean;
   repos: CacheRepo[];
 }
 

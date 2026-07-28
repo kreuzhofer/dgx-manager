@@ -264,4 +264,57 @@ describe("buildInventory", () => {
       rmSync(hfHome, { recursive: true, force: true });
     }
   });
+
+  // A node that never mounts shared storage (eval / Ollama-only hosts) has no
+  // HF cache at all. That is a fact about the node, not a failure to report —
+  // but a *configured* HF_HOME that has gone missing still must fail loudly.
+  it("reports an absent default HF_HOME as unconfigured, not an error", () => {
+    const missing = join(tmpdir(), "hf-does-not-exist-unconfigured");
+    expect(existsSync(missing)).toBe(false);
+
+    const inv = buildInventory(missing, { explicit: false });
+
+    expect(inv.unconfigured).toBe(true);
+    expect(inv.error).toBeUndefined();
+    expect(inv.repos).toEqual([]);
+    expect(inv.cacheId).toBe("");
+    expect(inv.hfHome).toBe(missing);
+  });
+
+  it("does not create a cache-id marker when HF_HOME is unconfigured", () => {
+    // readOrCreateCacheId would try to write .dgx-cache-id — an unconfigured
+    // node must not materialise anything on a path it does not own.
+    const missing = join(tmpdir(), "hf-does-not-exist-unconfigured");
+
+    buildInventory(missing, { explicit: false });
+
+    expect(existsSync(missing)).toBe(false);
+  });
+
+  it("throws when an explicitly configured HF_HOME is missing", () => {
+    const missing = join(tmpdir(), "hf-does-not-exist-explicit");
+    expect(() => buildInventory(missing, { explicit: true })).toThrow(/HF_HOME does not exist/);
+  });
+
+  it("defaults to explicit so existing callers keep failing fast", () => {
+    const missing = join(tmpdir(), "hf-does-not-exist-default");
+    expect(() => buildInventory(missing)).toThrow(/HF_HOME does not exist/);
+  });
+
+  it("scans normally when an unconfigured HF_HOME does happen to exist", () => {
+    const hfHome = mkdtempSync(join(tmpdir(), "hf-inv-unconf-present-"));
+    try {
+      const a = join(hfHome, "hub", "models--org--alpha", "blobs");
+      mkdirSync(a, { recursive: true });
+      writeFileSync(join(a, "blob1"), "x".repeat(1000));
+
+      const inv = buildInventory(hfHome, { explicit: false });
+
+      expect(inv.unconfigured).toBeUndefined();
+      expect(inv.repos).toHaveLength(1);
+      expect(inv.cacheId).toMatch(/^[0-9a-f-]{36}$/);
+    } finally {
+      rmSync(hfHome, { recursive: true, force: true });
+    }
+  });
 });

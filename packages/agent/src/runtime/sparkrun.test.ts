@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { fc, it as fcIt } from "@fast-check/vitest";
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -35,7 +36,7 @@ const { spawnMock, execFileSyncMock, spawnSyncMock } = vi.hoisted(() => {
 vi.mock("node:child_process", () => ({ spawn: spawnMock, execFileSync: execFileSyncMock, spawnSync: spawnSyncMock }));
 vi.mock("./deployment-store.js", () => ({ saveDeployment: vi.fn(), removeDeployment: vi.fn() }));
 
-import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe, inspectSparkrunContainer, snapshotContainerLogs, captureCrashedContainerLogs, resolveHfHome } from "./sparkrun.js";
+import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe, inspectSparkrunContainer, snapshotContainerLogs, captureCrashedContainerLogs, resolveHfHome, isHfHomeExplicit } from "./sparkrun.js";
 
 beforeEach(() => {
   children.length = 0;
@@ -222,6 +223,25 @@ describe("resolveHfHome", () => {
   it("falls back to ${SHARED_STORAGE}/models when HF_HOME is absent", () => {
     // SHARED_STORAGE defaults to /mnt/tank in this test env
     expect(resolveHfHome({} as NodeJS.ProcessEnv)).toBe("/mnt/tank/models");
+  });
+});
+
+describe("isHfHomeExplicit", () => {
+  it("is true when the env sets HF_HOME", () => {
+    expect(isHfHomeExplicit({ HF_HOME: "/custom/hf" } as NodeJS.ProcessEnv)).toBe(true);
+  });
+
+  it("is false when HF_HOME is absent and the shared-storage default applies", () => {
+    expect(isHfHomeExplicit({} as NodeJS.ProcessEnv)).toBe(false);
+  });
+
+  /** Invariant: "explicit" means exactly "resolveHfHome did NOT fall back to
+   *  the shared-storage default". Any HF_HOME the env supplies is explicit —
+   *  including one that happens to equal the default path. */
+  fcIt.prop([fc.string()])("treats any env-supplied HF_HOME as explicit", (hfHome) => {
+    const env = { HF_HOME: hfHome } as NodeJS.ProcessEnv;
+    expect(isHfHomeExplicit(env)).toBe(true);
+    expect(resolveHfHome(env)).toBe(hfHome);
   });
 });
 

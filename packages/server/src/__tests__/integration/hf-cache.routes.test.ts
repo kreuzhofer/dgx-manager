@@ -106,6 +106,19 @@ describe("GET /api/hf-cache", () => {
     expect(cache.nodes.find((n: { name: string }) => n.name === "spark-2").connected).toBe(false);
   });
 
+  it("forwards the unconfigured flag so the dashboard can distinguish it from a failure", async () => {
+    // agenthost: no shared storage mounted, HF_HOME never set. Not an error.
+    const node = await prisma.node.create({ data: { name: "agenthost" } });
+    const hub = makeHub();
+    hub.inventories = [inv(node.id, "", [], { unconfigured: true, totalBytes: 0, diskFreeBytes: 0 })];
+
+    const res = await request(makeApp(hub)).get("/api/hf-cache");
+    expect(res.status).toBe(200);
+    const cache = res.body.caches[0];
+    expect(cache.unconfigured).toBe(true);
+    expect(cache.error).toBeUndefined();
+  });
+
   it("keeps per-node caches separate", async () => {
     const n1 = await prisma.node.create({ data: { name: "spark-1" } });
     const n2 = await prisma.node.create({ data: { name: "spark-2" } });

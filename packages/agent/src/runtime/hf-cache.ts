@@ -23,6 +23,10 @@ export interface HfCacheInventoryPayload {
   totalBytes: number;
   diskFreeBytes: number;
   error?: string;
+  /** Set when HF_HOME was never configured AND the shared-storage default is
+   *  absent — this node has no HF cache at all. Distinct from `error`: nothing
+   *  is broken, so the dashboard must not show it as a failure. */
+  unconfigured?: boolean;
   repos: CachedRepo[];
 }
 
@@ -168,7 +172,30 @@ export function readOrCreateCacheId(hfHome: string): string {
   }
 }
 
-export function buildInventory(hfHome: string): HfCacheInventoryPayload {
+/** Assemble this node's cache inventory.
+ *
+ *  `explicit` says whether HF_HOME came from the environment (see
+ *  isHfHomeExplicit). It defaults to true so the fail-fast contract is
+ *  unchanged for callers that don't pass it: a configured cache root that has
+ *  gone missing is a genuine misconfiguration and still throws. Only the
+ *  *defaulted* path being absent is reported as `unconfigured`. */
+export function buildInventory(
+  hfHome: string,
+  { explicit = true }: { explicit?: boolean } = {},
+): HfCacheInventoryPayload {
+  if (!explicit && !existsSync(hfHome)) {
+    // Return before readOrCreateCacheId: an unconfigured node must not create
+    // a .dgx-cache-id marker on a path it doesn't own.
+    return {
+      cacheId: "",
+      hfHome,
+      scannedAt: new Date().toISOString(),
+      totalBytes: 0,
+      diskFreeBytes: 0,
+      unconfigured: true,
+      repos: [],
+    };
+  }
   const cacheId = readOrCreateCacheId(hfHome);
   const repos = scanHfCache(hfHome);
   const hub = join(hfHome, "hub");

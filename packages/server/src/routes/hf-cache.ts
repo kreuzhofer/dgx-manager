@@ -96,6 +96,7 @@ hfCacheRouter.get("/", async (req, res) => {
       totalBytes: group.newest.totalBytes,
       diskFreeBytes: group.newest.diskFreeBytes,
       error: group.newest.error,
+      unconfigured: group.newest.unconfigured,
       repos: group.newest.repos.map((r) => {
         const use = repoUsage(r.repoId, groupNodeIds, usage);
         return {
