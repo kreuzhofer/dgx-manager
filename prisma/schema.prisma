@@ -96,6 +96,13 @@ model Deployment {
   // `stopped` (2026-07-09).
   error        String?
   port         Int?
+  // The name a client sends in the OpenAI `model` field to reach this
+  // deployment through the gateway — whatever name the runtime itself answers
+  // to. Resolved once when the deployment starts serving (a pinned runtime is
+  // asked; an allocation-inducing runtime contributes its model tag) and
+  // cleared on any terminal status, so only a serving deployment has one.
+  // See deployments/published-name.ts and docs/adr/0001-inference-gateway.md.
+  publishedName String?
   config       String?
   clusterMode  Boolean                @default(false)
   vramEstimate Int?

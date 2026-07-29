@@ -9,10 +9,9 @@ import { resolveNodeIp, isValidIpv4 } from "./node-ip.js";
 import { scheduleDebouncedReseed } from "../ssh/known-hosts-trigger.js";
 import { pushRegistriesToAgent } from "../registries/push.js";
 import { normalizeMac } from "../nodes/power.js";
-import { coordinatedDgxrunTeardown } from "../deployments/dgxrun-teardown.js";
 import { CapClient } from "../caps/cap-client.js";
 import { selectStaleNodes } from "./staleness.js";
-import { deploymentStatusUpdate, isTerminalDeploymentStatus } from "./deployment-status.js";
+import { handleDeploymentStatus, type DeploymentStatusMessage } from "./deployment-status-handler.js";
 
 const STALE_THRESHOLD_MS = 30_000;
 const SWEEP_INTERVAL_MS = 10_000;
@@ -579,49 +578,9 @@ export class AgentHub {
           }
 
           case "agent:deployment:status": {
-            const { deploymentId, status, port, error, deleteAfter, vramActual } = msg.payload;
-            try {
-              // deploymentStatusUpdate persists `error` (so a failed deploy is not
-              // indistinguishable from a stopped one) without letting the teardown
-              // tick that follows a crash erase it. See ws/deployment-status.ts.
-              await prisma.deployment.update({
-                where: { id: deploymentId },
-                data: deploymentStatusUpdate({ status, port, error, vramActual }),
-              });
-            } catch {
-              // Deployment may already be deleted
-              break;
-            }
-            if (error) console.error(`Deployment ${deploymentId} error: ${error}`);
-            const isStopped = isTerminalDeploymentStatus(status as string);
-            sseBroadcast({ type: "deployment:status", payload: { deploymentId, status, port, error, vramActual: isStopped ? 0 : (vramActual ? Number(vramActual) : undefined) } });
-
-            // Update cluster node statuses when deployment changes
-            if (["stopped", "failed", "running"].includes(status)) {
-              await prisma.clusterNode.updateMany({
-                where: { deploymentId },
-                data: { status },
-              }).catch(() => {});
-            }
-
-            // dgxrun coordinated teardown: the mp executor has no recovery, so
-            // ONE dead rank hangs the whole cluster. When any rank reports
-            // failed, tear down every rank. No-op for non-dgxrun deployments.
-            if (status === "failed") {
-              await coordinatedDgxrunTeardown(this, deploymentId).catch((err) =>
-                console.error(`[dgxrun] teardown failed for ${deploymentId}:`, err),
-              );
-            }
-
-            // Auto-delete record after confirmed stop
-            if (status === "stopped" && deleteAfter) {
-              try {
-                await prisma.clusterNode.deleteMany({ where: { deploymentId } });
-                await prisma.deployment.delete({ where: { id: deploymentId } });
-                sseBroadcast({ type: "deployment:deleted", payload: { deploymentId } });
-                console.log(`Deployment ${deploymentId} deleted after stop`);
-              } catch { /* already deleted */ }
-            }
+            // The whole path lives in ws/deployment-status-handler.ts so it can
+            // be driven without a socket — see that module's header.
+            await handleDeploymentStatus(msg.payload as DeploymentStatusMessage, { hub: this });
             break;
           }
 

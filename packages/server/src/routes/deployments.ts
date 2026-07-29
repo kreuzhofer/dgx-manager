@@ -34,7 +34,10 @@ export const deploymentsRouter = Router();
  *     description: >
  *       Returns every Deployment record ordered by creation date descending, each
  *       including its linked Node, Model (with finetuneJob.recipeFile for the edit-
- *       restart form), and ClusterNode membership. Status lifecycle: pending →
+ *       restart form), and ClusterNode membership. A running deployment also carries
+ *       `publishedName` — the name a client sends in the OpenAI `model` field to
+ *       reach it; null until it starts serving, and cleared when it stops.
+ *       Status lifecycle: pending →
  *       starting/building/downloading/launching/loading → running → (removing →)
  *       stopped/failed. Use SSE (`deployment:created`, `deployment:status`) for
  *       real-time updates after the initial load.

@@ -257,6 +257,27 @@ describe("deployment.error round-trips to the API", () => {
     const res = await request(makeApp(makeStubHub().hub)).get("/api/deployments");
     expect(res.body[0].error).toBeNull();
   });
+
+  // The dashboard's gateway view and any client picking a model name read this
+  // off the list route, so it has to survive the route's include/select shape.
+  it("exposes the published name on the list route", async () => {
+    await wipeAll();
+    await prisma.node.create({
+      data: { id: "n-pub", name: "n-pub", ipAddress: "192.168.44.53", status: "online" },
+    });
+    const model = await prisma.model.create({ data: { name: "m-pub", runtime: "vllm" } });
+    await prisma.deployment.create({
+      data: {
+        nodeId: "n-pub",
+        modelId: model.id,
+        status: "running",
+        port: 8000,
+        publishedName: "glm-5.2",
+      },
+    });
+    const res = await request(makeApp(makeStubHub().hub)).get("/api/deployments");
+    expect(res.body[0].publishedName).toBe("glm-5.2");
+  });
 });
 
 describe("maxoutmem on a dgxrun deploy", () => {

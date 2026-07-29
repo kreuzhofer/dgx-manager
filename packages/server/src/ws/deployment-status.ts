@@ -21,6 +21,8 @@ export interface DeploymentStatusUpdate {
   port?: number;
   error?: string | null;
   vramActual?: number;
+  /** Cleared on a terminal status; only a serving deployment has one. */
+  publishedName?: null;
 }
 
 /**
@@ -50,6 +52,10 @@ export function deploymentStatusUpdate(
 
   if (terminal) {
     data.vramActual = 0;
+    // A published name belongs to a deployment that is serving. Clearing it here
+    // also makes a restart re-resolve, so a changed recipe cannot leave the old
+    // name published.
+    data.publishedName = null;
   } else if (msg.vramActual != null && msg.vramActual !== "") {
     const n = Number(msg.vramActual);
     if (Number.isFinite(n)) data.vramActual = n;

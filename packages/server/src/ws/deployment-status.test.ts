@@ -33,6 +33,21 @@ describe("deploymentStatusUpdate", () => {
     }
   });
 
+  // A published name describes a deployment that is *serving*. Leaving it set
+  // on a stopped deployment would keep a dead entry in the gateway's view of
+  // what the cluster publishes, and would stop a restart under a changed recipe
+  // from re-resolving the name the runtime now answers to.
+  it("clears the published name on every terminal status", () => {
+    for (const status of ["stopped", "failed", "evicted"]) {
+      expect(deploymentStatusUpdate({ status }).publishedName).toBeNull();
+    }
+  });
+
+  it("leaves the published name alone while the deployment is live", () => {
+    expect("publishedName" in deploymentStatusUpdate({ status: "running", port: 8000 })).toBe(false);
+    expect("publishedName" in deploymentStatusUpdate({ status: "loading" })).toBe(false);
+  });
+
   it("passes vramActual through while the deployment is live", () => {
     expect(deploymentStatusUpdate({ status: "running", vramActual: 42 }).vramActual).toBe(42);
     expect(deploymentStatusUpdate({ status: "loading", vramActual: "17" }).vramActual).toBe(17);
