@@ -32,8 +32,12 @@ and must not be discoverable through it.
 ### Published name
 
 The name a client puts in the `model` field to reach a deployment. It is
-whatever name the deployment's runtime itself answers to — established when the
-deployment starts serving, and thereafter a property of the deployment.
+whatever name the deployment's runtime itself answers to.
+
+It belongs to a *serving lifetime*, not to the deployment for all time: it is
+established when the deployment starts serving, and a deployment that is not
+serving has no published name. A deployment that stops and starts again
+establishes it afresh, so a changed recipe cannot leave the old name published.
 
 It is never rewritten in flight: the name a client sends is the name the
 runtime receives. This is why it must be discovered rather than assumed. A

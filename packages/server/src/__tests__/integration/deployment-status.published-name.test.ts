@@ -60,6 +60,9 @@ async function wipeAll() {
 }
 afterEach(wipeAll);
 
+/** A hub that dispatches nowhere — only the failed-status path uses it. */
+const noopHub = { sendToAgent: () => {} };
+
 /** Answers an OpenAI `/v1/models` request with one served id. */
 function servingFetch(id: string) {
   return vi.fn(async () =>
@@ -101,7 +104,7 @@ describe("agent:deployment:status — publishing a name", () => {
 
     await handleDeploymentStatus(
       { deploymentId: d.id, status: "running", port: 8000 },
-      { fetchImpl: servingFetch("glm-5.2-served") },
+      { hub: noopHub, fetchImpl: servingFetch("glm-5.2-served") },
     );
 
     const after = await prisma.deployment.findUnique({ where: { id: d.id } });
@@ -119,7 +122,7 @@ describe("agent:deployment:status — publishing a name", () => {
 
     await handleDeploymentStatus(
       { deploymentId: d.id, status: "running", port: 11434 },
-      { fetchImpl: probe },
+      { hub: noopHub, fetchImpl: probe },
     );
 
     const after = await prisma.deployment.findUnique({ where: { id: d.id } });
@@ -132,7 +135,7 @@ describe("agent:deployment:status — publishing a name", () => {
 
     await handleDeploymentStatus(
       { deploymentId: d.id, status: "loading" },
-      { fetchImpl: servingFetch("nope") },
+      { hub: noopHub, fetchImpl: servingFetch("nope") },
     );
 
     const after = await prisma.deployment.findUnique({ where: { id: d.id } });
@@ -145,11 +148,11 @@ describe("agent:deployment:status — publishing a name", () => {
     const d = await seedDeployment({ runtime: "vllm", modelName: "m", displayName: "alias" });
     await handleDeploymentStatus(
       { deploymentId: d.id, status: "running", port: 8000 },
-      { fetchImpl: servingFetch("alias") },
+      { hub: noopHub, fetchImpl: servingFetch("alias") },
     );
     expect((await prisma.deployment.findUnique({ where: { id: d.id } }))?.publishedName).toBe("alias");
 
-    await handleDeploymentStatus({ deploymentId: d.id, status: "stopped" }, {});
+    await handleDeploymentStatus({ deploymentId: d.id, status: "stopped" }, { hub: noopHub });
 
     const after = await prisma.deployment.findUnique({ where: { id: d.id } });
     expect(after?.publishedName).toBeNull();
@@ -161,11 +164,68 @@ describe("agent:deployment:status — publishing a name", () => {
     const d = await seedDeployment({ runtime: "vllm", modelName: "m" });
     const probe = servingFetch("first-answer");
 
-    await handleDeploymentStatus({ deploymentId: d.id, status: "running", port: 8000 }, { fetchImpl: probe });
-    await handleDeploymentStatus({ deploymentId: d.id, status: "running", port: 8000 }, { fetchImpl: probe });
+    await handleDeploymentStatus({ deploymentId: d.id, status: "running", port: 8000 }, { hub: noopHub, fetchImpl: probe });
+    await handleDeploymentStatus({ deploymentId: d.id, status: "running", port: 8000 }, { hub: noopHub, fetchImpl: probe });
 
     expect(probe).toHaveBeenCalledTimes(1);
     expect((await prisma.deployment.findUnique({ where: { id: d.id } }))?.publishedName).toBe("first-answer");
+  });
+
+  // The agent reports `running` the moment vLLM logs startup-complete, which can
+  // beat the socket accepting connections. The guess persisted in that window
+  // must not become permanent — that is exactly the unexplained 404 this
+  // resolution exists to prevent, made durable instead of transient.
+  it("upgrades a guessed name once the endpoint answers on a later report", async () => {
+    const d = await seedDeployment({
+      runtime: "vllm",
+      modelName: "catalog-name",
+      displayName: "guess",
+    });
+    const dead = vi.fn(async () => { throw new Error("ECONNREFUSED"); }) as unknown as typeof fetch;
+
+    await handleDeploymentStatus(
+      { deploymentId: d.id, status: "running", port: 8000 },
+      { hub: noopHub, fetchImpl: dead },
+    );
+    expect((await prisma.deployment.findUnique({ where: { id: d.id } }))?.publishedName).toBe("guess");
+
+    await handleDeploymentStatus(
+      { deploymentId: d.id, status: "running", port: 8000 },
+      { hub: noopHub, fetchImpl: servingFetch("what-it-really-serves") },
+    );
+
+    const after = await prisma.deployment.findUnique({ where: { id: d.id } });
+    expect(after?.publishedName).toBe("what-it-really-serves");
+  });
+
+  // The dgxrun mp executor has no recovery: one dead rank hangs the whole
+  // cluster, so a failed report must fan a teardown to every rank. Extracting
+  // this path out of the hub is exactly where that could have been dropped.
+  it("fans a dgxrun teardown out when a rank reports failed", async () => {
+    const node = await prisma.node.create({
+      data: { name: "head", ipAddress: "10.0.0.9", status: "online" },
+    });
+    const model = await prisma.model.create({ data: { name: "m-mp", runtime: "vllm" } });
+    const d = await prisma.deployment.create({
+      data: {
+        nodeId: node.id,
+        modelId: model.id,
+        status: "running",
+        port: 8000,
+        config: JSON.stringify({ runner: "dgxrun" }),
+      },
+    });
+    const sendToAgent = vi.fn();
+
+    await handleDeploymentStatus(
+      { deploymentId: d.id, status: "failed", error: "rank 2 died" },
+      { hub: { sendToAgent } },
+    );
+
+    expect(sendToAgent).toHaveBeenCalledWith(
+      node.id,
+      expect.objectContaining({ type: "cmd:undeploy" }),
+    );
   });
 
   // A deployment that is up must never be failed by our inability to name it.
@@ -179,7 +239,7 @@ describe("agent:deployment:status — publishing a name", () => {
 
     await handleDeploymentStatus(
       { deploymentId: d.id, status: "running", port: 8000 },
-      { fetchImpl: dead },
+      { hub: noopHub, fetchImpl: dead },
     );
 
     const after = await prisma.deployment.findUnique({ where: { id: d.id } });
@@ -189,7 +249,7 @@ describe("agent:deployment:status — publishing a name", () => {
 
   it("ignores a status report for a deployment that no longer exists", async () => {
     await expect(
-      handleDeploymentStatus({ deploymentId: "gone", status: "running", port: 8000 }, {}),
+      handleDeploymentStatus({ deploymentId: "gone", status: "running", port: 8000 }, { hub: noopHub }),
     ).resolves.toBeUndefined();
   });
 });

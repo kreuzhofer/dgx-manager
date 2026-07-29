@@ -2,7 +2,7 @@ import { prisma } from "../prisma.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import { coordinatedDgxrunTeardown, type TeardownHub } from "../deployments/dgxrun-teardown.js";
 import { deploymentEndpointUrl } from "../benchmarks/endpoint.js";
-import { resolvePublishedName } from "../deployments/published-name.js";
+import { resolvePublishedName, isAllocationInducingRuntime } from "../deployments/published-name.js";
 import { deploymentStatusUpdate, isTerminalDeploymentStatus, HEALTHY_STATUS } from "./deployment-status.js";
 
 /**
@@ -25,8 +25,12 @@ export interface DeploymentStatusMessage {
 }
 
 export interface DeploymentStatusDeps {
-  /** Needed only to fan out a dgxrun teardown; omit when there is no hub. */
-  hub?: TeardownHub | null;
+  /**
+   * Required: a failed rank fans a coordinated teardown out to every other
+   * rank. Optional would let a caller silently skip it, and the dgxrun mp
+   * executor has no recovery — one dead rank hangs the whole cluster.
+   */
+  hub: TeardownHub;
   /** Injected in tests so publishing a name never touches the network. */
   fetchImpl?: typeof fetch;
 }
@@ -49,19 +53,41 @@ async function publishName(deploymentId: string, fetchImpl?: typeof fetch): Prom
       where: { id: deploymentId },
       include: { node: true, model: true },
     });
-    if (!d || d.publishedName) return;
+    if (!d) return;
 
-    const endpointUrl = d.node?.ipAddress && d.port ? deploymentEndpointUrl(d) : null;
+    // An allocation-inducing runtime's tag is authoritative and involves no
+    // probe, so there is nothing a later report could improve on.
+    if (d.publishedName && isAllocationInducingRuntime(d.model.runtime)) return;
+
+    // A pinned runtime's stored name that still equals the local guess may be
+    // exactly that — a guess persisted because the endpoint had not accepted
+    // connections yet on the first serving report. Ask again on later reports
+    // until the runtime answers for itself; otherwise a narrow startup race
+    // makes the guess permanent, which is the unexplained-404 this resolution
+    // exists to prevent. Serving reports are rare (status change, reconnect
+    // reconciliation), so the redundant probe in the already-correct case costs
+    // nothing worth a schema column to avoid.
+    const fallback = d.displayName ?? d.model.name;
+    if (d.publishedName && d.publishedName !== fallback) return;
+
+    const endpointUrl = d.node.ipAddress && d.port ? deploymentEndpointUrl(d) : null;
     const publishedName = await resolvePublishedName(
       {
-        runtime: d.model?.runtime ?? null,
-        modelName: d.model?.name ?? "",
+        runtime: d.model.runtime,
+        modelName: d.model.name,
         displayName: d.displayName,
         endpointUrl,
       },
       fetchImpl,
     );
-    if (!publishedName) return;
+    if (!publishedName) {
+      console.error(
+        `[gateway] deployment ${deploymentId} resolved to an empty published name ` +
+          `(model "${d.model.name}", runtime "${d.model.runtime}") — it will not be reachable`,
+      );
+      return;
+    }
+    if (publishedName === d.publishedName) return;
 
     await prisma.deployment.update({ where: { id: deploymentId }, data: { publishedName } });
   } catch (err) {
@@ -72,7 +98,7 @@ async function publishName(deploymentId: string, fetchImpl?: typeof fetch): Prom
 /** Apply one agent deployment-status report. Mirrors the old inline handler. */
 export async function handleDeploymentStatus(
   msg: DeploymentStatusMessage,
-  deps: DeploymentStatusDeps = {},
+  deps: DeploymentStatusDeps,
 ): Promise<void> {
   const { deploymentId, status, port, error, deleteAfter, vramActual } = msg;
 
@@ -105,14 +131,14 @@ export async function handleDeploymentStatus(
   if (status === HEALTHY_STATUS) await publishName(deploymentId, deps.fetchImpl);
 
   // Update cluster node statuses when deployment changes
-  if (["stopped", "failed", "running"].includes(status)) {
+  if (["stopped", "failed", HEALTHY_STATUS].includes(status)) {
     await prisma.clusterNode.updateMany({ where: { deploymentId }, data: { status } }).catch(() => {});
   }
 
   // dgxrun coordinated teardown: the mp executor has no recovery, so ONE dead
   // rank hangs the whole cluster. When any rank reports failed, tear down every
   // rank. No-op for non-dgxrun deployments.
-  if (status === "failed" && deps.hub) {
+  if (status === "failed") {
     await coordinatedDgxrunTeardown(deps.hub, deploymentId).catch((err) =>
       console.error(`[dgxrun] teardown failed for ${deploymentId}:`, err),
     );
