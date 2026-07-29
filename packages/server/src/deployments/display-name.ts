@@ -8,11 +8,18 @@ import type { PrismaClient } from "../generated/prisma/client.js";
  *   2. vLLM's `--served-model-name` flag, which sets the value that surfaces
  *      via the OpenAI API's `/v1/models` and the `model` field of completions.
  *
- * Both consumers need a value that's safe in URLs and HTTP `model` fields.
- * We restrict to `[A-Za-z0-9._:-]` (letters, digits, dot, dash, underscore,
- * colon) — the same alphabet HuggingFace model ids and Docker image tags use.
- * Spaces and slashes are rejected: spaces break clients that don't quote the
- * model field; slashes collide with REST path segments in the loadbalancer.
+ * Both consumers need a value that's safe as a CLI argument and as an HTTP
+ * `model` field. We restrict to `[A-Za-z0-9._:-]` (letters, digits, dot, dash,
+ * underscore, colon) — the same alphabet HuggingFace model ids and Docker
+ * image tags use.
+ *
+ * Spaces are rejected because they break clients that don't quote the model
+ * field. Slashes are rejected because the display name becomes the
+ * deployment's *published name* — the name a client sends to reach it — and a
+ * slash makes that indistinguishable from a catalog reference like
+ * `@dgxrun/glm-5.2-…`, which is precisely the ambiguity a display name exists
+ * to remove. (This rule predates the gateway and originally cited the old
+ * load-balancer's path-segment routing; that scheme is gone, the rule is not.)
  */
 export class DisplayNameError extends Error {
   constructor(message: string) {

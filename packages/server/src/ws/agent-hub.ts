@@ -617,7 +617,6 @@ export class AgentHub {
             if (status === "stopped" && deleteAfter) {
               try {
                 await prisma.clusterNode.deleteMany({ where: { deploymentId } });
-                await prisma.loadBalancerEndpoint.deleteMany({ where: { deploymentId } });
                 await prisma.deployment.delete({ where: { id: deploymentId } });
                 sseBroadcast({ type: "deployment:deleted", payload: { deploymentId } });
                 console.log(`Deployment ${deploymentId} deleted after stop`);

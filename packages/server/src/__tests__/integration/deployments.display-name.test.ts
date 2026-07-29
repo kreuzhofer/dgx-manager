@@ -76,7 +76,6 @@ async function wipeAll() {
   // between deployment and model because Model.finetuneJobId is a
   // (nullable) FK to FineTuneJob — without this, Task 5's seeds break
   // when this `beforeEach` runs.
-  await prisma.loadBalancerEndpoint.deleteMany();
   await prisma.clusterNode.deleteMany();
   await prisma.deployment.deleteMany();
   await prisma.fineTuneJob.deleteMany();

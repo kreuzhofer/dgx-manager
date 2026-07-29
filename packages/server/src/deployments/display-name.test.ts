@@ -27,7 +27,7 @@ describe("normalizeDisplayName", () => {
     expect(() => normalizeDisplayName("chat 3d")).toThrow(DisplayNameError);
   });
 
-  it("rejects strings containing slashes (would break loadbalancer routing)", () => {
+  it("rejects strings containing slashes (a published name must not look like a catalog ref)", () => {
     expect(() => normalizeDisplayName("vendor/chat3d")).toThrow(DisplayNameError);
   });
 

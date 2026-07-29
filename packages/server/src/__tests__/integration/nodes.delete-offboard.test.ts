@@ -53,7 +53,6 @@ afterAll(async () => {
 afterEach(async () => {
   await prisma.fineTuneClusterNode.deleteMany();
   await prisma.trainingMetric.deleteMany();
-  await prisma.loadBalancerEndpoint.deleteMany();
   await prisma.clusterNode.deleteMany();
   await prisma.metricSnapshot.deleteMany();
   await prisma.deployment.deleteMany();
@@ -101,7 +100,7 @@ async function seedNodeWithForeignKeys() {
     data: { jobId: job.id, nodeId: worker.id, role: "worker" },
   });
 
-  // The worker also has its own deployment with a cluster node + LB endpoint.
+  // The worker also has its own deployment with a cluster node.
   const model = await prisma.model.create({
     data: { name: "m1", runtime: "vllm" },
   });
@@ -110,12 +109,6 @@ async function seedNodeWithForeignKeys() {
   });
   await prisma.clusterNode.create({
     data: { deploymentId: deployment.id, nodeId: worker.id, role: "head" },
-  });
-  const rule = await prisma.loadBalancerRule.create({
-    data: { name: "r1", modelName: "m1" },
-  });
-  await prisma.loadBalancerEndpoint.create({
-    data: { ruleId: rule.id, deploymentId: deployment.id },
   });
   await prisma.metricSnapshot.create({
     data: { nodeId: worker.id, gpuUtil: 10, vramUsed: 100 },
@@ -139,7 +132,6 @@ describe("DELETE /api/nodes/:id — FK cleanup", () => {
     // The parent job (on the head node) is untouched.
     expect(await prisma.fineTuneJob.count()).toBe(1);
     expect(await prisma.deployment.count({ where: { nodeId: worker.id } })).toBe(0);
-    expect(await prisma.loadBalancerEndpoint.count()).toBe(0);
   });
 
   it("force via body { force: true } also deletes", async () => {

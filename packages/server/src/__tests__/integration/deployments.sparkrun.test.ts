@@ -48,7 +48,6 @@ afterAll(async () => {
 
 /** Wipe all tables in FK-dependency order. */
 async function wipeAll() {
-  await prisma.loadBalancerEndpoint.deleteMany({});
   await prisma.clusterNode.deleteMany({});
   await prisma.deployment.deleteMany({});
   await prisma.metricSnapshot.deleteMany({});

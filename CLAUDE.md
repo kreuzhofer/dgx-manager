@@ -72,17 +72,16 @@ npm run db:studio        # Open Prisma Studio GUI
 
 ### Server (`packages/server/src/`)
 - `index.ts` — Express setup, WebSocket hub init, route mounting
-- `routes/` — REST handlers: nodes, models, deployments (recipeFile | recipePath | inline recipeYaml), finetune, loadbalancer, recipes
+- `routes/` — REST handlers: nodes, models, deployments (recipeFile | recipePath | inline recipeYaml), finetune, recipes
 - `deployments/recipe-path.ts`, `deployments/recipe-inline.ts` — validate the path / inline-YAML deploy sources (security boundary)
 - `ws/agent-hub.ts` — Manages agent WebSocket connections, processes metrics
 - `ws/dashboard-hub.ts` — Broadcasts updates to connected dashboards
 - `ssh/provisioner.ts` — Audits prerequisites, auto-installs packages on nodes (incl. sparkrun install + non-interactive setup)
 - `routes/agent-bundle.ts` — Serves per-arch agent tarballs + generates the token install script
-- `proxy/inference-proxy.ts` — Round-robin request routing to deployments
 - `openapi.ts` — builds the OpenAPI 3 spec (served at `/api/openapi.json`, Swagger UI at `/api/docs`)
 
 ### Dashboard (`packages/dashboard/`)
-- `app/` — Next.js App Router pages (overview, nodes, models, deployments, finetune, loadbalancer)
+- `app/` — Next.js App Router pages (overview, nodes, models, deployments, finetune)
 - `components/` — node-card, metric-gauge, deployment-table, finetune-log
 - `lib/api.ts` — Fetch wrapper; `lib/ws.ts` — useWebSocket hook
 
@@ -96,7 +95,7 @@ npm run db:studio        # Open Prisma Studio GUI
 
 ## Database
 
-SQLite via Prisma ORM. Schema at `prisma/schema.prisma`. Core models: Node, Model, Deployment, MetricSnapshot, LoadBalancerRule, LoadBalancerEndpoint, FineTuneJob.
+SQLite via Prisma ORM. Schema at `prisma/schema.prisma`. Core models: Node, Model, Deployment, MetricSnapshot, FineTuneJob.
 
 ## Environment Variables
 

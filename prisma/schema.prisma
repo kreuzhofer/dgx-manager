@@ -104,7 +104,6 @@ model Deployment {
   updatedAt    DateTime               @updatedAt
   node         Node                   @relation(fields: [nodeId], references: [id])
   model        Model                  @relation(fields: [modelId], references: [id])
-  lbEndpoints   LoadBalancerEndpoint[]
   clusterNodes  ClusterNode[]
   benchmarkRuns BenchmarkRun[]
 }
@@ -180,25 +179,6 @@ model AuditEvent {
   node   Node     @relation(fields: [nodeId], references: [id])
 
   @@index([nodeId, ts(sort: Desc)])
-}
-
-model LoadBalancerRule {
-  id         String                 @id @default(cuid())
-  name       String                 @unique
-  modelName  String
-  strategy   String                 @default("round-robin")
-  listenPath String                 @default("/v1")
-  createdAt  DateTime               @default(now())
-  endpoints  LoadBalancerEndpoint[]
-}
-
-model LoadBalancerEndpoint {
-  id           String           @id @default(cuid())
-  ruleId       String
-  deploymentId String
-  weight       Int              @default(1)
-  rule         LoadBalancerRule @relation(fields: [ruleId], references: [id])
-  deployment   Deployment       @relation(fields: [deploymentId], references: [id])
 }
 
 model FineTuneJob {

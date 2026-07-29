@@ -742,7 +742,6 @@ deploymentsRouter.delete("/:id", async (req, res) => {
       }
     }
     await prisma.clusterNode.deleteMany({ where: { deploymentId: deployment.id } });
-    await prisma.loadBalancerEndpoint.deleteMany({ where: { deploymentId: deployment.id } });
     await prisma.deployment.delete({ where: { id: deployment.id } });
     sseBroadcast({ type: "deployment:deleted", payload: { deploymentId: deployment.id } });
     return res.json({ status: "deleted" });

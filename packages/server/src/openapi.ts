@@ -14,13 +14,12 @@ Full-stack control plane for a DGX Spark cluster. Domains and how they relate:
 - **Deployments** — launch a recipe on one or more nodes via **sparkrun** (the head-node agent runs
   \`sparkrun run\`). Accepts a registry recipe (\`recipeFile\`), an NFS path (\`recipePath\`), or an
   **inline recipe body** (\`recipeYaml\`) for remote recipe development. Stopped via DELETE.
-- **Load Balancer** — round-robin inference proxy routing to running deployments.
 - **Fine-tune** — training jobs (train -> merge -> quantize -> deploy the merged model via sparkrun).
 - **Benchmarks** — server-side benchmark runs (llama-benchy / tool-eval-bench / lm-eval) against a deployment.
 - **Datasets / Models / Settings / Tokens / Agent bundle** — supporting resources.
 
 Typical flow: register a Node -> it provisions (incl. sparkrun) -> pick a Recipe -> create a
-Deployment -> route traffic through the Load Balancer -> optionally Benchmark it.
+Deployment -> optionally Benchmark it.
 `;
 
 // Build an absolute glob so swagger-jsdoc resolves correctly both at runtime
@@ -44,7 +43,6 @@ export function buildOpenApiSpec() {
         { name: "Cluster", description: "Cluster-wide operations (e.g. reseed cross-node SSH known_hosts trust)." },
         { name: "Recipes", description: "Inference recipe catalog from sparkrun registries." },
         { name: "Deployments", description: "Launch/stop inference workloads via sparkrun (registry ref, NFS path, or inline YAML)." },
-        { name: "Load Balancer", description: "Round-robin inference proxy over running deployments." },
         { name: "Fine-tune", description: "Training jobs and deploying fine-tuned models." },
         { name: "Benchmarks", description: "Server-side benchmark runs against deployments." },
         { name: "Datasets", description: "Training/eval dataset management." },

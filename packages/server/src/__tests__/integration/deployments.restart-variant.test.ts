@@ -40,7 +40,6 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await prisma.loadBalancerEndpoint.deleteMany();
   await prisma.clusterNode.deleteMany();
   await prisma.deployment.deleteMany();
   await prisma.fineTuneJob.deleteMany();

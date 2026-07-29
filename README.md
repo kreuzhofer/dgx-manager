@@ -11,7 +11,7 @@ benchmark them — with a real-time web dashboard and zero cloud dependencies.
 - **Real-time GPU telemetry** — utilization, VRAM, temperature, network/RDMA across every node at 5-second resolution
 - **One-click model deployment** — [sparkrun](https://github.com/spark-arena/sparkrun)-driven inference (vLLM / SGLang / llama.cpp) and Ollama (native). Deploy a recipe from a registry, an NFS path, or an **inline YAML body posted over the API** (no cluster-filesystem access needed)
 - **Multi-node inference clusters** — tensor/pipeline parallelism over Ray; serves models up to **Nemotron-3-Ultra 550B-A55B NVFP4 across 4 nodes**
-- **Load balancer** — rules + endpoints API, plus a round-robin / first-available inference proxy *(proxy and dashboard UI not yet wired up)*
+- **Inference gateway** — one OpenAI-compatible URL fronting every running deployment, routed by the model name in the request *(in progress — replaces the removed load balancer, see [ADR 0001](docs/adr/0001-inference-gateway.md))*
 - **End-to-end fine-tuning** — LoRA via DeepSpeed ZeRO-2/3, TRL+PEFT, or Unsloth; multi-node training; resume-from-checkpoint; merge → deploy in one loop
 - **Live training observability** — phase-aware progress and a live loss curve (train + eval overlay) streamed to the dashboard
 - **Benchmarking & evaluation** — llama-benchy presets (`quick-smoke`, `chat-short`, `chat-long`, `code-32k`, `throughput`) with a compare view
@@ -130,11 +130,15 @@ selectable in the fine-tune job form.
 
 ![Datasets](docs/screenshots/datasets.png)
 
-### Load balancer
+### Inference gateway
 
-Rules and endpoints are managed via the `/api/lb` REST API. A round-robin /
-first-available inference proxy is implemented in `proxy/inference-proxy.ts`
-but is not currently mounted in the server. **The dashboard UI is also pending.**
+**In progress.** One OpenAI-compatible URL on the manager fronts every running
+deployment: a client sends a model name and the gateway routes to whichever
+deployment serves it, without the client knowing a node, a port, or a runtime.
+It is also the only sanctioned path to Ollama deployments, which the agent
+firewall restricts to the manager. The load balancer it replaces — rules,
+endpoints, and a never-mounted proxy — has been removed; see
+[ADR 0001](docs/adr/0001-inference-gateway.md) for the reasoning.
 
 ### Agent onboarding & updates
 
@@ -176,7 +180,6 @@ REST under `/api`, plus WebSocket hubs at `/ws/dashboard` and `/ws/agent`.
 | `/api/models` | Model registry |
 | `/api/deployments` | Solo & cluster deployments (registry recipe, NFS path, or inline `recipeYaml`), logs, restart |
 | `/api/finetune` | Fine-tune jobs, resume, merge, deploy |
-| `/api/lb` | Load-balancer rules & endpoints |
 | `/api/recipes` | Inference recipe catalog (from `sparkrun list` registries, via agents) |
 | `/api/training-recipes` | Training recipes + inference variants |
 | `/api/tokens` | Single-use agent join tokens |
@@ -195,7 +198,9 @@ Full setup and endpoint detail: **[Self-Hosting Guide](docs/SELF-HOSTING.md)**.
 ## Project status
 
 Nodes & metrics, deployments (solo and multi-node), fine-tuning, datasets, and
-benchmarks are functional end-to-end. The Models and Load Balancer pages have
-complete server APIs with dashboard UIs still pending. Auth and multi-cluster
-support are future phases. See [docs/ROADMAP.md](docs/ROADMAP.md) for the full
+benchmarks are functional end-to-end. The Models page has a complete server API
+with its dashboard UI still pending. An inference gateway — one
+OpenAI-compatible URL fronting every running deployment — is in progress and
+replaces the removed load balancer. Auth and multi-cluster support are future
+phases. See [docs/ROADMAP.md](docs/ROADMAP.md) for the full
 feature status.

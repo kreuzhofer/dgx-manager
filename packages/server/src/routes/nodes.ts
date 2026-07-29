@@ -30,7 +30,6 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  *   - MetricSnapshot.nodeId            -> Node          (Restrict: manual)
  *   - ClusterNode.nodeId               -> Node          (Restrict: manual)
  *   - ClusterNode.deploymentId         -> Deployment    (Restrict: manual)
- *   - LoadBalancerEndpoint.deploymentId-> Deployment    (Restrict: manual)
  *   - FineTuneClusterNode.nodeId       -> Node          (Restrict: manual)  <-- the bug
  *   - FineTuneClusterNode.jobId        -> FineTuneJob   (Cascade, but delete explicitly too)
  *   - Deployment.nodeId                -> Node          (Restrict: manual)
@@ -44,8 +43,6 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  */
 async function deleteNodeRecords(nodeId: string): Promise<void> {
   await prisma.metricSnapshot.deleteMany({ where: { nodeId } });
-  // Load-balancer endpoints pointing at this node's deployments.
-  await prisma.loadBalancerEndpoint.deleteMany({ where: { deployment: { nodeId } } });
   // Cluster memberships: this node as a worker elsewhere, and members of this
   // node's own deployments.
   await prisma.clusterNode.deleteMany({ where: { nodeId } });
@@ -775,7 +772,7 @@ nodesRouter.post("/:id/wake", async (req, res) => {
  *     summary: Offboard/remove a node (graceful with timeout, or forced)
  *     description: >
  *       Removes a node and every DB record that FK-references it (metrics,
- *       deployments, fine-tune jobs, cluster memberships, load-balancer endpoints).
+ *       deployments, fine-tune jobs, cluster memberships).
  *       Installed software on the machine (Docker, Ollama, etc.) is NOT removed.
  *
  *

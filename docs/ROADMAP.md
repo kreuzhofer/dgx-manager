@@ -30,14 +30,12 @@ DGX Manager aims to be the simplest way to operate a personal or team GPU cluste
 - Deployment persistence + reconnect reconciliation (kind-scoped) across agent restarts
 - Real-time deployment log streaming — incl. live vLLM model-loading output via a `sparkrun logs` follower — and full status lifecycle
 - Recipe catalog auto-discovered from sparkrun registries via `sparkrun list` (`POST /api/recipes/refresh` re-scans)
-- Server-side load balancer: rules + endpoints API (round-robin / first-available strategy implemented); the inference proxy router (`proxy/inference-proxy.ts`) is written but **not yet mounted in the server**
 - Dashboard: Deployment creation (runtime toggle, node/recipe selection), log viewer, stop/restart controls, cluster node visualization
 
 ### Remaining UI work
 
 The server APIs for these features are complete, but the dashboard pages are still placeholders:
 
-- **Load Balancer UI** — Rule management, endpoint assignment, strategy configuration
 - **Models UI** — Model registry browser and management
 
 ### Missing API endpoints
@@ -409,7 +407,7 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 | Multi-node (dgxrun mp) | ✅ | ✅ | ✅ | ✅ |
 | Power Control (reboot/WoL) | ✅ | ✅ | ✅ | ✅ |
 | Agent v2 (mgmt plane) | ✅† | ✅† | 🚧 | ✅† |
-| Load Balancer | ✅* | — | placeholder | ✅ |
+| Inference Gateway | 🚧* | — | 🚧* | 🚧* |
 | Models | ✅ | — | placeholder | ✅ |
 | Fine-Tuning (single) | ✅ | ✅ | ✅ | ✅ |
 | Fine-Tuning (multi-node) | ✅ | ✅ | ✅ | ✅ |
@@ -428,7 +426,7 @@ SSH remains the coordination mechanism for multi-node training (torchrun) and vL
 | Auth & RBAC | — | — | — | — |
 | Multi-Cluster | — | — | — | — |
 
-*\*Load Balancer: rules/endpoints API complete; inference proxy implemented but not mounted; dashboard UI pending.*
+*\*Inference Gateway: replaces the load balancer, which was removed (rules/endpoints tables, API, and the never-mounted proxy) — see [ADR 0001](adr/0001-inference-gateway.md). One OpenAI-compatible URL fronting every running deployment, routed by published name. Specified in issue #3; in progress.*
 
 *†Agent v2: Phase 1 (fork-free diag / audited exec / rich metrics / capability registry) + Phase 2 (robust self-update) + the heartbeat-staleness sweep are shipped & deployed; declarative provision/restore, image transfer, and Phase 4 (dgxrun on the registry) pending. Dashboard surface for diag/exec still minimal.*
 

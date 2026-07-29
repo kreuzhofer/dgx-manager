@@ -15,6 +15,18 @@ describe("OpenAPI", () => {
     const tagNames = (res.body.tags ?? []).map((t: any) => t.name);
     expect(tagNames).toEqual(expect.arrayContaining(["Deployments", "Nodes", "Recipes"]));
   });
+  // The load balancer was removed in favour of the inference gateway (ADR 0001).
+  // It was a *published* part of the API contract, so its absence is asserted
+  // rather than merely no longer checked — a stray re-mount would otherwise
+  // silently restore a documented route nothing implements.
+  it("no longer publishes the removed load balancer", async () => {
+    const res = await request(app()).get("/api/openapi.json");
+    const pathKeys = Object.keys(res.body.paths ?? {});
+    expect(pathKeys.filter((p) => p.startsWith("/api/lb"))).toEqual([]);
+    const tagNames = (res.body.tags ?? []).map((t: any) => t.name);
+    expect(tagNames).not.toContain("Load Balancer");
+    expect(res.body.info.description).not.toMatch(/load balancer/i);
+  });
   it("serves Swagger UI HTML", async () => {
     const res = await request(app()).get("/api/docs/");
     expect(res.status).toBe(200);
@@ -31,7 +43,7 @@ describe("OpenAPI", () => {
     expect(paths["/api/nodes"]?.get?.tags).toContain("Nodes");
     expect(JSON.stringify(deploy.requestBody ?? {})).toMatch(/recipeYaml/);
   });
-  it("has non-empty paths covering all 13 routers", async () => {
+  it("has non-empty paths covering all 12 routers", async () => {
     const res = await request(app()).get("/api/openapi.json");
     const paths = res.body.paths ?? {};
     const pathKeys = Object.keys(paths);
@@ -42,7 +54,6 @@ describe("OpenAPI", () => {
     expect(paths["/api/models"]).toBeTruthy();
     expect(paths["/api/deployments"]).toBeTruthy();
     expect(paths["/api/finetune"]).toBeTruthy();
-    expect(paths["/api/lb/rules"]).toBeTruthy();
     expect(paths["/api/recipes"]).toBeTruthy();
     expect(paths["/api/training-recipes"]).toBeTruthy();
     expect(paths["/api/tokens"]).toBeTruthy();

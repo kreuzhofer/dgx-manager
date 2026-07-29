@@ -94,7 +94,6 @@ function makeApp(hub: unknown) {
  * Children before parents: LBEndpoint → ClusterNode → Deployment → ...
  */
 async function wipeAll() {
-  await prisma.loadBalancerEndpoint.deleteMany({});
   await prisma.clusterNode.deleteMany({});
   await prisma.deployment.deleteMany({});
   await prisma.metricSnapshot.deleteMany({});

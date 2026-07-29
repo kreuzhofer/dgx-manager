@@ -21,7 +21,7 @@ A single web dashboard to provision your nodes, deploy and load-balance inferenc
 
 ## Current state
 
-Node management, deployment/inference, fine-tuning, agent bootstrap, and benchmarking are all functional. There's still plenty on the list — a Load Balancer UI and Models registry UI (the server APIs exist, the front-ends don't yet), auth/RBAC, and multi-cluster support are still to come.
+Node management, deployment/inference, fine-tuning, agent bootstrap, and benchmarking are all functional. There's still plenty on the list — an inference gateway (one OpenAI-compatible URL fronting every deployment), a Models registry UI (the server API exists, the front-end doesn't yet), auth/RBAC, and multi-cluster support are still to come.
 
 ## Where I could really use help
 
