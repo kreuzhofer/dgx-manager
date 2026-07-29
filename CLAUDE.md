@@ -21,7 +21,7 @@ Dashboard <--WS /ws/dashboard--> Server <--WS /ws/agent--> Agent (on DGX node)
                               Prisma (SQLite)
 ```
 
-The server has REST routes at `/api/*` and an inference proxy at `/lb/` for round-robin routing to deployments.
+The server has REST routes at `/api/*`. An inference gateway fronting every running deployment is in progress — see [ADR 0001](docs/adr/0001-inference-gateway.md); the load balancer it replaces has been removed.
 
 ## Running the App
 

@@ -4,7 +4,7 @@
 
 > A full-stack system for managing DGX Spark GPU clusters — node provisioning, model deployment, inference, fine-tuning, and beyond.
 
-DGX Manager aims to be the simplest way to operate a personal or team GPU cluster. Add nodes over SSH, deploy models with one click, load-balance inference across machines, and fine-tune models on your own hardware. Built for self-hosted use with a clean web UI and zero cloud dependencies.
+DGX Manager aims to be the simplest way to operate a personal or team GPU cluster. Add nodes over SSH, deploy models with one click, serve inference across machines, and fine-tune models on your own hardware. Built for self-hosted use with a clean web UI and zero cloud dependencies.
 
 ---
 
@@ -21,7 +21,7 @@ DGX Manager aims to be the simplest way to operate a personal or team GPU cluste
 
 ## Phase 2: Model Deployment & Inference ✅
 
-**Goal:** One-click model deployment with multi-node cluster support and load-balanced inference.
+**Goal:** One-click model deployment with multi-node cluster support and gateway-served inference.
 
 - Deployment via [sparkrun](https://github.com/spark-arena/sparkrun) (the head-node agent runs `sparkrun run`) — vLLM / SGLang / llama.cpp — plus Ollama (native)
 - Three recipe sources on `POST /api/deployments`: a registry recipe (`recipeFile`), an NFS path (`recipePath`), or an inline `recipeYaml` body (remote-dev, no cluster-fs access)

@@ -91,7 +91,7 @@ function makeApp(hub: unknown) {
 
 /**
  * Wipe all tables in FK-dependency order so the next test starts clean.
- * Children before parents: LBEndpoint → ClusterNode → Deployment → ...
+ * Children before parents: ClusterNode → Deployment → ...
  */
 async function wipeAll() {
   await prisma.clusterNode.deleteMany({});

@@ -1,7 +1,7 @@
 # DGX Manager
 
 A self-hosted control plane for a DGX Spark GPU cluster: provision nodes over
-SSH or a join token, deploy and load-balance inference, fine-tune models, and
+SSH or a join token, deploy and serve inference, fine-tune models, and
 benchmark them — with a real-time web dashboard and zero cloud dependencies.
 
 > **Running it yourself?** See the **[Self-Hosting Guide](docs/SELF-HOSTING.md)**.
@@ -132,13 +132,16 @@ selectable in the fine-tune job form.
 
 ### Inference gateway
 
-**In progress.** One OpenAI-compatible URL on the manager fronts every running
-deployment: a client sends a model name and the gateway routes to whichever
-deployment serves it, without the client knowing a node, a port, or a runtime.
-It is also the only sanctioned path to Ollama deployments, which the agent
-firewall restricts to the manager. The load balancer it replaces — rules,
-endpoints, and a never-mounted proxy — has been removed; see
-[ADR 0001](docs/adr/0001-inference-gateway.md) for the reasoning.
+**In progress — not yet usable.** The design: one OpenAI-compatible URL on the
+manager will front every running deployment, so a client sends a model name and
+the gateway routes to whichever deployment serves it, without knowing a node, a
+port, or a runtime. It will also become the only sanctioned path to Ollama
+deployments, which the agent firewall restricts to the manager — until then,
+reaching one from another machine still needs an SSH tunnel.
+
+The load balancer it replaces — rules, endpoints, and a never-mounted proxy —
+has been removed; see [ADR 0001](docs/adr/0001-inference-gateway.md) for the
+reasoning.
 
 ### Agent onboarding & updates
 

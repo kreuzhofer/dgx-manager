@@ -25,8 +25,7 @@ src.backup("/app/data/_migrate.db").then(() => {
   const after = db.prepare("SELECT count(*) c FROM MetricSnapshot").get().c;
   console.log("MetricSnapshot:", before, "->", after,
     "| Node:", db.prepare("SELECT count(*) c FROM Node").get().c,
-    "Deployment:", db.prepare("SELECT count(*) c FROM Deployment").get().c,
-    "LoadBalancerRule:", db.prepare("SELECT count(*) c FROM LoadBalancerRule").get().c);
+    "Deployment:", db.prepare("SELECT count(*) c FROM Deployment").get().c);
   db.close(); process.exit(0);
 }).catch(e => { console.error("ERR", e.message); process.exit(1); });
 JS
