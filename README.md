@@ -132,12 +132,19 @@ selectable in the fine-tune job form.
 
 ### Inference gateway
 
-**In progress — not yet usable.** The design: one OpenAI-compatible URL on the
-manager will front every running deployment, so a client sends a model name and
-the gateway routes to whichever deployment serves it, without knowing a node, a
-port, or a runtime. It will also become the only sanctioned path to Ollama
-deployments, which the agent firewall restricts to the manager — until then,
-reaching one from another machine still needs an SSH tunnel.
+**In progress.** One OpenAI-compatible URL on the manager
+(`http://<manager>:4000/v1`) fronting every running deployment, so a client
+sends a model name and the gateway routes to whichever deployment serves it,
+without knowing a node, a port, or a runtime.
+
+Working today: `GET /v1/models` lists what the cluster publishes, assembled
+from what you deployed rather than by asking a node — so models present on a
+node but never deployed are neither listed nor reachable. Every path the
+gateway does not serve is refused without contacting a node.
+
+Still to come: inference itself. `/v1/chat/completions` and `/v1/embeddings`
+currently return 404, so reaching an Ollama deployment from another machine
+still needs an SSH tunnel until they land.
 
 The load balancer it replaces — rules, endpoints, and a never-mounted proxy —
 has been removed; see [ADR 0001](docs/adr/0001-inference-gateway.md) for the

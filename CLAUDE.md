@@ -78,6 +78,7 @@ npm run db:studio        # Open Prisma Studio GUI
 - `ws/dashboard-hub.ts` — Broadcasts updates to connected dashboards
 - `ssh/provisioner.ts` — Audits prerequisites, auto-installs packages on nodes (incl. sparkrun install + non-interactive setup)
 - `routes/agent-bundle.ts` — Serves per-arch agent tarballs + generates the token install script
+- `gateway/` — the inference gateway at `/v1` (OpenAI-compatible). `models.ts` builds the model list from published names; `router.ts` is the allowlist — anything not served is refused without reaching a node. Mounted BEFORE `express.json()` (see ADR 0001)
 - `openapi.ts` — builds the OpenAPI 3 spec (served at `/api/openapi.json`, Swagger UI at `/api/docs`)
 
 ### Dashboard (`packages/dashboard/`)

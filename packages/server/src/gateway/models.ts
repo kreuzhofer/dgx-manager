@@ -21,8 +21,13 @@ export interface OpenAiModelList {
   data: OpenAiModel[];
 }
 
-/** A running deployment, as far as the model list is concerned. */
-export interface PublishedDeployment {
+/**
+ * A running deployment offered to the list — a *candidate*, not necessarily an
+ * entry: one that has not been named yet is dropped below. The null case is
+ * handled here as well as in the caller's query so this stays a total function
+ * over whatever rows it is given.
+ */
+export interface ModelListCandidate {
   publishedName: string | null;
   createdAt: Date;
 }
@@ -37,7 +42,7 @@ const OWNER = "dgx-manager";
  * picks a name and never a member. A deployment with no published name yet is
  * not serving under any name a client could ask for, so it is not listed.
  */
-export function toModelList(deployments: PublishedDeployment[]): OpenAiModelList {
+export function toModelList(deployments: ModelListCandidate[]): OpenAiModelList {
   const earliest = new Map<string, number>();
 
   for (const d of deployments) {

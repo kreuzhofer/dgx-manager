@@ -39,11 +39,25 @@ function openAiError(
  * deployed, which is precisely what must not be discoverable.
  */
 gatewayRouter.get("/models", async (_req: Request, res: Response) => {
-  const deployments = await prisma.deployment.findMany({
-    where: { status: HEALTHY_STATUS, publishedName: { not: null } },
-    select: { publishedName: true, createdAt: true },
-  });
-  res.json(toModelList(deployments));
+  try {
+    const deployments = await prisma.deployment.findMany({
+      where: { status: HEALTHY_STATUS, publishedName: { not: null } },
+      select: { publishedName: true, createdAt: true },
+    });
+    res.json(toModelList(deployments));
+  } catch (err) {
+    // Express would otherwise hand this to its default handler, which answers
+    // an OpenAI client with an HTML 500 — the one exit that would break the
+    // promise that this surface speaks the OpenAI API and nothing else.
+    console.error("[gateway] could not read the model list:", err);
+    openAiError(
+      res,
+      503,
+      "The gateway could not read the cluster's model list.",
+      "api_error",
+      "model_list_unavailable",
+    );
+  }
 });
 
 /**

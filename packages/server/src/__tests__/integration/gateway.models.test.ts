@@ -86,11 +86,26 @@ function fakeUpstream(advertises: string[]) {
   );
 }
 
-/** Mounts ONLY the gateway, with a stub hub, exactly as index.ts does. */
+/** Mounts ONLY the gateway, with a stub hub. */
 function makeApp(agentHub: unknown = { isAgentOnline: () => true }) {
   const app = express();
   app.set("agentHub", agentHub);
   app.use("/v1", gatewayRouter);
+  return app;
+}
+
+/**
+ * Mirrors index.ts's middleware order exactly: gateway, THEN the global JSON
+ * parser, then a stand-in management route behind it. Without the parser here
+ * an ordering assertion is vacuous — it would pass whichever side the gateway
+ * were mounted on.
+ */
+function makeOrderedApp() {
+  const app = express();
+  app.set("agentHub", { isAgentOnline: () => true });
+  app.use("/v1", gatewayRouter);
+  app.use(express.json());
+  app.post("/api/stand-in", (_req, res) => { res.json({ ok: true }); });
   return app;
 }
 
@@ -204,10 +219,12 @@ describe("the gateway's allowlist", () => {
       port: upstream.port,
     });
 
-    const app = makeApp();
-    const res = await (request(app) as unknown as Record<string, (p: string) => request.Test>)[
-      method.toLowerCase()
-    ](path.startsWith("/v1") ? path : `/v1${path}`);
+    const agent = request(makeApp());
+    const url = path.startsWith("/v1") ? path : `/v1${path}`;
+    const res =
+      method === "GET" ? await agent.get(url)
+      : method === "POST" ? await agent.post(url)
+      : await agent.delete(url);
 
     expect(res.status).toBe(404);
     expect(res.body.error).toMatchObject({ type: "invalid_request_error" });
@@ -215,19 +232,25 @@ describe("the gateway's allowlist", () => {
     await upstream.close();
   });
 
-  // Proves the mount sits AHEAD of the global JSON parser: were it behind, a
-  // body over the parser's 100kb default would be rejected with 413 before the
-  // gateway ever saw the request. Ticket #7 depends on this ordering to carry
-  // megabyte-scale long-context prompts.
-  it("is reached before the body-size limit that guards the management API", async () => {
+  // Ordering, asserted against an app that actually has the parser in it: the
+  // SAME oversized body must reach the gateway (404 from the allowlist) while
+  // the management API behind the parser still rejects it (413). Were the
+  // gateway mounted after the parser, the first case would be 413 too.
+  // Ticket #7 depends on this to carry megabyte-scale long-context prompts.
+  it("is reached before the body-size limit that still guards the management API", async () => {
     const oversized = { prompt: "x".repeat(200_000) };
+    const app = makeOrderedApp();
 
-    const res = await request(makeApp())
+    const viaGateway = await request(app)
       .post("/v1/chat/completions")
       .set("content-type", "application/json")
       .send(oversized);
+    expect(viaGateway.status).toBe(404);
 
-    expect(res.status).toBe(404);
-    expect(res.status).not.toBe(413);
+    const viaManagementApi = await request(app)
+      .post("/api/stand-in")
+      .set("content-type", "application/json")
+      .send(oversized);
+    expect(viaManagementApi.status).toBe(413);
   });
 });
