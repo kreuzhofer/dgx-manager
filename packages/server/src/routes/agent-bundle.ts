@@ -323,6 +323,13 @@ OVERRIDE_NEW="\$(mktemp)"
   fi
   echo "Environment=OLLAMA_HOST=0.0.0.0"
   echo "Environment=OLLAMA_MAX_LOADED_MODELS=0"
+  # Never unload an idle model. Ollama's default is to evict after a few
+  # minutes, and the manager is the only host its firewall admits — so once a
+  # model is evicted, the only thing that could reload it is a request through
+  # the inference gateway, which does not route to a deployment that is not
+  # serving. The model would stay dark until someone restarted the deployment
+  # by hand. Resident memory is the deliberate trade.
+  echo "Environment=OLLAMA_KEEP_ALIVE=-1"
   if [ "\$OLLAMA_PREEXISTING" = "0" ] && mountpoint -q /mnt/tank; then
     echo "Environment=OLLAMA_MODELS=/mnt/tank/models/ollama"
     mkdir -p /mnt/tank/models/ollama

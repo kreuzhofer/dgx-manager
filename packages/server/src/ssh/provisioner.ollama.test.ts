@@ -80,6 +80,8 @@ describe("ollamaInstallCmd", () => {
   it("keeps the install source and systemd drop-in config unchanged", () => {
     expect(cmd).toContain("https://ollama.ai/install.sh");
     expect(cmd).toContain("OLLAMA_HOST=0.0.0.0");
+    // An evicted model cannot be woken through the gateway, so never unload one.
+    expect(cmd).toContain("OLLAMA_KEEP_ALIVE=-1");
     expect(cmd).toContain("OLLAMA_MAX_LOADED_MODELS=0");
     expect(cmd).toContain("/etc/systemd/system/ollama.service.d/override.conf");
     expect(cmd).toContain("User=daniel");

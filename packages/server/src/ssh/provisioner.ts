@@ -103,7 +103,11 @@ export function ollamaInstallCmd(sshUser: string): string {
     "curl -fsSL https://ollama.ai/install.sh | sh",
     // Ensure systemd service exists with OLLAMA_MODELS on NFS
     "sudo mkdir -p /etc/systemd/system/ollama.service.d",
-    `echo -e '[Service]\\nUser=${sshUser}\\nEnvironment=HOME=/home/${sshUser}\\nEnvironment=OLLAMA_MODELS=${SHARED_STORAGE}/models/ollama\\nEnvironment=OLLAMA_HOST=0.0.0.0\\nEnvironment=OLLAMA_MAX_LOADED_MODELS=0' | sudo tee /etc/systemd/system/ollama.service.d/override.conf`,
+    // OLLAMA_KEEP_ALIVE=-1: never unload an idle model. The manager is the only
+    // host Ollama's firewall admits, and the gateway does not route to a
+    // deployment that is not serving — so an evicted model has nothing left
+    // that could reload it and stays dark until restarted by hand.
+    `echo -e '[Service]\\nUser=${sshUser}\\nEnvironment=HOME=/home/${sshUser}\\nEnvironment=OLLAMA_MODELS=${SHARED_STORAGE}/models/ollama\\nEnvironment=OLLAMA_HOST=0.0.0.0\\nEnvironment=OLLAMA_MAX_LOADED_MODELS=0\\nEnvironment=OLLAMA_KEEP_ALIVE=-1' | sudo tee /etc/systemd/system/ollama.service.d/override.conf`,
     "sudo systemctl daemon-reload",
     "sudo systemctl restart ollama",
     // No autostart on boot (installer enables it by default — undo that).
