@@ -3,7 +3,14 @@ import { prisma } from "../prisma.js";
 import { HEALTHY_STATUS } from "../ws/deployment-status.js";
 import { toModelList } from "./models.js";
 import { selectEligibleMembers } from "./eligibility.js";
-import { BodyTooLargeError, forwardToMember, readBodyWithLimit } from "./proxy.js";
+import {
+  BodyTooLargeError,
+  FORWARDED_PATHS,
+  MAX_BODY_BYTES,
+  forwardToMember,
+  readBodyWithLimit,
+  type ForwardedPath,
+} from "./proxy.js";
 
 /**
  * The inference **gateway**: one OpenAI-compatible surface fronting every
@@ -66,10 +73,13 @@ gatewayRouter.get("/models", async (_req: Request, res: Response) => {
  * The inference operations. Both take the same shape: read the body, find who
  * serves the requested name, forward the exact bytes, stream the answer back.
  */
-async function proxyInference(req: Request, res: Response): Promise<void> {
+async function proxyInference(req: Request, res: Response, path: ForwardedPath): Promise<void> {
+  // Overridable so a test can exercise the refusal without moving 64MB.
+  const limit = (req.app.get("gatewayMaxBodyBytes") as number | undefined) ?? MAX_BODY_BYTES;
+
   let body: Buffer;
   try {
-    body = await readBodyWithLimit(req);
+    body = await readBodyWithLimit(req, limit);
   } catch (err) {
     if (err instanceof BodyTooLargeError) {
       openAiError(
@@ -79,8 +89,11 @@ async function proxyInference(req: Request, res: Response): Promise<void> {
         "invalid_request_error",
         "request_too_large",
       );
+      // The client is very likely still uploading; stop taking the bytes.
+      req.destroy();
       return;
     }
+    console.error("[gateway] could not read the request body:", err);
     openAiError(res, 400, "Could not read the request body.", "invalid_request_error", "bad_request");
     return;
   }
@@ -147,7 +160,7 @@ async function proxyInference(req: Request, res: Response): Promise<void> {
   const target = members[0];
 
   try {
-    await forwardToMember({ baseUrl: target.baseUrl, path: req.originalUrl }, body, req.headers, res);
+    await forwardToMember({ baseUrl: target.baseUrl, path }, body, req.headers, res);
   } catch (err) {
     console.error(`[gateway] forwarding '${requested}' to ${target.baseUrl} failed:`, err);
     if (res.headersSent) {
@@ -166,8 +179,12 @@ async function proxyInference(req: Request, res: Response): Promise<void> {
   }
 }
 
-gatewayRouter.post("/chat/completions", proxyInference);
-gatewayRouter.post("/embeddings", proxyInference);
+gatewayRouter.post("/chat/completions", (req, res) =>
+  proxyInference(req, res, FORWARDED_PATHS.chatCompletions),
+);
+gatewayRouter.post("/embeddings", (req, res) =>
+  proxyInference(req, res, FORWARDED_PATHS.embeddings),
+);
 
 /**
  * Everything else. Refused here, never forwarded — including every native

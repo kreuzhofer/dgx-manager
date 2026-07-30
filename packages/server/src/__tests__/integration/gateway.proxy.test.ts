@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import http from "node:http";
+import net from "node:net";
 import request from "supertest";
 import express from "express";
 
@@ -282,6 +283,93 @@ describe("what the gateway does and does not carry", () => {
     await upstream.close();
   });
 
+  // Regression: an HTTP/1.1 client may send an absolute-form request target
+  // (`POST http://host/v1/...`). Express exposes it verbatim on originalUrl
+  // while still routing by pathname, so deriving the forward target from it let
+  // a caller replace the chosen member's host and port — and the manager is the
+  // one host the agent firewall admits to Ollama, making the gateway a confused
+  // deputy against every node. The target must come from a constant.
+  it("ignores an absolute-form request target and still forwards to the chosen member", async () => {
+    const intended = await fakeUpstream();
+    const attacker = await fakeUpstream();
+    await seedMember({
+      publishedName: "glm-5.2",
+      host: intended.host,
+      port: intended.port,
+    });
+
+    const app = makeApp();
+    const server = app.listen(0);
+    const addr = server.address() as { port: number };
+    const payload = JSON.stringify({ model: "glm-5.2" });
+
+    const status: number = await new Promise((resolve, reject) => {
+      const sock = net.connect(addr.port, "127.0.0.1", () => {
+        sock.write(
+          `POST http://127.0.0.1:${attacker.port}/v1/chat/completions HTTP/1.1\r\n` +
+            `Host: 127.0.0.1\r\n` +
+            `Content-Type: application/json\r\n` +
+            `Content-Length: ${Buffer.byteLength(payload)}\r\n\r\n${payload}`,
+        );
+      });
+      let buf = "";
+      sock.on("data", (d) => { buf += d.toString(); });
+      sock.on("error", reject);
+      setTimeout(() => {
+        sock.end();
+        resolve(Number(buf.split(" ")[1] ?? 0));
+      }, 700);
+    });
+    server.close();
+
+    expect(status).toBe(200);
+    expect(intended.received).toHaveLength(1);
+    expect(attacker.received).toEqual([]); // never redirected
+    await intended.close();
+    await attacker.close();
+  });
+
+  // The cap exists so an oversized request fails loudly instead of being
+  // accumulated in manager memory. Exercised through the router with a small
+  // limit rather than by actually moving 64MB.
+  it("refuses a body beyond the configured maximum", async () => {
+    const upstream = await fakeUpstream();
+    await seedMember({ publishedName: "glm-5.2", host: upstream.host, port: upstream.port });
+
+    const app = makeApp();
+    app.set("gatewayMaxBodyBytes", 1024);
+
+    const res = await request(app)
+      .post("/v1/chat/completions")
+      .set("content-type", "application/json")
+      .send(JSON.stringify({ model: "glm-5.2", prompt: "x".repeat(5000) }));
+
+    expect(res.status).toBe(413);
+    expect(res.body.error).toMatchObject({ code: "request_too_large" });
+    expect(upstream.received).toEqual([]);
+    await upstream.close();
+  });
+
+  // Guards against anyone reintroducing a client-side timeout: a slow first
+  // byte is normal for a long prefill and must not be cut off.
+  it("waits for an upstream that is slow to answer", async () => {
+    const upstream = await fakeUpstream((_req, res) => {
+      setTimeout(() => {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ ok: true, slow: true }));
+      }, 1500);
+    });
+    await seedMember({ publishedName: "glm-5.2", host: upstream.host, port: upstream.port });
+
+    const res = await request(makeApp())
+      .post("/v1/chat/completions")
+      .send({ model: "glm-5.2" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.slow).toBe(true);
+    await upstream.close();
+  });
+
   // A client's key is meaningless to a node and forwarding it is worse than
   // ignoring it, so it must be dropped rather than relayed.
   it("accepts an authorization header and never forwards it", async () => {
@@ -343,8 +431,11 @@ describe("what the gateway does and does not carry", () => {
     server.close();
 
     expect(chunks.join("")).toContain("[DONE]");
-    // Arriving in more than one chunk is what proves it was not buffered.
+    // Not merely "more than one chunk" — a proxy that buffered to completion
+    // and re-emitted in two writes would pass that. The first event must land
+    // before the upstream has written its last (at ~60ms).
     expect(arrivals.length).toBeGreaterThan(1);
+    expect(arrivals[0]).toBeLessThan(60);
     await upstream.close();
   });
 });

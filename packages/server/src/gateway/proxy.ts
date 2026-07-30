@@ -41,30 +41,38 @@ export function readBodyWithLimit(req: Request, limit = MAX_BODY_BYTES): Promise
     let size = 0;
     let settled = false;
 
-    const fail = (err: Error) => {
-      if (settled) return;
-      settled = true;
-      req.removeAllListeners("data");
-      req.removeAllListeners("end");
-      req.removeAllListeners("error");
-      reject(err);
-    };
-
-    req.on("data", (chunk: Buffer) => {
-      if (settled) return;
+    // Only OUR listeners are detached on settle. removeAllListeners would also
+    // strip the framework's own error handler, and the refusal path is exactly
+    // when a client is most likely to abort mid-upload — leaving an ECONNRESET
+    // with no listener, which EventEmitter turns into an uncaught exception.
+    const onData = (chunk: Buffer) => {
       size += chunk.length;
       if (size > limit) {
-        fail(new BodyTooLargeError(limit));
+        settle(() => reject(new BodyTooLargeError(limit)));
         return;
       }
       chunks.push(chunk);
-    });
-    req.on("end", () => {
+    };
+    const onEnd = () => settle(() => resolve(Buffer.concat(chunks)));
+    const onError = (err: Error) => settle(() => reject(err));
+
+    function settle(finish: () => void) {
       if (settled) return;
       settled = true;
-      resolve(Buffer.concat(chunks));
-    });
-    req.on("error", fail);
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("error", onError);
+      // Detaching the listener does NOT stop a flowing stream — without this a
+      // refused upload keeps being pulled in and discarded, spinning on a body
+      // nobody will read. Pausing, not destroying: the caller owns the socket
+      // and still has to answer the client.
+      req.pause();
+      finish();
+    }
+
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
   });
 }
 
@@ -88,6 +96,16 @@ const HEADERS_NEVER_FORWARDED = new Set([
   "proxy-authorization",
 ]);
 
+/** Response headers that describe the upstream hop, not the client's. */
+const HOP_BY_HOP_RESPONSE_HEADERS = new Set([
+  "transfer-encoding",
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "trailer",
+  "upgrade",
+]);
+
 export function forwardableHeaders(headers: http.IncomingHttpHeaders): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers)) {
@@ -98,11 +116,29 @@ export function forwardableHeaders(headers: http.IncomingHttpHeaders): Record<st
   return out;
 }
 
+/**
+ * The operations the gateway forwards, as literal paths.
+ *
+ * These are constants, never anything derived from the request. An HTTP/1.1
+ * client may send an absolute-form request target (`POST http://host/v1/...`),
+ * which Express exposes verbatim on `req.originalUrl` while still routing by
+ * pathname — so resolving a target from it let a caller replace the chosen
+ * member's host and port entirely. The manager is the one host the agent
+ * firewall admits to Ollama, so that turned the gateway into a confused deputy
+ * against every node. See docs/adr/0001-inference-gateway.md, Decision 2.
+ */
+export const FORWARDED_PATHS = {
+  chatCompletions: "/v1/chat/completions",
+  embeddings: "/v1/embeddings",
+} as const;
+
+export type ForwardedPath = (typeof FORWARDED_PATHS)[keyof typeof FORWARDED_PATHS];
+
 export interface ForwardTarget {
   /** `http://<ip>:<port>` of the chosen member. */
   baseUrl: string;
-  /** OpenAI path to append, e.g. `/v1/chat/completions`. */
-  path: string;
+  /** One of FORWARDED_PATHS — never client input. */
+  path: ForwardedPath;
 }
 
 /**
@@ -122,7 +158,16 @@ export function forwardToMember(
   res: Response,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const url = new URL(target.path, target.baseUrl);
+    const base = new URL(target.baseUrl);
+    const url = new URL(target.path, base);
+
+    // Belt and braces: the path is a constant today, and this makes it a loud
+    // failure rather than a silent redirect if a future caller ever passes
+    // something that resolves off the chosen member.
+    if (url.origin !== base.origin) {
+      reject(new Error(`refusing to forward off-target: ${url.origin} != ${base.origin}`));
+      return;
+    }
 
     const upstream = http.request(
       {
@@ -139,7 +184,8 @@ export function forwardToMember(
         res.status(upstreamRes.statusCode ?? 502);
         for (const [key, value] of Object.entries(upstreamRes.headers)) {
           if (value === undefined) continue;
-          if (key.toLowerCase() === "transfer-encoding") continue;
+          // Hop-by-hop headers describe the upstream connection, not this one.
+          if (HOP_BY_HOP_RESPONSE_HEADERS.has(key.toLowerCase())) continue;
           res.setHeader(key, value as string | string[]);
         }
 
