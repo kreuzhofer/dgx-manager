@@ -37,10 +37,21 @@ describe("deploymentStatusUpdate", () => {
   // on a stopped deployment would keep a dead entry in the gateway's view of
   // what the cluster publishes, and would stop a restart under a changed recipe
   // from re-resolving the name the runtime now answers to.
-  it("clears the published name on every terminal status", () => {
-    for (const status of ["stopped", "failed", "evicted"]) {
+  it("clears the published name when the serving lifetime ends", () => {
+    for (const status of ["stopped", "failed"]) {
       expect(deploymentStatusUpdate({ status }).publishedName).toBeNull();
     }
+  });
+
+  // `evicted` is terminal for VRAM but NOT for the name: an allocation-inducing
+  // runtime unloads idle models and reloads them on demand, still answering to
+  // the same name. Clearing it made the model vanish from the gateway a few
+  // idle minutes after last use — and since only a request reloads it, and the
+  // gateway had begun refusing that name, it could never come back.
+  it("keeps the published name when a model is merely evicted from memory", () => {
+    const d = deploymentStatusUpdate({ status: "evicted" });
+    expect("publishedName" in d).toBe(false);
+    expect(d.vramActual).toBe(0);
   });
 
   it("leaves the published name alone while the deployment is live", () => {

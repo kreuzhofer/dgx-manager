@@ -8,6 +8,22 @@ export function isTerminalDeploymentStatus(status: string): boolean {
   return TERMINAL_STATUSES.includes(status);
 }
 
+/**
+ * Statuses that end a *serving lifetime*, so the published name no longer
+ * describes anything and must be resolved afresh next time.
+ *
+ * Deliberately NOT every terminal status. `evicted` means an
+ * allocation-inducing runtime unloaded an idle model — the deployment still
+ * exists and still answers to the same name once it loads again. Clearing the
+ * name there made the model disappear from the gateway entirely a few idle
+ * minutes after anyone last used it.
+ */
+const UNPUBLISHING_STATUSES = ["stopped", "failed"];
+
+export function isUnpublishingStatus(status: string): boolean {
+  return UNPUBLISHING_STATUSES.includes(status);
+}
+
 export interface AgentDeploymentStatus {
   status: string;
   port?: number | null;
@@ -52,13 +68,15 @@ export function deploymentStatusUpdate(
 
   if (terminal) {
     data.vramActual = 0;
-    // A published name belongs to a deployment that is serving. Clearing it here
-    // also makes a restart re-resolve, so a changed recipe cannot leave the old
-    // name published.
-    data.publishedName = null;
   } else if (msg.vramActual != null && msg.vramActual !== "") {
     const n = Number(msg.vramActual);
     if (Number.isFinite(n)) data.vramActual = n;
+  }
+
+  if (isUnpublishingStatus(msg.status)) {
+    // The serving lifetime is over: the next one resolves its own name, so a
+    // changed recipe cannot leave the old one published.
+    data.publishedName = null;
   }
 
   if (msg.error) {

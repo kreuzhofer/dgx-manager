@@ -144,6 +144,26 @@ describe("POST /api/deployments/:id/restart — arbitrary variant ids", () => {
     expect(after!.error).toBeNull();
   });
 
+  // A restart begins a new serving lifetime and may rename the deployment or
+  // change its recipe, so the name the runtime answers to must be discovered
+  // again. Left in place, the gateway went on advertising the old name and
+  // every request 404'd at the runtime.
+  it("clears the published name on restart so it is resolved afresh", async () => {
+    const dep = await seedFineTuneDeployment();
+    await prisma.deployment.update({
+      where: { id: dep.id },
+      data: { publishedName: "the-old-name" },
+    });
+
+    const res = await request(makeApp(makeStubHub().hub))
+      .post(`/api/deployments/${dep.id}/restart`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    const after = await prisma.deployment.findUnique({ where: { id: dep.id } });
+    expect(after!.publishedName).toBeNull();
+  });
+
   it("rejects malformed variant slugs with 400", async () => {
     const dep = await seedFineTuneDeployment();
     const { hub } = makeStubHub();

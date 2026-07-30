@@ -988,6 +988,10 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
       data: {
         status: "restarting",
         error: null,
+        // A restart begins a new serving lifetime, and it may rename the
+        // deployment or change its recipe — so the name the runtime answers to
+        // must be discovered again rather than inherited.
+        publishedName: null,
         ...(Object.keys(overrides).length > 0 ? { config: JSON.stringify(config) } : {}),
         ...(newDisplayName !== deployment.displayName ? { displayName: newDisplayName } : {}),
       },
@@ -1065,6 +1069,9 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
       // with it — otherwise the dashboard shows a stale failure banner over a
       // deployment that is loading fine. It is re-populated if this attempt also fails.
       error: null,
+      // Likewise the published name: a restart may rename the deployment or
+      // change its recipe, so the name must be discovered again, not inherited.
+      publishedName: null,
       // Persist the merged config so future restarts (or the agent's own
       // reconciliation) see the updated overrides.
       ...(Object.keys(overrides).length > 0 ? { config: JSON.stringify(config) } : {}),

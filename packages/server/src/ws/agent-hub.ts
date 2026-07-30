@@ -11,7 +11,12 @@ import { pushRegistriesToAgent } from "../registries/push.js";
 import { normalizeMac } from "../nodes/power.js";
 import { CapClient } from "../caps/cap-client.js";
 import { selectStaleNodes } from "./staleness.js";
-import { handleDeploymentStatus, type DeploymentStatusMessage } from "./deployment-status-handler.js";
+import {
+  handleDeploymentStatus,
+  publishName,
+  publishNamesForNode,
+  type DeploymentStatusMessage,
+} from "./deployment-status-handler.js";
 
 const STALE_THRESHOLD_MS = 30_000;
 const SWEEP_INTERVAL_MS = 10_000;
@@ -242,6 +247,11 @@ export class AgentHub {
             await pushRegistriesToAgent(this, nodeId!).catch((err) =>
               console.error(`Failed to push registries to ${nodeId}:`, err),
             );
+            // Name anything already serving here. Agents only report a status
+            // when it changes, so without this a deployment that was running
+            // before the manager restarted is never published. Fire-and-forget:
+            // registration must not wait on probing endpoints.
+            void publishNamesForNode(nodeId!);
             break;
           }
 
@@ -464,6 +474,11 @@ export class AgentHub {
                     where: { id: dep.id },
                     data: { vramActual: loaded.vramMB, status: "running" },
                   });
+                  // This path writes `running` directly rather than going
+                  // through the status handler, so it has to publish the name
+                  // itself — otherwise a model that comes back from an idle
+                  // eviction is serving but unreachable through the gateway.
+                  void publishName(dep.id);
                 }
               } else if (dep.status === "running") {
                 await prisma.deployment.update({

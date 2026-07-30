@@ -47,7 +47,7 @@ export interface DeploymentStatusDeps {
  * because we could not name it. An unreachable endpoint already degrades to the
  * local fallback inside the resolver.
  */
-async function publishName(deploymentId: string, fetchImpl?: typeof fetch): Promise<void> {
+export async function publishName(deploymentId: string, fetchImpl?: typeof fetch): Promise<void> {
   try {
     const d = await prisma.deployment.findUnique({
       where: { id: deploymentId },
@@ -92,6 +92,34 @@ async function publishName(deploymentId: string, fetchImpl?: typeof fetch): Prom
     await prisma.deployment.update({ where: { id: deploymentId }, data: { publishedName } });
   } catch (err) {
     console.error(`[gateway] could not publish a name for deployment ${deploymentId}:`, err);
+  }
+}
+
+/**
+ * Publish names for everything already serving on a node.
+ *
+ * Agents only report a status when it *changes*, so a deployment that was
+ * already running before this feature existed — or before the manager last
+ * restarted — never sends another `running` message and would never be named.
+ * On rollout that leaves the gateway serving nothing at all until every
+ * deployment is restarted by hand.
+ *
+ * An agent reconnect is the natural moment to reconcile: a manager restart
+ * drops every socket, so registration is guaranteed to follow. Only fills in
+ * names that are missing; anything already named is left alone.
+ */
+export async function publishNamesForNode(nodeId: string, fetchImpl?: typeof fetch): Promise<void> {
+  try {
+    const unnamed = await prisma.deployment.findMany({
+      where: { nodeId, status: HEALTHY_STATUS, publishedName: null },
+      select: { id: true },
+    });
+    for (const d of unnamed) await publishName(d.id, fetchImpl);
+    if (unnamed.length > 0) {
+      console.log(`[gateway] published ${unnamed.length} name(s) for node ${nodeId} on reconnect`);
+    }
+  } catch (err) {
+    console.error(`[gateway] could not reconcile published names for node ${nodeId}:`, err);
   }
 }
 
