@@ -2,7 +2,9 @@ import { Router, type Request, type Response } from "express";
 import { prisma } from "../prisma.js";
 import { HEALTHY_STATUS } from "../ws/deployment-status.js";
 import { toModelList } from "./models.js";
-import { selectEligibleMembers } from "./eligibility.js";
+import { assessPool } from "./eligibility.js";
+import { selectLeastOutstanding } from "./selection.js";
+import { acquire, outstandingFor } from "./inflight.js";
 import {
   BodyTooLargeError,
   FORWARDED_PATHS,
@@ -30,6 +32,14 @@ import {
  * when sent to a node directly. The management API keeps that defensive limit.
  */
 export const gatewayRouter = Router();
+
+/**
+ * Rotation for breaking ties between equally idle members. One counter for the
+ * whole gateway rather than one per pool: it only has to vary, and a shared
+ * counter cannot leak memory as pools come and go.
+ */
+let rotation = 0;
+const nextRotation = () => rotation++;
 
 /** OpenAI-shaped error body, so clients can parse failures the way they expect. */
 function openAiError(
@@ -134,7 +144,7 @@ async function proxyInference(req: Request, res: Response, path: ForwardedPath):
   }
 
   const agentHub = req.app.get("agentHub") as { isAgentOnline(nodeId: string): boolean } | undefined;
-  const members = selectEligibleMembers(
+  const pool = assessPool(
     candidates.map((c) => ({
       id: c.id,
       status: c.status,
@@ -144,21 +154,37 @@ async function proxyInference(req: Request, res: Response, path: ForwardedPath):
     })),
     (nodeId) => agentHub?.isAgentOnline(nodeId) ?? false,
   );
-  if (members.length === 0) {
-    openAiError(
-      res,
-      503,
-      `No deployment serving '${requested}' can take a request right now.`,
-      "api_error",
-      "no_eligible_member",
-    );
+
+  if (pool.eligible.length === 0) {
+    // Name each member and why it was passed over. A bare "no active endpoints"
+    // cannot distinguish a node that is offline from a deployment still
+    // starting, which is the difference between waiting and investigating.
+    const reasons = pool.excluded
+      .map((m) => `deployment ${m.deploymentId} on node ${m.nodeId}: ${m.detail}`)
+      .join("; ");
+    res.status(503).json({
+      error: {
+        message:
+          `No deployment serving '${requested}' can take a request right now. ` +
+          (reasons || "the pool is empty."),
+        type: "api_error",
+        code: "no_eligible_member",
+        members: pool.excluded,
+      },
+    });
     return;
   }
 
-  // Choosing BETWEEN eligible members is a separate concern; for now the first
-  // eligible member takes the request.
-  const target = members[0];
+  const target = selectLeastOutstanding(pool.eligible, outstandingFor, nextRotation());
+  if (!target) {
+    openAiError(res, 503, "No member could be selected.", "api_error", "no_eligible_member");
+    return;
+  }
 
+  // Counted from just before the hop to just after it resolves, whatever the
+  // outcome: a leaked increment would permanently make a healthy member look
+  // busy and quietly take it out of rotation.
+  const release = acquire(target.deploymentId);
   try {
     await forwardToMember({ baseUrl: target.baseUrl, path }, body, req.headers, res);
   } catch (err) {
@@ -176,6 +202,8 @@ async function proxyInference(req: Request, res: Response, path: ForwardedPath):
       "api_error",
       "upstream_unreachable",
     );
+  } finally {
+    release();
   }
 }
 

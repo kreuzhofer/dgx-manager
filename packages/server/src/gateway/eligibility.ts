@@ -28,6 +28,23 @@ export interface EligibleMember {
 /** Does this node have a live agent connection this instant? */
 export type LivenessCheck = (nodeId: string) => boolean;
 
+/** Why a member of the pool cannot take a request. */
+export type ExclusionReason = "not-running" | "no-port" | "no-node-address" | "agent-offline";
+
+export interface ExcludedMember {
+  deploymentId: string;
+  nodeId: string;
+  reason: ExclusionReason;
+  /** Human-readable, for the refusal body. */
+  detail: string;
+}
+
+/** The whole pool, split into who can serve and who cannot — and why not. */
+export interface PoolAssessment {
+  eligible: EligibleMember[];
+  excluded: ExcludedMember[];
+}
+
 /**
  * Filter a pool down to the members that can serve.
  *
@@ -38,17 +55,33 @@ export type LivenessCheck = (nodeId: string) => boolean;
  *
  * Order is preserved; choosing *between* eligible members is the caller's job.
  */
-export function selectEligibleMembers(
+export function assessPool(
   candidates: MemberCandidate[],
   isNodeOnline: LivenessCheck,
-): EligibleMember[] {
+): PoolAssessment {
   const eligible: EligibleMember[] = [];
+  const excluded: ExcludedMember[] = [];
+
+  const exclude = (c: MemberCandidate, reason: ExclusionReason, detail: string) =>
+    excluded.push({ deploymentId: c.id, nodeId: c.nodeId, reason, detail });
 
   for (const c of candidates) {
-    if (c.status !== HEALTHY_STATUS) continue;
-    if (c.port == null) continue;
-    if (!c.nodeIp) continue;
-    if (!isNodeOnline(c.nodeId)) continue;
+    if (c.status !== HEALTHY_STATUS) {
+      exclude(c, "not-running", `deployment is '${c.status}', not '${HEALTHY_STATUS}'`);
+      continue;
+    }
+    if (c.port == null) {
+      exclude(c, "no-port", "deployment has no port bound");
+      continue;
+    }
+    if (!c.nodeIp) {
+      exclude(c, "no-node-address", "node has no known address");
+      continue;
+    }
+    if (!isNodeOnline(c.nodeId)) {
+      exclude(c, "agent-offline", "node has no live agent connection");
+      continue;
+    }
 
     eligible.push({
       deploymentId: c.id,
@@ -57,5 +90,13 @@ export function selectEligibleMembers(
     });
   }
 
-  return eligible;
+  return { eligible, excluded };
+}
+
+/** Just the members that can serve. */
+export function selectEligibleMembers(
+  candidates: MemberCandidate[],
+  isNodeOnline: LivenessCheck,
+): EligibleMember[] {
+  return assessPool(candidates, isNodeOnline).eligible;
 }

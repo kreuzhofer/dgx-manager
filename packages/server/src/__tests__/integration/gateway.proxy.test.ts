@@ -49,6 +49,10 @@ async function wipeAll() {
   await prisma.deployment.deleteMany({});
   await prisma.model.deleteMany({});
   await prisma.node.deleteMany({});
+  // In-flight counts are module state in the manager process; a request left
+  // hanging by one test must not make the next test's pool look busy.
+  const { resetOutstanding } = await import("../../gateway/inflight.js");
+  resetOutstanding();
 }
 afterEach(wipeAll);
 
@@ -233,6 +237,134 @@ describe("POST /v1/chat/completions", () => {
 
     expect(res.status).toBe(502);
     expect(res.body.error).toMatchObject({ code: "upstream_unreachable" });
+  });
+});
+
+describe("pools", () => {
+  // Counts return to zero between sequential requests, so every member is tied
+  // and the rotation spreads the work instead of hammering whichever sorts
+  // first. Without it a two-member pool would leave one member permanently idle.
+  it("spreads sequential requests across a pool", async () => {
+    const a = await fakeUpstream();
+    const b = await fakeUpstream();
+    await seedMember({ publishedName: "pooled", host: a.host, port: a.port });
+    await seedMember({ publishedName: "pooled", host: b.host, port: b.port });
+    const app = makeApp();
+
+    for (let i = 0; i < 4; i++) {
+      await request(app).post("/v1/chat/completions").send({ model: "pooled" });
+    }
+
+    expect(a.received.length + b.received.length).toBe(4);
+    expect(a.received.length).toBeGreaterThan(0);
+    expect(b.received.length).toBeGreaterThan(0);
+    await a.close();
+    await b.close();
+  });
+
+  // The point of least-outstanding: a member already holding a request is
+  // passed over for an idle one, which is how a slow member stops attracting
+  // traffic without anyone configuring a weight.
+  // Deliberately distinguishes least-outstanding from plain round-robin: with
+  // one member holding a request open, EVERY subsequent request must go to the
+  // idle one. Round-robin would keep dealing turns back to the busy member.
+  it("keeps away from a busy member while an idle one exists", async () => {
+    // Held in an object so TypeScript does not narrow it to null — the only
+    // assignment happens inside the upstream handler.
+    const held: { release: (() => void) | null } = { release: null };
+    // The first request to arrive anywhere is held open; everything after is
+    // answered immediately.
+    const handler = (_req: http.IncomingMessage, res: http.ServerResponse) => {
+      const respond = () => {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ ok: true }));
+      };
+      if (!held.release) held.release = respond;
+      else respond();
+    };
+    const a = await fakeUpstream(handler);
+    const b = await fakeUpstream(handler);
+    await seedMember({ publishedName: "pooled", host: a.host, port: a.port });
+    await seedMember({ publishedName: "pooled", host: b.host, port: b.port });
+    const app = makeApp();
+
+    // .then() is what actually dispatches a supertest request; without it this
+    // would never leave the starting line.
+    const inFlight = request(app)
+      .post("/v1/chat/completions")
+      .send({ model: "pooled" })
+      .then(() => undefined, () => undefined);
+    await new Promise((r) => setTimeout(r, 250));
+
+    const busy = a.received.length > 0 ? a : b;
+    const idle = busy === a ? b : a;
+    expect(busy.received).toHaveLength(1);
+
+    for (let i = 0; i < 3; i++) {
+      await request(app).post("/v1/chat/completions").send({ model: "pooled" });
+    }
+
+    expect(idle.received).toHaveLength(3);
+    expect(busy.received).toHaveLength(1); // never went back to the busy one
+
+    held.release?.();
+    await inFlight;
+    await a.close();
+    await b.close();
+  });
+
+  // A leaked increment would permanently make a healthy member look busy and
+  // quietly take it out of rotation.
+  it("releases the count when a request fails, so the member stays usable", async () => {
+    const dead = await fakeUpstream();
+    const deadPort = dead.port;
+    await dead.close();
+    await seedMember({ publishedName: "flaky", host: "127.0.0.1", port: deadPort });
+    const app = makeApp();
+
+    const failed = await request(app).post("/v1/chat/completions").send({ model: "flaky" });
+    expect(failed.status).toBe(502);
+
+    // If the count had leaked the member would still be selectable, but its
+    // count would be wrong forever; assert the accounting directly.
+    const { outstandingSnapshot } = await import("../../gateway/inflight.js");
+    expect(outstandingSnapshot()).toEqual({});
+  });
+});
+
+describe("refusing with reasons", () => {
+  // A bare "no active endpoints" cannot distinguish a node that is offline from
+  // a deployment still starting — the difference between waiting and
+  // investigating.
+  it("names each member and why it was passed over", async () => {
+    const upstream = await fakeUpstream();
+    const { node: offlineNode } = await seedMember({
+      publishedName: "unreachable",
+      host: upstream.host,
+      port: upstream.port,
+    });
+    const { deployment: starting } = await seedMember({
+      publishedName: "unreachable",
+      host: "10.0.0.77",
+      port: 8000,
+      status: "loading",
+    });
+
+    const res = await request(makeApp({ isAgentOnline: () => false }))
+      .post("/v1/chat/completions")
+      .send({ model: "unreachable" });
+
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe("no_eligible_member");
+    const members = res.body.error.members as Array<{ deploymentId: string; reason: string }>;
+    expect(members).toHaveLength(2);
+
+    const byId = Object.fromEntries(members.map((m) => [m.deploymentId, m.reason]));
+    expect(byId[starting.id]).toBe("not-running");
+    const offline = members.find((m) => m.reason === "agent-offline");
+    expect(offline).toBeDefined();
+    expect(res.body.error.message).toContain(offlineNode.id);
+    await upstream.close();
   });
 });
 
