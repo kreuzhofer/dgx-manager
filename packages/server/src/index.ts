@@ -27,11 +27,20 @@ import { startMetricRetention } from "./metric-retention.js";
 import { sshExec } from "./ssh/executor.js";
 import { sendMagicPacket } from "./nodes/wol.js";
 import { reconcileStaleRuns } from "./benchmarks/boot-reconcile.js";
+import { gatewayRouter } from "./gateway/router.js";
 
 const app = express();
 const server = createServer(app);
 
 app.use(cors());
+
+// The gateway mounts BEFORE the global JSON parser. That parser's default size
+// limit would otherwise reject long-context prompts at the manager which
+// succeed when sent straight to a node — the gateway reads only what it needs
+// to choose a target and streams the rest. The management API below keeps the
+// defensive default. See docs/adr/0001-inference-gateway.md.
+app.use("/v1", gatewayRouter);
+
 app.use(express.json());
 
 // WebSocket hubs
