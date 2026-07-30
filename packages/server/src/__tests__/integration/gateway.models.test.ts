@@ -202,9 +202,9 @@ describe("GET /v1/models", () => {
 describe("the gateway's allowlist", () => {
   // A runtime's own API must be unreachable through the gateway — including the
   // operations that mutate what a node holds (pull, delete, push).
+  // NOTE: /v1/chat/completions and /v1/embeddings ARE served — see
+  // gateway.proxy.test.ts. Everything below is outside the allowlist.
   it.each([
-    ["POST", "/v1/chat/completions"],
-    ["POST", "/v1/embeddings"],
     ["POST", "/v1/completions"],
     ["GET", "/v1/models/glm-5.2"],
     ["POST", "/api/pull"],
@@ -241,8 +241,10 @@ describe("the gateway's allowlist", () => {
     const oversized = { prompt: "x".repeat(200_000) };
     const app = makeOrderedApp();
 
+    // An unlisted gateway path, so the assertion is about reaching the gateway
+    // at all rather than about anything the served operations do with a body.
     const viaGateway = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/completions")
       .set("content-type", "application/json")
       .send(oversized);
     expect(viaGateway.status).toBe(404);
