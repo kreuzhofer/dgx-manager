@@ -6,6 +6,7 @@ const LINKS: { href: string; label: string }[] = [
   { href: "/", label: "Overview" },
   { href: "/nodes", label: "Nodes" },
   { href: "/deployments", label: "Deployments" },
+  { href: "/gateway", label: "Gateway" },
   { href: "/models", label: "Models" },
   { href: "/finetune", label: "Fine-tune" },
   { href: "/datasets", label: "Datasets" },

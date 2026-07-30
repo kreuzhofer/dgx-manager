@@ -14,6 +14,8 @@ Full-stack control plane for a DGX Spark cluster. Domains and how they relate:
 - **Deployments** — launch a recipe on one or more nodes via **sparkrun** (the head-node agent runs
   \`sparkrun run\`). Accepts a registry recipe (\`recipeFile\`), an NFS path (\`recipePath\`), or an
   **inline recipe body** (\`recipeYaml\`) for remote recipe development. Stopped via DELETE.
+- **Gateway** — what the cluster publishes through the inference gateway at \`/v1\`: pools of
+  deployments grouped by published name, each member's load, and why any member is not serving.
 - **Fine-tune** — training jobs (train -> merge -> quantize -> deploy the merged model via sparkrun).
 - **Benchmarks** — server-side benchmark runs (llama-benchy / tool-eval-bench / lm-eval) against a deployment.
 - **Datasets / Models / Settings / Tokens / Agent bundle** — supporting resources.
@@ -43,6 +45,7 @@ export function buildOpenApiSpec() {
         { name: "Cluster", description: "Cluster-wide operations (e.g. reseed cross-node SSH known_hosts trust)." },
         { name: "Recipes", description: "Inference recipe catalog from sparkrun registries." },
         { name: "Deployments", description: "Launch/stop inference workloads via sparkrun (registry ref, NFS path, or inline YAML)." },
+        { name: "Gateway", description: "Pools published through the inference gateway, and their load." },
         { name: "Fine-tune", description: "Training jobs and deploying fine-tuned models." },
         { name: "Benchmarks", description: "Server-side benchmark runs against deployments." },
         { name: "Datasets", description: "Training/eval dataset management." },

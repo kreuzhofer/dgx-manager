@@ -28,6 +28,7 @@ import { sshExec } from "./ssh/executor.js";
 import { sendMagicPacket } from "./nodes/wol.js";
 import { reconcileStaleRuns } from "./benchmarks/boot-reconcile.js";
 import { gatewayRouter } from "./gateway/router.js";
+import { gatewayViewRouter } from "./routes/gateway.js";
 
 const app = express();
 const server = createServer(app);
@@ -66,6 +67,7 @@ app.set("sshExec", sshExec);
 app.set("wolSend", sendMagicPacket);
 
 // REST API routes
+app.use("/api/gateway", gatewayViewRouter);
 app.use("/api/nodes", nodesRouter);
 app.use("/api/models", modelsRouter);
 app.use("/api/deployments", deploymentsRouter);
