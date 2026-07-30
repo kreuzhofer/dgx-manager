@@ -89,6 +89,43 @@ async function seedRunningDeployment() {
   });
 }
 
+// The name a run targets used to be discovered by probing the endpoint at the
+// start of every run, with a timeout attached. It is established once when the
+// deployment starts serving and stored on the record, so the run reads it.
+describe("POST /api/benchmarks — the model name a run targets", () => {
+  it("uses the deployment's stored published name", async () => {
+    const d = await seedRunningDeployment();
+    await prisma.deployment.update({
+      where: { id: d.id },
+      data: { publishedName: "what-the-runtime-answers-to" },
+    });
+    runMock.mockReturnValue(new Promise(() => {}));
+
+    const res = await request(makeApp())
+      .post("/api/benchmarks")
+      .send({ deploymentId: d.id, presetId: "quick-smoke" });
+
+    expect(res.status).toBe(201);
+    expect(res.body.servedModelName).toBe("what-the-runtime-answers-to");
+  });
+
+  // A deployment that was already serving before the column existed has no
+  // stored name; the run must still happen and surface the real error rather
+  // than being refused upfront.
+  it("falls back to the display name when nothing is stored yet", async () => {
+    const d = await seedRunningDeployment();
+    expect(d.publishedName).toBeNull();
+    runMock.mockReturnValue(new Promise(() => {}));
+
+    const res = await request(makeApp())
+      .post("/api/benchmarks")
+      .send({ deploymentId: d.id, presetId: "quick-smoke" });
+
+    expect(res.status).toBe(201);
+    expect(res.body.servedModelName).toBe("llama-prod");
+  });
+});
+
 describe("GET /api/benchmarks/presets", () => {
   it("returns the built-in presets", async () => {
     const res = await request(makeApp()).get("/api/benchmarks/presets");

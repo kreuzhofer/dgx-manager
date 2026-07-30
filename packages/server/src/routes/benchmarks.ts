@@ -11,7 +11,7 @@ import {
   type AccuracyConfig,
 } from "../benchmarks/presets.js";
 import { resolveEvalNode } from "../benchmarks/eval-node.js";
-import { deploymentEndpointUrl, resolveServedModelName } from "../benchmarks/endpoint.js";
+import { deploymentEndpointUrl } from "../benchmarks/endpoint.js";
 import { cancelBenchmark } from "../benchmarks/orchestrator.js";
 import { executeRun } from "../benchmarks/execute.js";
 
@@ -339,13 +339,16 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
   } catch (e) {
     return res.status(409).json({ error: (e as Error).message });
   }
-  // Ask the running endpoint what it actually serves — vLLM uses the recipe's
-  // --served-model-name, which may differ from displayName/model.name. Falls
-  // back to those if the endpoint isn't reachable yet.
-  const servedModelName = await resolveServedModelName(
-    endpointUrl,
-    deployment.displayName ?? deployment.model.name,
-  );
+  // The name the runtime actually answers to was established when the
+  // deployment started serving and stored on the record — a pinned runtime is
+  // asked then, once, rather than at the start of every run. Reading it here
+  // removes an HTTP probe and its timeout from this path.
+  //
+  // A deployment that was already serving before the column existed has none
+  // stored; fall back to the local guess so the run still happens and surfaces
+  // the real error rather than refusing upfront.
+  const servedModelName =
+    deployment.publishedName ?? deployment.displayName ?? deployment.model.name;
 
   const run = await prisma.benchmarkRun.create({
     data: {
