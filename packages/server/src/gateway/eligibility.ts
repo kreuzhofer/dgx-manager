@@ -46,7 +46,9 @@ export interface PoolAssessment {
 }
 
 /**
- * Filter a pool down to the members that can serve.
+ * Split a pool into the members that can serve and those that cannot, with the
+ * reason for each exclusion — so a refusal can say what is wrong rather than
+ * leaving an operator to guess between "still starting" and "node is gone".
  *
  * Liveness comes from the agent hub rather than the deployment's status column:
  * the column can lag a dead node by up to the staleness sweep interval, and a
@@ -91,12 +93,4 @@ export function assessPool(
   }
 
   return { eligible, excluded };
-}
-
-/** Just the members that can serve. */
-export function selectEligibleMembers(
-  candidates: MemberCandidate[],
-  isNodeOnline: LivenessCheck,
-): EligibleMember[] {
-  return assessPool(candidates, isNodeOnline).eligible;
 }

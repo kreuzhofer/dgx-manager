@@ -53,6 +53,8 @@ async function wipeAll() {
   // hanging by one test must not make the next test's pool look busy.
   const { resetOutstanding } = await import("../../gateway/inflight.js");
   resetOutstanding();
+  const { resetRotations } = await import("../../gateway/rotation.js");
+  resetRotations();
 }
 afterEach(wipeAll);
 
@@ -343,7 +345,7 @@ describe("refusing with reasons", () => {
       host: upstream.host,
       port: upstream.port,
     });
-    const { deployment: starting } = await seedMember({
+    const { node: startingNode } = await seedMember({
       publishedName: "unreachable",
       host: "10.0.0.77",
       port: 8000,
@@ -356,14 +358,16 @@ describe("refusing with reasons", () => {
 
     expect(res.status).toBe(503);
     expect(res.body.error.code).toBe("no_eligible_member");
-    const members = res.body.error.members as Array<{ deploymentId: string; reason: string }>;
-    expect(members).toHaveLength(2);
 
-    const byId = Object.fromEntries(members.map((m) => [m.deploymentId, m.reason]));
-    expect(byId[starting.id]).toBe("not-running");
-    const offline = members.find((m) => m.reason === "agent-offline");
-    expect(offline).toBeDefined();
-    expect(res.body.error.message).toContain(offlineNode.id);
+    const members = res.body.error.members as Array<{ node: string; reason: string }>;
+    expect(members).toHaveLength(2);
+    const byNode = Object.fromEntries(members.map((m) => [m.node, m.reason]));
+    expect(byNode[startingNode.name]).toBe("not-running");
+    expect(byNode[offlineNode.name]).toBe("agent-offline");
+
+    // The message alone has to be enough when read from a terminal.
+    expect(res.body.error.message).toContain(offlineNode.name);
+    expect(res.body.error.message).toMatch(/no live agent connection/);
     await upstream.close();
   });
 });

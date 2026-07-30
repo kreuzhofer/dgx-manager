@@ -5,6 +5,7 @@ import { toModelList } from "./models.js";
 import { assessPool } from "./eligibility.js";
 import { selectLeastOutstanding } from "./selection.js";
 import { acquire, outstandingFor } from "./inflight.js";
+import { nextRotation } from "./rotation.js";
 import {
   BodyTooLargeError,
   FORWARDED_PATHS,
@@ -33,14 +34,6 @@ import {
  */
 export const gatewayRouter = Router();
 
-/**
- * Rotation for breaking ties between equally idle members. One counter for the
- * whole gateway rather than one per pool: it only has to vary, and a shared
- * counter cannot leak memory as pools come and go.
- */
-let rotation = 0;
-const nextRotation = () => rotation++;
-
 /** OpenAI-shaped error body, so clients can parse failures the way they expect. */
 function openAiError(
   res: Response,
@@ -48,8 +41,9 @@ function openAiError(
   message: string,
   type: string,
   code: string,
+  extra: Record<string, unknown> = {},
 ): Response {
-  return res.status(status).json({ error: { message, type, code } });
+  return res.status(status).json({ error: { message, type, code, ...extra } });
 }
 
 /**
@@ -130,7 +124,15 @@ async function proxyInference(req: Request, res: Response, path: ForwardedPath):
   // unknown name never reaches a node: it is refused here.
   const candidates = await prisma.deployment.findMany({
     where: { publishedName: requested },
-    select: { id: true, status: true, port: true, node: { select: { id: true, ipAddress: true } } },
+    // Ordered so the set the rotation indexes into is stable between requests;
+    // without it the tie-break would shuffle with whatever order rows arrive in.
+    orderBy: { id: "asc" },
+    select: {
+      id: true,
+      status: true,
+      port: true,
+      node: { select: { id: true, name: true, ipAddress: true } },
+    },
   });
   if (candidates.length === 0) {
     openAiError(
@@ -144,6 +146,7 @@ async function proxyInference(req: Request, res: Response, path: ForwardedPath):
   }
 
   const agentHub = req.app.get("agentHub") as { isAgentOnline(nodeId: string): boolean } | undefined;
+  const nodeNames = new Map(candidates.map((c) => [c.node.id, c.node.name]));
   const pool = assessPool(
     candidates.map((c) => ({
       id: c.id,
@@ -155,30 +158,31 @@ async function proxyInference(req: Request, res: Response, path: ForwardedPath):
     (nodeId) => agentHub?.isAgentOnline(nodeId) ?? false,
   );
 
-  if (pool.eligible.length === 0) {
+  // Nothing may await between choosing a member and counting the request
+  // against it: two concurrent requests would otherwise both see the same
+  // member idle and both pick it.
+  const target = selectLeastOutstanding(pool.eligible, outstandingFor, nextRotation(requested));
+
+  if (!target) {
     // Name each member and why it was passed over. A bare "no active endpoints"
     // cannot distinguish a node that is offline from a deployment still
     // starting, which is the difference between waiting and investigating.
-    const reasons = pool.excluded
-      .map((m) => `deployment ${m.deploymentId} on node ${m.nodeId}: ${m.detail}`)
-      .join("; ");
-    res.status(503).json({
-      error: {
-        message:
-          `No deployment serving '${requested}' can take a request right now. ` +
-          (reasons || "the pool is empty."),
-        type: "api_error",
-        code: "no_eligible_member",
-        members: pool.excluded,
-      },
-    });
-    return;
-  }
-
-  const target = selectLeastOutstanding(pool.eligible, outstandingFor, nextRotation());
-  if (!target) {
-    openAiError(res, 503, "No member could be selected.", "api_error", "no_eligible_member");
-    return;
+    // Members are identified by node name rather than internal ids — that is
+    // what an operator acts on, and it keeps the body free of record keys.
+    const members = pool.excluded.map((m) => ({
+      node: nodeNames.get(m.nodeId) ?? m.nodeId,
+      reason: m.reason,
+      detail: m.detail,
+    }));
+    const summary = members.map((m) => `${m.node}: ${m.detail}`).join("; ");
+    return void openAiError(
+      res,
+      503,
+      `No deployment serving '${requested}' can take a request right now. ${summary}`,
+      "api_error",
+      "no_eligible_member",
+      { members },
+    );
   }
 
   // Counted from just before the hop to just after it resolves, whatever the
