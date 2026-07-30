@@ -92,6 +92,30 @@ describe("GET /api/gateway", () => {
     expect(res.body.pools).toEqual([]);
   });
 
+  // This is the string an operator copies and pastes onto another machine, so
+  // it has to be the manager's real address — not a build-time default that
+  // says localhost outside compose.
+  describe("the base URL a client should use", () => {
+    const original = process.env.MANAGER_ADVERTISE_HOST;
+    afterEach(() => {
+      if (original === undefined) delete process.env.MANAGER_ADVERTISE_HOST;
+      else process.env.MANAGER_ADVERTISE_HOST = original;
+    });
+
+    it("uses the advertised host when one is configured", async () => {
+      process.env.MANAGER_ADVERTISE_HOST = "192.168.44.14";
+      const res = await request(makeApp()).get("/api/gateway");
+      expect(res.body.baseUrl).toBe(`http://192.168.44.14:${process.env.PORT || "4000"}/v1`);
+    });
+
+    it("falls back to the host the request arrived on", async () => {
+      delete process.env.MANAGER_ADVERTISE_HOST;
+      const res = await request(makeApp()).get("/api/gateway");
+      expect(res.body.baseUrl).toMatch(/^http:\/\/[^/]+\/v1$/);
+      expect(res.body.baseUrl).not.toContain("undefined");
+    });
+  });
+
   it("reports a pool with its member's node, runtime and load", async () => {
     const { deployment } = await seed({
       publishedName: "glm-5.2",

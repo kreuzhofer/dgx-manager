@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "@/lib/api";
+import { copyText } from "@/lib/clipboard";
 
 interface PoolMember {
   deploymentId: string;
@@ -20,8 +21,6 @@ interface Pool {
   servingCount: number;
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
-
 const RUNTIME_COLORS: Record<string, string> = {
   vllm: "bg-blue-900/50 text-blue-300",
   ollama: "bg-purple-900/50 text-purple-300",
@@ -36,20 +35,33 @@ const REASON_LABELS: Record<string, string> = {
 };
 
 function CopyableUrl({ url }: { url: string }) {
-  const [copied, setCopied] = useState(false);
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+
+  async function copy() {
+    try {
+      await copyText(url);
+      setState("copied");
+    } catch (err) {
+      // Saying "copied" when nothing was copied is worse than saying nothing.
+      console.error("copy failed", err);
+      setState("failed");
+    }
+    setTimeout(() => setState("idle"), 2000);
+  }
+
   return (
     <button
-      onClick={() => {
-        navigator.clipboard?.writeText(url);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      }}
+      onClick={() => void copy()}
       className="group flex items-center gap-2 rounded border border-gray-700 bg-gray-900 px-3 py-2 font-mono text-sm text-gray-200 hover:border-gray-500"
       title="Copy to clipboard"
     >
       <span>{url}</span>
-      <span className="text-xs text-gray-500 group-hover:text-gray-300">
-        {copied ? "copied" : "copy"}
+      <span
+        className={`text-xs ${
+          state === "failed" ? "text-amber-400" : "text-gray-500 group-hover:text-gray-300"
+        }`}
+      >
+        {state === "copied" ? "copied" : state === "failed" ? "copy failed — select it" : "copy"}
       </span>
     </button>
   );
@@ -57,13 +69,15 @@ function CopyableUrl({ url }: { url: string }) {
 
 export default function GatewayPage() {
   const [pools, setPools] = useState<Pool[]>([]);
+  const [baseUrl, setBaseUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const data = await apiFetch<{ pools: Pool[] }>("/api/gateway");
+      const data = await apiFetch<{ baseUrl: string; pools: Pool[] }>("/api/gateway");
       setPools(data.pools);
+      setBaseUrl(data.baseUrl);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load");
@@ -75,8 +89,12 @@ export default function GatewayPage() {
   useEffect(() => {
     void load();
     // In-flight counts change with traffic, not with a database write, so there
-    // is no event to subscribe to — poll while the page is open.
-    const timer = setInterval(() => void load(), 3000);
+    // is no event to subscribe to — poll while the page is open. Skipped while
+    // the tab is hidden: a forgotten background tab should not query a
+    // low-powered manager every few seconds forever.
+    const timer = setInterval(() => {
+      if (!document.hidden) void load();
+    }, 3000);
     return () => clearInterval(timer);
   }, [load]);
 
@@ -91,11 +109,13 @@ export default function GatewayPage() {
       </p>
 
       <div className="mb-8 flex flex-wrap items-center gap-3">
-        <CopyableUrl url={`${API_BASE}/v1`} />
-        <span className="text-sm text-gray-500">
-          {totalServing} {totalServing === 1 ? "member" : "members"} serving{" "}
-          {pools.length} {pools.length === 1 ? "model" : "models"}
-        </span>
+        {baseUrl && <CopyableUrl url={baseUrl} />}
+        {loaded && !error && (
+          <span className="text-sm text-gray-500">
+            {totalServing} {totalServing === 1 ? "member" : "members"} serving{" "}
+            {pools.length} {pools.length === 1 ? "model" : "models"}
+          </span>
+        )}
       </div>
 
       {error && (
@@ -103,6 +123,8 @@ export default function GatewayPage() {
           {error}
         </div>
       )}
+
+      {!loaded && !error && <div className="text-gray-400">Loading…</div>}
 
       {loaded && pools.length === 0 && !error && (
         <div className="rounded border border-gray-800 bg-gray-900/50 px-4 py-8 text-center text-gray-400">
@@ -158,12 +180,15 @@ export default function GatewayPage() {
                           serving
                         </span>
                       ) : (
-                        <span
-                          className="rounded bg-amber-900/50 px-2 py-0.5 text-xs text-amber-300"
-                          title={m.detail}
-                        >
-                          excluded — {REASON_LABELS[m.reason ?? ""] ?? m.reason}
-                        </span>
+                        <div className="flex flex-wrap items-baseline gap-2">
+                          <span className="rounded bg-amber-900/50 px-2 py-0.5 text-xs text-amber-300">
+                            excluded — {REASON_LABELS[m.reason ?? ""] ?? m.reason ?? "unknown"}
+                          </span>
+                          {/* Rendered, not just a tooltip: on a touch screen or
+                              by keyboard a hover title is invisible, and this is
+                              the sentence that says what to go and look at. */}
+                          {m.detail && <span className="text-xs text-gray-500">{m.detail}</span>}
+                        </div>
                       )}
                     </td>
                   </tr>

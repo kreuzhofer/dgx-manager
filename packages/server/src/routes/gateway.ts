@@ -31,6 +31,19 @@ export const gatewayViewRouter = Router();
  *       '200':
  *         description: Pools, their members, and why any member is not serving
  */
+/**
+ * The URL a client on another machine should point at.
+ *
+ * Computed server-side, the same way the agent install script derives its own
+ * URL: a build-time value baked into the dashboard says `localhost` outside
+ * compose, and this is the one string an operator copies and pastes elsewhere.
+ */
+function gatewayBaseUrl(reqHostname: string): string {
+  const host = process.env.MANAGER_ADVERTISE_HOST || reqHostname;
+  const port = process.env.PORT || "4000";
+  return `http://${host}:${port}/v1`;
+}
+
 gatewayViewRouter.get("/", async (req, res) => {
   const deployments = await prisma.deployment.findMany({
     where: { publishedName: { not: null } },
@@ -48,19 +61,19 @@ gatewayViewRouter.get("/", async (req, res) => {
   const agentHub = req.app.get("agentHub") as { isAgentOnline(nodeId: string): boolean } | undefined;
 
   const pools = buildPoolView(
-    deployments.map((d) => ({
+    deployments.flatMap((d) => (d.publishedName === null ? [] : [{
       id: d.id,
-      publishedName: d.publishedName as string,
+      publishedName: d.publishedName,
       status: d.status,
       port: d.port,
       nodeId: d.node.id,
       nodeName: d.node.name,
       nodeIp: d.node.ipAddress,
       runtime: d.model.runtime,
-    })),
+    }])),
     (nodeId) => agentHub?.isAgentOnline(nodeId) ?? false,
     outstandingFor,
   );
 
-  res.json({ pools });
+  res.json({ baseUrl: gatewayBaseUrl(req.hostname), pools });
 });

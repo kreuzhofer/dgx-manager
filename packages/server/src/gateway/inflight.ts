@@ -37,7 +37,11 @@ export function acquire(deploymentId: string): () => void {
   };
 }
 
-/** Current counts, for the gateway view. Empty entries are absent, not zero. */
+/**
+ * Every busy deployment and its count. Used by tests to assert the whole
+ * accounting at once — notably that a failed request leaves nothing behind.
+ * Idle deployments are absent rather than present with a zero.
+ */
 export function outstandingSnapshot(): Record<string, number> {
   return Object.fromEntries(counts);
 }
