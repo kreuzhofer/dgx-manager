@@ -2,7 +2,7 @@ import { Router } from "express";
 import { existsSync, createReadStream, readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { ollamaDropInBody } from "../ollama/dropin.js";
+import { ollamaDropInBody, ollamaOwnershipProbe } from "../ollama/dropin.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -296,14 +296,11 @@ fi
 # Delimited so tests can execute this section in isolation against stubs.
 # >>> ollama-dropin
 OLLAMA_DROPIN_DIR="\${OLLAMA_DROPIN_DIR:-/etc/systemd/system/ollama.service.d}"
-if systemctl list-unit-files ollama.service >/dev/null 2>&1 && systemctl is-enabled ollama >/dev/null 2>&1; then
-  OLLAMA_PREEXISTING=1
-  log "Ollama service already installed"
-else
-  OLLAMA_PREEXISTING=0
-  log "Installing Ollama..."
-  curl -fsSL https://ollama.com/install.sh | sh
-fi
+mkdir -p "\$OLLAMA_DROPIN_DIR"
+${ollamaOwnershipProbe({
+  markerDirExpr: "$OLLAMA_DROPIN_DIR",
+  installCmd: 'log "Installing Ollama..."\n  curl -fsSL https://ollama.com/install.sh | sh',
+})}
 
 # The drop-in is ensured on EVERY run, not only when we install Ollama.
 # A pre-existing Ollama keeps its default loopback bind, which silently makes

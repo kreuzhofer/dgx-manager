@@ -4,7 +4,7 @@ import { broadcast as sseBroadcast } from "../sse.js";
 import { macCaptureCmd, normalizeMac } from "../nodes/power.js";
 import { prisma } from "../prisma.js";
 import { checksForRole, evalSudoCheck } from "./eval-profile.js";
-import { ollamaDropInBody } from "../ollama/dropin.js";
+import { ollamaDropInBody, ollamaOwnershipProbe } from "../ollama/dropin.js";
 import { isEvalNode } from "../nodes/role.js";
 
 // ---------------------------------------------------------------------------
@@ -115,37 +115,55 @@ export function evalOllamaAudit(stdout: string): PrereqCheck {
  * This mirrors the token install script's `ollama-dropin` section
  * (routes/agent-bundle.ts) — the two paths must express the same policy.
  */
-export function ollamaInstallCmd(sshUser: string): string {
+export function ollamaInstallCmd(
+  sshUser: string,
+  /**
+   * Paths the script operates on. Real values by default; a test passes a
+   * scratch directory so it can execute the script for real. Deliberately
+   * parameters rather than env-var overrides inside the script — those would
+   * remain honoured on a live node, where a stray value in /etc/environment
+   * would redirect where root writes.
+   */
+  paths: { dropinDir?: string; storage?: string } = {},
+): string {
+  const dropinDir = paths.dropinDir ?? "/etc/systemd/system/ollama.service.d";
+  const storage = paths.storage ?? SHARED_STORAGE;
+
   // sshUser is interpolated into a shell script run as root — fail fast on
   // anything that could break out of the quoting.
   if (!/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(sshUser)) {
     throw new Error(`ollamaInstallCmd: invalid sshUser ${JSON.stringify(sshUser)}`);
   }
+  // The paths land in the same root-privileged script. SHARED_STORAGE comes
+  // from an env var, so treat it as untrusted too: a value containing quotes
+  // or `$(...)` would otherwise run as the caller's choosing.
+  for (const [label, value] of [["dropin dir", dropinDir], ["shared storage", storage]] as const) {
+    if (!/^\/[A-Za-z0-9._\-/]*$/.test(value)) {
+      throw new Error(`ollamaInstallCmd: unsafe ${label} ${JSON.stringify(value)}`);
+    }
+  }
 
-  // Overridable so tests can exercise this against a scratch directory rather
-  // than the real /etc and the real mount.
   return `
-set -eu
-DROPIN_DIR="\${OLLAMA_DROPIN_DIR:-/etc/systemd/system/ollama.service.d}"
-STORAGE="\${SHARED_STORAGE_DIR:-${SHARED_STORAGE}}"
-
-if systemctl list-unit-files ollama.service >/dev/null 2>&1 && systemctl is-enabled ollama >/dev/null 2>&1; then
-  OLLAMA_PREEXISTING=1
-else
-  OLLAMA_PREEXISTING=0
-  curl -fsSL https://ollama.ai/install.sh | sh
-fi
+set -euo pipefail
+DROPIN_DIR="${dropinDir}"
+STORAGE="${storage}"
 
 sudo mkdir -p "\$DROPIN_DIR"
+${ollamaOwnershipProbe({
+    markerDirExpr: "$DROPIN_DIR",
+    sudo: "sudo ",
+    installCmd: "curl -fsSL https://ollama.ai/install.sh | sh",
+  })}
+
 OVERRIDE="\$DROPIN_DIR/override.conf"
 OVERRIDE_NEW="\$(mktemp)"
+trap 'rm -f "\$OVERRIDE_NEW"' EXIT
 ${ollamaDropInBody({ userExpr: sshUser, storageExpr: "$STORAGE", sudo: "sudo " })} > "\$OVERRIDE_NEW"
 
 if sudo cmp -s "\$OVERRIDE_NEW" "\$OVERRIDE" 2>/dev/null; then
-  rm -f "\$OVERRIDE_NEW"
+  :
 else
-  sudo cp "\$OVERRIDE_NEW" "\$OVERRIDE"
-  rm -f "\$OVERRIDE_NEW"
+  sudo install -m 0644 "\$OVERRIDE_NEW" "\$OVERRIDE"
   sudo systemctl daemon-reload
   sudo systemctl restart ollama
 fi

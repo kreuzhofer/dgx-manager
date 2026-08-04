@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ollamaDropInBody,
+  OLLAMA_MANAGED_MARKER,
   OLLAMA_OWNERSHIP_SETTINGS,
   OLLAMA_UNIVERSAL_SETTINGS,
 } from "./dropin.js";
@@ -36,7 +37,7 @@ function render(opts: {
   });
   writeFileSync(join(tmp, "body.sh"), body);
   return execFileSync("bash", ["-c", `. "${join(tmp, "body.sh")}"`], {
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, OLLAMA_PREEXISTING: opts.preexisting ? "1" : "0" },
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, OLLAMA_MANAGED: opts.preexisting ? "0" : "1" },
     encoding: "utf8",
   });
 }
@@ -97,25 +98,70 @@ describe("ollamaDropInBody", () => {
 describe("both provisioning paths render the same policy", () => {
   const provisioner = ollamaInstallCmd("daniel");
   const installScript = generateInstallScript("http://192.168.44.14:4000");
+  const paths: Array<[string, string]> = [
+    ["SSH provisioner", provisioner],
+    ["install script", installScript],
+  ];
 
-  it("both apply every universal setting", () => {
-    for (const setting of OLLAMA_UNIVERSAL_SETTINGS) {
-      expect(provisioner, "SSH provisioner").toContain(setting);
-      expect(installScript, "install script").toContain(setting);
+  /**
+   * Extract each path's drop-in body and execute it, so the comparison is
+   * between what the two paths actually WRITE. An earlier version of this test
+   * matched the generated text with a regex, which passed while the paths still
+   * disagreed — the failure mode it existed to prevent.
+   */
+  function bodyOutput(script: string, managed: boolean): string {
+    const m = script.match(/\{\n\s*echo "\[Service\]"[\s\S]*?\n\}/);
+    expect(m, "each path must contain a drop-in body").not.toBeNull();
+    const tmp = mkdtempSync(join(tmpdir(), "policy-"));
+    const bin = join(tmp, "bin");
+    mkdirSync(bin, { recursive: true });
+    for (const [name, body] of [
+      ["mountpoint", "exit 0"],
+      ["mkdir", "exit 0"],
+      ["chown", "exit 0"],
+      ["sudo", 'exec "$@"'],
+    ] as const) {
+      const p = join(bin, name);
+      writeFileSync(p, `#!/bin/sh\n${body}\n`);
+      chmodSync(p, 0o755);
     }
+    writeFileSync(join(tmp, "b.sh"), m![0]);
+    return execFileSync("bash", ["-c", `. "${join(tmp, "b.sh")}"`], {
+      env: {
+        ...process.env,
+        PATH: `${bin}:/usr/bin:/bin`,
+        OLLAMA_MANAGED: managed ? "1" : "0",
+        AGENT_USER: "daniel",
+        // Each path names the storage root its own way (the provisioner from
+        // SHARED_STORAGE, the install script hardcoded). That is configuration,
+        // not policy — normalise it so this compares the policy.
+        STORAGE: "/mnt/tank",
+      },
+      encoding: "utf8",
+    });
+  }
+
+  it("write the same settings when adopting someone else's Ollama", () => {
+    const [a, b] = paths.map(([, s]) => bodyOutput(s, false));
+    expect(a).toBe(b);
+    for (const setting of OLLAMA_UNIVERSAL_SETTINGS) expect(a).toContain(setting);
+    for (const setting of OLLAMA_OWNERSHIP_SETTINGS) expect(a).not.toContain(setting);
   });
 
-  it("both gate the ownership settings on having installed Ollama themselves", () => {
-    for (const path of [provisioner, installScript]) {
-      // The ownership block is emitted only inside the preexisting=0 branch.
-      const guard = path.match(/if \[ "\$OLLAMA_PREEXISTING" = "0" \]; then\n\s*echo "User=/);
-      expect(guard).not.toBeNull();
-    }
+  it("write the same settings for an Ollama they installed themselves", () => {
+    const [a, b] = paths.map(([, s]) => bodyOutput(s, true));
+    expect(a).toBe(b);
+    expect(a).toContain("User=daniel");
+    expect(a).toContain("Environment=OLLAMA_MODELS=");
   });
 
-  it("both gate the model store on the mount", () => {
-    for (const path of [provisioner, installScript]) {
-      expect(path).toMatch(/OLLAMA_PREEXISTING" = "0" \] && mountpoint -q/);
+  // The predicate matters as much as the body: deciding ownership from whether
+  // the unit is *enabled* misreads every node the manager provisioned, since
+  // fleet policy disables Ollama.
+  it("both decide ownership from the recorded marker, not the unit's state", () => {
+    for (const [label, script] of paths) {
+      expect(script, label).toContain(OLLAMA_MANAGED_MARKER);
+      expect(script, label).not.toMatch(/is-enabled ollama/);
     }
   });
 });

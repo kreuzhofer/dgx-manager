@@ -35,7 +35,8 @@ describe("ollamaInstallCmd — drop-in behaviour", () => {
    * is mounted.
    */
   function run(opts: {
-    preexisting: boolean;
+    /** Is Ollama already installed on the node? */
+    installed: boolean;
     tankMounted: boolean;
     dir?: string;
     sshUser?: string;
@@ -52,23 +53,25 @@ describe("ollamaInstallCmd — drop-in behaviour", () => {
       writeFileSync(p, `#!/bin/sh\necho "${name} $*" >> "${calls}"\n${body}\n`);
       chmodSync(p, 0o755);
     };
-    stub("systemctl", opts.preexisting ? "exit 0" : `case "$1" in list-unit-files|is-enabled) exit 1 ;; esac\nexit 0`);
+    stub("systemctl", opts.installed ? "exit 0" : `case "$1" in list-unit-files) exit 1 ;; esac\nexit 0`);
     stub("curl", "exit 0");
-    stub("sh", 'exit 0'); // the piped installer
+    stub("sh", "exit 0"); // the piped installer
     stub("mountpoint", opts.tankMounted ? "exit 0" : "exit 1");
     // Run the privileged part as ourselves so the test needs no root.
     stub("sudo", 'exec "$@"');
     stub("chown", "exit 0");
+    // Ollama itself is only ever probed for presence.
+    if (opts.installed) stub("ollama", "exit 0");
 
-    const cmd = ollamaInstallCmd(opts.sshUser ?? "testuser");
+    const cmd = ollamaInstallCmd(opts.sshUser ?? "testuser", {
+      dropinDir: dropin,
+      storage: join(tmp, "tank"),
+    });
     writeFileSync(join(tmp, "cmd.sh"), cmd);
     execFileSync("bash", [join(tmp, "cmd.sh")], {
-      env: {
-        ...process.env,
-        PATH: `${bin}:${process.env.PATH}`,
-        OLLAMA_DROPIN_DIR: dropin,
-        SHARED_STORAGE_DIR: join(tmp, "tank"),
-      },
+      // A closed PATH: the host running these tests has its own ollama in
+      // /usr/local/bin, which would otherwise make every node look "installed".
+      env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` },
       stdio: "pipe",
     });
 
@@ -83,7 +86,7 @@ describe("ollamaInstallCmd — drop-in behaviour", () => {
   // user with a 4.4 GB store in the default location; claiming User/HOME or
   // repointing OLLAMA_MODELS orphans that store.
   it("never claims User, HOME or OLLAMA_MODELS on a pre-existing Ollama", () => {
-    const r = run({ preexisting: true, tankMounted: true });
+    const r = run({ installed: true, tankMounted: true });
     expect(r.override).not.toBeNull();
     expect(r.override).not.toContain("User=");
     expect(r.override).not.toContain("HOME=");
@@ -93,7 +96,7 @@ describe("ollamaInstallCmd — drop-in behaviour", () => {
   // The settings that are safe to impose on someone else's service: they change
   // how it is reached and how it manages memory, not where its data lives.
   it("still applies the reachability and memory settings to a pre-existing Ollama", () => {
-    const r = run({ preexisting: true, tankMounted: false });
+    const r = run({ installed: true, tankMounted: false });
     expect(r.override).toContain("Environment=OLLAMA_HOST=0.0.0.0");
     expect(r.override).toContain("Environment=OLLAMA_MAX_LOADED_MODELS=0");
     // An evicted model cannot be woken through the gateway, so never unload one.
@@ -101,12 +104,12 @@ describe("ollamaInstallCmd — drop-in behaviour", () => {
   });
 
   it("does not run the installer when Ollama is already present", () => {
-    const r = run({ preexisting: true, tankMounted: false });
+    const r = run({ installed: true, tankMounted: false });
     expect(r.calls.some((c) => c.startsWith("curl"))).toBe(false);
   });
 
   it("claims User, HOME and the shared model store for an Ollama it installs itself", () => {
-    const r = run({ preexisting: false, tankMounted: true, sshUser: "daniel" });
+    const r = run({ installed: false, tankMounted: true, sshUser: "daniel" });
     expect(r.override).toContain("User=daniel");
     expect(r.override).toContain("Environment=HOME=/home/daniel");
     expect(r.override).toContain("Environment=OLLAMA_MODELS=");
@@ -115,14 +118,14 @@ describe("ollamaInstallCmd — drop-in behaviour", () => {
   });
 
   it("installs Ollama when it is absent", () => {
-    const r = run({ preexisting: false, tankMounted: false });
+    const r = run({ installed: false, tankMounted: false });
     expect(r.calls.some((c) => c.startsWith("curl"))).toBe(true);
   });
 
   // Pointing OLLAMA_MODELS at a path that is not mounted makes every model on
   // the node invisible — the failure this ticket is about, in its other form.
   it("omits OLLAMA_MODELS when shared storage is not mounted", () => {
-    const r = run({ preexisting: false, tankMounted: false });
+    const r = run({ installed: false, tankMounted: false });
     expect(r.override).not.toContain("OLLAMA_MODELS");
     // …but still configures everything that does not depend on the mount.
     expect(r.override).toContain("User=testuser");
@@ -132,13 +135,13 @@ describe("ollamaInstallCmd — drop-in behaviour", () => {
   // Fleet policy: Ollama's API is unauthenticated, so it must never come back
   // on its own at boot.
   it("leaves boot autostart disabled", () => {
-    const r = run({ preexisting: false, tankMounted: true });
+    const r = run({ installed: false, tankMounted: true });
     expect(r.calls).toContain("systemctl disable ollama");
     expect(r.calls.some((c) => c === "systemctl enable ollama")).toBe(false);
   });
 
   it("does not stop the service — this boot's run-state is left alone", () => {
-    const r = run({ preexisting: true, tankMounted: false });
+    const r = run({ installed: true, tankMounted: false });
     expect(r.calls.some((c) => c.startsWith("systemctl stop"))).toBe(false);
   });
 
@@ -146,20 +149,39 @@ describe("ollamaInstallCmd — drop-in behaviour", () => {
   // deployment, so a restart happens only when the drop-in actually changes.
   it("does not restart when the drop-in is already current", () => {
     const dir = mkdtempSync(join(tmpdir(), "prov-ollama-idem-"));
-    const first = run({ preexisting: true, tankMounted: false, dir });
+    const first = run({ installed: true, tankMounted: false, dir });
     expect(first.calls).toContain("systemctl restart ollama");
 
-    const second = run({ preexisting: true, tankMounted: false, dir });
+    const second = run({ installed: true, tankMounted: false, dir });
     expect(second.override).toBe(first.override);
     expect(second.calls.some((c) => c === "systemctl restart ollama")).toBe(false);
   });
 
-  it("restarts when the drop-in content changes", () => {
+  // Ownership must survive a re-run. Inferring it from the node's current state
+  // cannot do that: once the manager installs Ollama, its own service looks
+  // like anyone else's on the next pass, and the settings it needs get stripped
+  // straight back off. Worse, an earlier form of this check also demanded the
+  // unit be *enabled* — which this very script disables at the end — so the
+  // second run would have appropriated the store it had just configured.
+  it("keeps ownership of an Ollama it installed on a later run", () => {
+    const dir = mkdtempSync(join(tmpdir(), "prov-ollama-own-"));
+    const first = run({ installed: false, tankMounted: true, dir, sshUser: "daniel" });
+    expect(first.override).toContain("User=daniel");
+
+    // Same node, next provision: Ollama is now present and disabled.
+    const second = run({ installed: true, tankMounted: true, dir, sshUser: "daniel" });
+    expect(second.override).toContain("User=daniel");
+    expect(second.override).toContain("Environment=OLLAMA_MODELS=");
+    // Nothing changed, so the serving Ollama is not bounced.
+    expect(second.calls.some((c) => c === "systemctl restart ollama")).toBe(false);
+  });
+
+  it("restarts when the drop-in content genuinely changes", () => {
     const dir = mkdtempSync(join(tmpdir(), "prov-ollama-change-"));
-    run({ preexisting: true, tankMounted: false, dir });
-    // A previously-adopted Ollama that we now install ourselves gains
-    // User/HOME, so the file differs and the service must pick it up.
-    const second = run({ preexisting: false, tankMounted: false, dir });
+    run({ installed: false, tankMounted: false, dir });
+    // Shared storage appears, so the model store can now be set — a real change.
+    const second = run({ installed: true, tankMounted: true, dir });
+    expect(second.override).toContain("Environment=OLLAMA_MODELS=");
     expect(second.calls).toContain("systemctl restart ollama");
   });
 });

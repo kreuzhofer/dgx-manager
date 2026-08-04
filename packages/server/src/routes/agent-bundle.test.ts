@@ -86,13 +86,16 @@ describe("generateInstallScript — Ollama drop-in", () => {
       writeFileSync(p, `#!/bin/sh\necho "${name} $*" >> "${calls}"\n${body}\n`);
       chmodSync(p, 0o755);
     };
-    stub("systemctl", opts.preexisting ? "exit 0" : `case "$1" in list-unit-files|is-enabled) exit 1 ;; esac\nexit 0`);
+    stub("systemctl", opts.preexisting ? "exit 0" : `case "$1" in list-unit-files) exit 1 ;; esac\nexit 0`);
+    if (opts.preexisting) stub("ollama", "exit 0");
     stub("curl", "exit 0");
     stub("mountpoint", opts.tankMounted ? "exit 0" : "exit 1");
 
     writeFileSync(join(tmp, "section.sh"), ollamaSection());
     execFileSync("bash", ["-c", `set -eu; log() { :; }; . "${join(tmp, "section.sh")}"`], {
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, AGENT_USER: "testuser", OLLAMA_DROPIN_DIR: dropin },
+      // Closed PATH: the host has its own ollama, which would make every
+      // node look already-installed.
+      env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, AGENT_USER: "testuser", OLLAMA_DROPIN_DIR: dropin },
       stdio: "pipe",
     });
 

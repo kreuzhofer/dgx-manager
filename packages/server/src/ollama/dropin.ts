@@ -40,29 +40,65 @@ export interface OllamaDropInOptions {
 }
 
 /**
+ * Marker recording that the manager installed this Ollama, and may therefore
+ * decide where its data lives.
+ *
+ * Ownership has to be a fact we *record*, not a state we infer. The obvious
+ * inference — "the unit exists, so it was already here" — is wrong the moment
+ * the manager installs Ollama itself: on the next run its own service looks
+ * foreign, and the ownership settings are stripped back off. Worse, an earlier
+ * form of this check also required the unit to be *enabled*, which fleet policy
+ * turns off, so a node the manager had just provisioned classified as someone
+ * else's on the very next run.
+ */
+export const OLLAMA_MANAGED_MARKER = ".installed-by-dgx-manager";
+
+/**
  * Shell that writes the drop-in body to stdout, for the caller to redirect.
  *
- * Reads `$OLLAMA_PREEXISTING` (`"0"` = the manager installed this Ollama) from
- * the surrounding script.
+ * Reads `$OLLAMA_MANAGED` (`"1"` = the manager installed this Ollama, so it may
+ * claim the ownership settings) from the surrounding script.
  */
 export function ollamaDropInBody(opts: OllamaDropInOptions): string {
   const { userExpr, storageExpr } = opts;
   const sudo = opts.sudo ?? "";
   return `{
   echo "[Service]"
-  if [ "$OLLAMA_PREEXISTING" = "0" ]; then
+  if [ "$OLLAMA_MANAGED" = "1" ]; then
     echo "User=${userExpr}"
     echo "Environment=HOME=/home/${userExpr}"
   fi
   echo "Environment=OLLAMA_HOST=0.0.0.0"
   echo "Environment=OLLAMA_MAX_LOADED_MODELS=0"
   echo "Environment=OLLAMA_KEEP_ALIVE=-1"
-  if [ "$OLLAMA_PREEXISTING" = "0" ] && mountpoint -q "${storageExpr}"; then
+  if [ "$OLLAMA_MANAGED" = "1" ] && mountpoint -q "${storageExpr}"; then
     echo "Environment=OLLAMA_MODELS=${storageExpr}/models/ollama"
     ${sudo}mkdir -p "${storageExpr}/models/ollama"
     ${sudo}chown -R "${userExpr}":"${userExpr}" "${storageExpr}/models/ollama" 2>/dev/null || true
   fi
 }`;
+}
+
+/**
+ * Shell that decides whether the manager owns this node's Ollama, installing it
+ * when absent. Sets `$OLLAMA_MANAGED` for the body above.
+ *
+ * Presence is tested with `list-unit-files`, which succeeds whether the unit is
+ * enabled or disabled — fleet policy disables Ollama, so `is-enabled` would
+ * report every node the manager provisioned as foreign.
+ */
+export function ollamaOwnershipProbe(opts: { markerDirExpr: string; sudo?: string; installCmd: string }): string {
+  const sudo = opts.sudo ?? "";
+  const marker = `${opts.markerDirExpr}/${OLLAMA_MANAGED_MARKER}`;
+  return `OLLAMA_MARKER="${marker}"
+if systemctl list-unit-files ollama.service >/dev/null 2>&1 || command -v ollama >/dev/null 2>&1; then
+  : # already present — ours only if we recorded it as such
+else
+  ${opts.installCmd}
+  ${sudo}mkdir -p "${opts.markerDirExpr}"
+  ${sudo}touch "$OLLAMA_MARKER"
+fi
+if [ -e "$OLLAMA_MARKER" ]; then OLLAMA_MANAGED=1; else OLLAMA_MANAGED=0; fi`;
 }
 
 /**
