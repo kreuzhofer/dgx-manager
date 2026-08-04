@@ -2,6 +2,7 @@ import { Router } from "express";
 import { existsSync, createReadStream, readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
+import { ollamaDropInBody } from "../ollama/dropin.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -309,33 +310,13 @@ fi
 # the node unreachable by the manager — the deployment still reports "running"
 # because the model loads fine (agenthost, 2026-07-28).
 #
-# User/HOME/OLLAMA_MODELS are claimed ONLY for an Ollama we installed
-# ourselves: adopting an existing service would repoint it at a different HOME
-# and orphan the model store it already has on local disk.
+# The body below is rendered from ollama/dropin.ts, which the SSH provisioner
+# also uses — the policy has drifted between the two paths twice, so it now
+# lives in one place.
 mkdir -p "\$OLLAMA_DROPIN_DIR"
 OVERRIDE="\$OLLAMA_DROPIN_DIR/override.conf"
 OVERRIDE_NEW="\$(mktemp)"
-{
-  echo "[Service]"
-  if [ "\$OLLAMA_PREEXISTING" = "0" ]; then
-    echo "User=\${AGENT_USER}"
-    echo "Environment=HOME=/home/\${AGENT_USER}"
-  fi
-  echo "Environment=OLLAMA_HOST=0.0.0.0"
-  echo "Environment=OLLAMA_MAX_LOADED_MODELS=0"
-  # Never unload an idle model. Ollama's default is to evict after a few
-  # minutes, and the manager is the only host its firewall admits — so once a
-  # model is evicted, the only thing that could reload it is a request through
-  # the inference gateway, which does not route to a deployment that is not
-  # serving. The model would stay dark until someone restarted the deployment
-  # by hand. Resident memory is the deliberate trade.
-  echo "Environment=OLLAMA_KEEP_ALIVE=-1"
-  if [ "\$OLLAMA_PREEXISTING" = "0" ] && mountpoint -q /mnt/tank; then
-    echo "Environment=OLLAMA_MODELS=/mnt/tank/models/ollama"
-    mkdir -p /mnt/tank/models/ollama
-    chown -R "\${AGENT_USER}":"\${AGENT_USER}" /mnt/tank/models/ollama 2>/dev/null || true
-  fi
-} > "\$OVERRIDE_NEW"
+${ollamaDropInBody({ userExpr: "${AGENT_USER}", storageExpr: "/mnt/tank" })} > "\$OVERRIDE_NEW"
 
 # Restart only on a real change, so re-running the installer can't bounce an
 # Ollama that is currently serving a deployment.

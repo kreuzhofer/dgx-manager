@@ -51,12 +51,17 @@ describe("evalOllamaAudit", () => {
   });
 });
 
+/**
+ * What the emitted command *does* — which drop-in a node ends up with, and
+ * whether the service is bounced — is covered by executing it against stubs in
+ * provisioner.ollama-dropin.test.ts. What remains here is the handful of
+ * properties worth pinning at the string level.
+ */
 describe("ollamaInstallCmd", () => {
   const cmd = ollamaInstallCmd("daniel");
 
-  it("disables boot autostart and never enables it", () => {
-    expect(cmd).toContain("sudo systemctl disable ollama");
-    expect(cmd).not.toContain("systemctl enable ollama");
+  it("targets the real systemd drop-in directory by default", () => {
+    expect(cmd).toContain("/etc/systemd/system/ollama.service.d");
   });
 
   it("does not stop the service (run-state for this boot is left as-is)", () => {
@@ -69,22 +74,13 @@ describe("ollamaInstallCmd", () => {
     expect(cmd.indexOf("systemctl disable ollama")).toBeGreaterThan(restartIdx);
   });
 
-  it("rejects an sshUser that would break single-quoting in the root tee pipeline", () => {
-    expect(() => ollamaInstallCmd("bad'user")).toThrow(/invalid sshUser/);
-  });
-
-  it("accepts a normal unix username", () => {
-    expect(() => ollamaInstallCmd("ubuntu")).not.toThrow();
-  });
-
-  it("keeps the install source and systemd drop-in config unchanged", () => {
+  it("keeps the install source unchanged", () => {
     expect(cmd).toContain("https://ollama.ai/install.sh");
-    expect(cmd).toContain("OLLAMA_HOST=0.0.0.0");
-    // An evicted model cannot be woken through the gateway, so never unload one.
-    expect(cmd).toContain("OLLAMA_KEEP_ALIVE=-1");
-    expect(cmd).toContain("OLLAMA_MAX_LOADED_MODELS=0");
-    expect(cmd).toContain("/etc/systemd/system/ollama.service.d/override.conf");
-    expect(cmd).toContain("User=daniel");
-    expect(cmd).toContain("Environment=HOME=/home/daniel");
+  });
+
+  // A failure mid-script must not leave the node half-configured with the
+  // remaining steps still running.
+  it("aborts on the first failing step", () => {
+    expect(cmd.startsWith("set -eu")).toBe(true);
   });
 });

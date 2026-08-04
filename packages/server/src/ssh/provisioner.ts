@@ -4,6 +4,7 @@ import { broadcast as sseBroadcast } from "../sse.js";
 import { macCaptureCmd, normalizeMac } from "../nodes/power.js";
 import { prisma } from "../prisma.js";
 import { checksForRole, evalSudoCheck } from "./eval-profile.js";
+import { ollamaDropInBody } from "../ollama/dropin.js";
 import { isEvalNode } from "../nodes/role.js";
 
 // ---------------------------------------------------------------------------
@@ -87,32 +88,70 @@ export function evalOllamaAudit(stdout: string): PrereqCheck {
 }
 
 /**
- * Install Ollama with the NFS models dir + OLLAMA_HOST drop-in, WITHOUT
- * boot auto-start. Ollama's :11434 API is unauthenticated; fleet policy is
- * autostart disabled everywhere, so the final step is `systemctl disable`.
- * The service is deliberately NOT stopped — it stays in whatever run-state
- * the installer left it in for this boot (an Ollama deploy may use it).
+ * Install Ollama if absent, and ensure the systemd drop-in either way.
+ *
+ * Ollama's :11434 API is unauthenticated; fleet policy is autostart disabled
+ * everywhere, so the service is left disabled for boot. It is deliberately NOT
+ * stopped — it stays in whatever run-state it had for this boot, since an
+ * Ollama deployment may be using it right now.
+ *
+ * **A pre-existing Ollama is adopted, not appropriated.** `User`, `HOME` and
+ * `OLLAMA_MODELS` are claimed only for an Ollama we installed ourselves:
+ * imposing them on someone else's service repoints it at a different model
+ * store and orphans whatever it already has on local disk. agenthost is the
+ * live example — a hand-installed Ollama running as the `ollama` system user
+ * with a 4.4 GB store in the default location, serving an embedding model
+ * through the gateway (#11). The settings that only affect how the service is
+ * reached and how it manages memory are safe to apply to any Ollama, and are
+ * applied to all of them.
+ *
+ * `OLLAMA_MODELS` is additionally gated on shared storage actually being
+ * mounted: pointing it at an absent path makes every model on the node
+ * invisible just as surely.
+ *
+ * The drop-in is compared before restarting, so re-provisioning cannot bounce
+ * an Ollama that is currently serving.
+ *
+ * This mirrors the token install script's `ollama-dropin` section
+ * (routes/agent-bundle.ts) — the two paths must express the same policy.
  */
 export function ollamaInstallCmd(sshUser: string): string {
-  // sshUser is interpolated inside a single-quoted string piped to a
-  // root-privileged tee — fail fast on anything that could break quoting.
+  // sshUser is interpolated into a shell script run as root — fail fast on
+  // anything that could break out of the quoting.
   if (!/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(sshUser)) {
     throw new Error(`ollamaInstallCmd: invalid sshUser ${JSON.stringify(sshUser)}`);
   }
-  return [
-    "curl -fsSL https://ollama.ai/install.sh | sh",
-    // Ensure systemd service exists with OLLAMA_MODELS on NFS
-    "sudo mkdir -p /etc/systemd/system/ollama.service.d",
-    // OLLAMA_KEEP_ALIVE=-1: never unload an idle model. The manager is the only
-    // host Ollama's firewall admits, and the gateway does not route to a
-    // deployment that is not serving — so an evicted model has nothing left
-    // that could reload it and stays dark until restarted by hand.
-    `echo -e '[Service]\\nUser=${sshUser}\\nEnvironment=HOME=/home/${sshUser}\\nEnvironment=OLLAMA_MODELS=${SHARED_STORAGE}/models/ollama\\nEnvironment=OLLAMA_HOST=0.0.0.0\\nEnvironment=OLLAMA_MAX_LOADED_MODELS=0\\nEnvironment=OLLAMA_KEEP_ALIVE=-1' | sudo tee /etc/systemd/system/ollama.service.d/override.conf`,
-    "sudo systemctl daemon-reload",
-    "sudo systemctl restart ollama",
-    // No autostart on boot (installer enables it by default — undo that).
-    "sudo systemctl disable ollama",
-  ].join(" && ");
+
+  // Overridable so tests can exercise this against a scratch directory rather
+  // than the real /etc and the real mount.
+  return `
+set -eu
+DROPIN_DIR="\${OLLAMA_DROPIN_DIR:-/etc/systemd/system/ollama.service.d}"
+STORAGE="\${SHARED_STORAGE_DIR:-${SHARED_STORAGE}}"
+
+if systemctl list-unit-files ollama.service >/dev/null 2>&1 && systemctl is-enabled ollama >/dev/null 2>&1; then
+  OLLAMA_PREEXISTING=1
+else
+  OLLAMA_PREEXISTING=0
+  curl -fsSL https://ollama.ai/install.sh | sh
+fi
+
+sudo mkdir -p "\$DROPIN_DIR"
+OVERRIDE="\$DROPIN_DIR/override.conf"
+OVERRIDE_NEW="\$(mktemp)"
+${ollamaDropInBody({ userExpr: sshUser, storageExpr: "$STORAGE", sudo: "sudo " })} > "\$OVERRIDE_NEW"
+
+if sudo cmp -s "\$OVERRIDE_NEW" "\$OVERRIDE" 2>/dev/null; then
+  rm -f "\$OVERRIDE_NEW"
+else
+  sudo cp "\$OVERRIDE_NEW" "\$OVERRIDE"
+  rm -f "\$OVERRIDE_NEW"
+  sudo systemctl daemon-reload
+  sudo systemctl restart ollama
+fi
+
+sudo systemctl disable ollama
+`.trim();
 }
 
 export interface ProvisionReport {
