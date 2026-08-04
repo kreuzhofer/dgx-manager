@@ -132,6 +132,35 @@ describe("ollamaInstallCmd — drop-in behaviour", () => {
     expect(r.override).toContain("Environment=OLLAMA_HOST=0.0.0.0");
   });
 
+  // A node provisioned before the ownership marker existed still carries the
+  // settings only we write. Disowning it would restart Ollama onto a different
+  // model store — #11 in reverse, and dgx-spark-01 is exactly this shape.
+  it("adopts a node it configured before the marker existed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "prov-ollama-backfill-"));
+    mkdirSync(join(dir, "dropin"), { recursive: true });
+    writeFileSync(
+      join(dir, "dropin", "override.conf"),
+      "[Service]\nUser=daniel\nEnvironment=HOME=/home/daniel\nEnvironment=OLLAMA_MODELS=/mnt/tank/models/ollama\n",
+    );
+
+    const r = run({ installed: true, tankMounted: true, dir, sshUser: "daniel" });
+
+    expect(r.override).toContain("User=daniel");
+    expect(r.override).toContain("Environment=OLLAMA_MODELS=");
+  });
+
+  // …but a drop-in that carries none of our ownership settings stays foreign.
+  it("does not adopt a hand-made drop-in", () => {
+    const dir = mkdtempSync(join(tmpdir(), "prov-ollama-foreign-"));
+    mkdirSync(join(dir, "dropin"), { recursive: true });
+    writeFileSync(join(dir, "dropin", "override.conf"), "[Service]\nEnvironment=OLLAMA_HOST=0.0.0.0\n");
+
+    const r = run({ installed: true, tankMounted: true, dir, sshUser: "daniel" });
+
+    expect(r.override).not.toContain("User=");
+    expect(r.override).not.toContain("OLLAMA_MODELS");
+  });
+
   // Fleet policy: Ollama's API is unauthenticated, so it must never come back
   // on its own at boot.
   it("leaves boot autostart disabled", () => {

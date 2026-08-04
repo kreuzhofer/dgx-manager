@@ -91,8 +91,16 @@ export function ollamaOwnershipProbe(opts: { markerDirExpr: string; sudo?: strin
   const sudo = opts.sudo ?? "";
   const marker = `${opts.markerDirExpr}/${OLLAMA_MANAGED_MARKER}`;
   return `OLLAMA_MARKER="${marker}"
-if systemctl list-unit-files ollama.service >/dev/null 2>&1 || command -v ollama >/dev/null 2>&1; then
-  : # already present — ours only if we recorded it as such
+OLLAMA_OVERRIDE="${opts.markerDirExpr}/override.conf"
+if systemctl list-unit-files ollama.service >/dev/null 2>&1; then
+  # Already present. Ours only if we recorded it as such — except on a node
+  # provisioned before the marker existed, whose override still carries the
+  # ownership settings only we write. Backfill rather than disown it: dropping
+  # those settings would restart Ollama onto a different model store, which is
+  # the very failure this whole guard exists to prevent.
+  if [ ! -e "$OLLAMA_MARKER" ] && grep -qE '^(User=|Environment=OLLAMA_MODELS=)' "$OLLAMA_OVERRIDE" 2>/dev/null; then
+    ${sudo}touch "$OLLAMA_MARKER"
+  fi
 else
   ${opts.installCmd}
   ${sudo}mkdir -p "${opts.markerDirExpr}"
