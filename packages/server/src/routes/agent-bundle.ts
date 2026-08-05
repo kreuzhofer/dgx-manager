@@ -334,7 +334,7 @@ fi
 # reconciles persisted Ollama deployments when it reconnects after a reboot.
 # The service is NOT stopped here — run-state for this boot is left as it is,
 # since a deployment may be serving right now.
-systemctl disable ollama >/dev/null 2>&1 || true
+systemctl disable ollama >/dev/null 2>&1 || log "WARNING: could not disable Ollama autostart — it may start unfiltered at boot"
 # <<< ollama-dropin
 
 # Step 5: Download agent bundle (arch-specific)

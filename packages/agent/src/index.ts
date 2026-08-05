@@ -126,6 +126,8 @@ function resolveNodeId(): string {
 let nodeId = resolveNodeId();
 let ws: WebSocket | null = null;
 let reconnectDelay = RECONNECT_BASE;
+/** Guards the Ollama reconnect reconcile against a flapping socket. */
+let ollamaReconcileInFlight = false;
 let metricsTimer: ReturnType<typeof setInterval> | null = null;
 let healthTimer: ReturnType<typeof setInterval> | null = null;
 const ollamaLastState = new Map<string, string>(); // deploymentId → last reported state
@@ -231,13 +233,41 @@ function connect() {
    * not wait on it.
    */
   async function reconcileOllamaDeployments(): Promise<void> {
+    // A flapping WebSocket re-registers repeatedly; without this, two loops run
+    // concurrently and both try to start the service and report status.
+    if (ollamaReconcileInFlight) {
+      console.log("[reconcile-ollama] already in progress, skipping");
+      return;
+    }
+    ollamaReconcileInFlight = true;
+    try {
+      await runOllamaReconcile();
+    } finally {
+      ollamaReconcileInFlight = false;
+    }
+  }
+
+  async function runOllamaReconcile(): Promise<void> {
     const ollamaDeployments = loadDeployments().filter((d) => d.kind === "ollama");
     if (ollamaDeployments.length === 0) return;
     console.log(`Reconciling ${ollamaDeployments.length} ollama deployment(s)`);
 
     for (const d of ollamaDeployments) {
+      // Re-read rather than trusting the snapshot: an undeploy may have landed
+      // since this loop started, and re-registering a torn-down deployment
+      // would leave the health loop reporting on it forever.
+      const current = loadDeployments().find((x) => x.deploymentId === d.deploymentId);
+      if (!current) {
+        console.log(`[reconcile-ollama] ${d.deploymentId}: gone since reconcile started, skipping`);
+        continue;
+      }
+      if (current.stopping) {
+        console.log(`[reconcile-ollama] ${d.deploymentId}: skip (undeploy in progress)`);
+        continue;
+      }
+
       // The health loop reads an in-memory map a restart emptied; re-register
-      // before doing anything else so this deployment is visible again.
+      // so this deployment is visible again.
       trackOllamaDeployment(d.deploymentId, d.recipeFile);
 
       const serviceRunning = await isOllamaRunning();
@@ -245,7 +275,7 @@ function connect() {
       const action = reconcileOllamaAction({
         serviceRunning,
         modelLoaded: !!health?.loaded,
-        stopping: d.stopping,
+        stopping: current.stopping,
       });
       console.log(`[reconcile-ollama] ${d.deploymentId}: ${action.kind} (${action.reason})`);
 
@@ -305,7 +335,9 @@ function connect() {
     // boot, so after a node reboot the service is down and the model with it —
     // and no other path restores an Ollama deployment. See
     // runtime/ollama-reconcile.ts.
-    void reconcileOllamaDeployments();
+    void reconcileOllamaDeployments().catch((err) =>
+      console.error("[reconcile-ollama] reconcile failed:", err),
+    );
 
     // Reconcile dgxrun deployments — each agent re-checks ITS OWN rank
     // container via `docker inspect` (no cross-node liveness; the manager
@@ -1013,6 +1045,11 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
       (async () => {
         try {
           if (runtime === "ollama") {
+            // Mark stopping BEFORE tearing down, so a reconnect reconcile
+            // landing mid-undeploy sees the intent and does not restart the
+            // service for a deployment the operator asked to stop.
+            const stored = loadDeployments().find((x) => x.deploymentId === deploymentId);
+            if (stored) saveDeployment({ ...stored, stopping: true });
             await ollamaStopModel(deploymentId, undeployModelName);
             sendMsg("agent:deployment:status", {
               deploymentId,

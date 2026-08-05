@@ -274,7 +274,13 @@ export async function stopModel(deploymentId: string, modelNameOverride?: string
   }
 
   const modelName = activeDeployments.get(deploymentId) || modelNameOverride;
-  if (!modelName) return;
+  if (!modelName) {
+    // Nothing to unload, but the persisted entry must still go — otherwise an
+    // undeploy after an agent restart leaves a record the reconnect reconcile
+    // would keep bringing back.
+    removeDeployment(deploymentId);
+    return;
+  }
 
   try {
     // Set keep_alive to 0 to immediately unload from GPU
