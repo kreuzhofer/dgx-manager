@@ -12,7 +12,7 @@ export interface TrackedDeployment {
   clusterId?: string;
   tp?: number;
   /** Discriminates deployment kind so each reconcile loop only processes its own entries. */
-  kind?: "sparkrun" | "vllm" | "dgxrun";
+  kind?: "sparkrun" | "vllm" | "dgxrun" | "ollama";
   /** dgxrun only — this node's rank in the mp cluster (0 = head). */
   rank?: number;
   /** dgxrun only — head node's management IP (torch TCPStore rendezvous). */

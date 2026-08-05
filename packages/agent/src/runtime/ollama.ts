@@ -3,6 +3,7 @@ import { fileURLToPath } from "url";
 import http from "http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { removeDeployment, saveDeployment } from "./deployment-store.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -195,6 +196,17 @@ export async function deployModel(
   onProgress?: (p: OllamaPullProgress) => void,
 ): Promise<{ port: number; vramActual: number }> {
   activeDeployments.set(deploymentId, modelName);
+  // Persisted as well as tracked in memory: fleet policy leaves Ollama disabled
+  // at boot, so after a node reboot nothing else knows this deployment exists.
+  // See runtime/ollama-reconcile.ts.
+  saveDeployment({
+    deploymentId,
+    kind: "ollama",
+    recipeFile: modelName,
+    recipeName: modelName,
+    port: OLLAMA_PORT,
+    startedAt: new Date().toISOString(),
+  });
   const abortController = new AbortController();
   activeAbortControllers.set(deploymentId, abortController);
 
@@ -246,6 +258,7 @@ export async function deployModel(
     return { port: OLLAMA_PORT, vramActual: vramActualMB };
   } catch (err) {
     activeDeployments.delete(deploymentId);
+    removeDeployment(deploymentId);
     onStatus?.("failed", String(err));
     throw err;
   }
@@ -273,6 +286,7 @@ export async function stopModel(deploymentId: string, modelNameOverride?: string
   } catch { /* model may already be unloaded */ }
 
   activeDeployments.delete(deploymentId);
+  removeDeployment(deploymentId);
   // NOTE: auto-stopping the Ollama service after the last deployment is
   // removed is intentionally out of scope for now; a future stop hook
   // (e.g. `systemctl stop ollama` when activeDeployments is empty) would go here.
@@ -297,6 +311,26 @@ export async function checkOllamaHealth(deploymentId: string): Promise<OllamaSta
   } catch {
     return { deploymentId, modelName, loaded: false, vramUsed: null };
   }
+}
+
+/**
+ * Re-register a persisted Ollama deployment in memory after an agent restart.
+ *
+ * The health loop and checkOllamaHealth both read `activeDeployments`, which a
+ * restart empties — so without this a reconciled deployment would be serving
+ * while the agent reported nothing about it.
+ */
+export function trackOllamaDeployment(deploymentId: string, modelName: string): void {
+  activeDeployments.set(deploymentId, modelName);
+}
+
+/** Start the Ollama service (exported for the reconnect reconcile). */
+export async function startOllama(): Promise<void> {
+  await ensureOllamaRunning({
+    isRunning: isOllamaRunning,
+    startService: startOllamaService,
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  });
 }
 
 /** Check if Ollama service is reachable. */

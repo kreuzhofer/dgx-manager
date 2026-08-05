@@ -155,6 +155,25 @@ describe("both provisioning paths render the same policy", () => {
     expect(a).toContain("Environment=OLLAMA_MODELS=");
   });
 
+  // Fleet policy is autostart off: the :11434 API is unauthenticated and the
+  // agent's firewall is applied when the agent starts, so an Ollama that comes
+  // up at boot is briefly unfiltered. The two paths disagreed on this for a
+  // long time — the install script enabled it, the provisioner disabled it —
+  // and the fleet split accordingly (#12).
+  it("both leave Ollama disabled for boot", () => {
+    for (const [label, script] of paths) {
+      expect(script, label).toMatch(/systemctl disable ollama/);
+      expect(script, label).not.toMatch(/systemctl enable ollama/);
+    }
+  });
+
+  // Neither may stop the service: a deployment may be serving from it right now.
+  it("neither stops the service", () => {
+    for (const [label, script] of paths) {
+      expect(script, label).not.toMatch(/systemctl stop ollama/);
+    }
+  });
+
   // The predicate matters as much as the body: deciding ownership from whether
   // the unit is *enabled* misreads every node the manager provisioned, since
   // fleet policy disables Ollama.

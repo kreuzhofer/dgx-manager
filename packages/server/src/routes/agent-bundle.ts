@@ -323,10 +323,18 @@ if cmp -s "\$OVERRIDE_NEW" "\$OVERRIDE" 2>/dev/null; then
 else
   mv "\$OVERRIDE_NEW" "\$OVERRIDE"
   systemctl daemon-reload
-  systemctl enable ollama
   systemctl restart ollama
   log "Ollama drop-in written; service restarted"
 fi
+
+# Fleet policy: Ollama's :11434 API is unauthenticated, and the agent's firewall
+# is applied when the AGENT starts — so an Ollama that comes up at boot is
+# briefly listening on all interfaces with nothing filtering it. It is started
+# on demand instead: the agent starts the service for an Ollama deploy, and
+# reconciles persisted Ollama deployments when it reconnects after a reboot.
+# The service is NOT stopped here — run-state for this boot is left as it is,
+# since a deployment may be serving right now.
+systemctl disable ollama >/dev/null 2>&1 || true
 # <<< ollama-dropin
 
 # Step 5: Download agent bundle (arch-specific)

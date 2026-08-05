@@ -20,7 +20,15 @@ import { deployCancels, launchExitAction } from "./runtime/deploy-cancel.js";
 import { checkDgxrunDeployments } from "./runtime/dgxrun/dgxrun-metrics.js";
 import type { DgxrunRecipe } from "./runtime/dgxrun/dgxrun-args.js";
 import { loadDeployments, saveDeployment } from "./runtime/deployment-store.js";
-import { deployModel as ollamaDeployModel, stopModel as ollamaStopModel, checkOllamaHealth } from "./runtime/ollama.js";
+import {
+  deployModel as ollamaDeployModel,
+  stopModel as ollamaStopModel,
+  checkOllamaHealth,
+  isOllamaRunning,
+  startOllama,
+  trackOllamaDeployment,
+} from "./runtime/ollama.js";
+import { reconcileOllamaAction } from "./runtime/ollama-reconcile.js";
 import { discoverTrainingRecipes } from "./training-recipes.js";
 import { findInferenceTemplate, applyFinetuneSubstitutions, renderSparkrunFinetuneRecipe } from "./runtime/inference-template.js";
 import { startFinetuneJob, stopFinetuneJob, mergeLoraAdapter, reattachFinetuneJobs } from "./runtime/finetune.js";
@@ -215,6 +223,60 @@ function connect() {
     postRegistrationSetup();
   });
 
+  /**
+   * Bring persisted Ollama deployments back after an agent restart or a node
+   * reboot, and tell the manager what state each is really in.
+   *
+   * Fire-and-forget: starting a service can take seconds and registration must
+   * not wait on it.
+   */
+  async function reconcileOllamaDeployments(): Promise<void> {
+    const ollamaDeployments = loadDeployments().filter((d) => d.kind === "ollama");
+    if (ollamaDeployments.length === 0) return;
+    console.log(`Reconciling ${ollamaDeployments.length} ollama deployment(s)`);
+
+    for (const d of ollamaDeployments) {
+      // The health loop reads an in-memory map a restart emptied; re-register
+      // before doing anything else so this deployment is visible again.
+      trackOllamaDeployment(d.deploymentId, d.recipeFile);
+
+      const serviceRunning = await isOllamaRunning();
+      const health = serviceRunning ? await checkOllamaHealth(d.deploymentId) : null;
+      const action = reconcileOllamaAction({
+        serviceRunning,
+        modelLoaded: !!health?.loaded,
+        stopping: d.stopping,
+      });
+      console.log(`[reconcile-ollama] ${d.deploymentId}: ${action.kind} (${action.reason})`);
+
+      if (action.kind === "skip") continue;
+
+      if (action.kind === "restore") {
+        try {
+          await startOllama();
+        } catch (err) {
+          // The deployment is genuinely down and we could not revive it — say
+          // so rather than leaving the manager believing it still serves.
+          console.error(`[reconcile-ollama] ${d.deploymentId}: could not start Ollama:`, err);
+          sendMsg("agent:deployment:status", {
+            deploymentId: d.deploymentId,
+            status: "failed",
+            error: `Ollama could not be started after a restart: ${err instanceof Error ? err.message : String(err)}`,
+          });
+          continue;
+        }
+      }
+
+      // Serving, idle, or just restored: Ollama answers and loads this model on
+      // demand, so the deployment is usable.
+      sendMsg("agent:deployment:status", {
+        deploymentId: d.deploymentId,
+        status: "running",
+        port: d.port,
+      });
+    }
+  }
+
   /** Setup tasks that run after successful registration (either nodeId or token flow). */
   function postRegistrationSetup() {
     // Reconcile sparkrun deployments from the persistent store.
@@ -238,6 +300,12 @@ function connect() {
         });
       }
     }
+
+    // Reconcile Ollama deployments. Fleet policy leaves Ollama disabled at
+    // boot, so after a node reboot the service is down and the model with it —
+    // and no other path restores an Ollama deployment. See
+    // runtime/ollama-reconcile.ts.
+    void reconcileOllamaDeployments();
 
     // Reconcile dgxrun deployments — each agent re-checks ITS OWN rank
     // container via `docker inspect` (no cross-node liveness; the manager
