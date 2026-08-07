@@ -1,0 +1,99 @@
+# @dgxrun/glm-5.2-quanttrio-dcp4-c2-230k — the 2-agent daily driver. DCP4 + MTP.
+#
+# Sibling of @dgxrun/glm-5.2-quanttrio-dcp4-c4-160k-mtp, same pool spent on two streams
+# instead of four. DCP4 was measured at 78,446 KV tokens/GiB (2.00x DCP2) on 2026-08-07,
+# and this recipe's 6.00 GiB pool measured 470,784 tokens at 160K — so two streams of
+# 230K (471K tokens) is sized to sit right at that pool rather than oversubscribe it.
+#
+# Why c2 and not c4: measured decode at c4 was 30.6 tok/s aggregate, i.e. ~7.6 per agent,
+# which is thin for interactive coding. Two streams share the same aggregate over half as
+# many consumers AND get 230K each instead of 160K.
+#
+# Known cost vs the DCP2 320K recipe: single-stream decode is ~16.4 vs 24.7 tok/s. That
+# gap is DCP4's decode communication overhead and does not go away with MTP (tested).
+# The trade is per-stream context and real concurrency; DCP2 320K runs max-num-seqs 1.
+recipe_version: "2"
+runner: dgxrun
+maxoutmem: true
+model: QuantTrio/GLM-5.2-Int4-Int8Mix
+runtime: vllm
+container: vllm-node-tf5-glm52-b12x-dcp:probe
+cluster_only: true
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 4
+  # vLLM's startup guard requires free >= gmu*total. That check only clears once
+  # vm.min_free_kbytes is small (node-prep now sets 1 GiB, not 5) — the kernel
+  # withholds min_free from CUDA too. Confirmed serving at 0.90 on 2026-07-09.
+  # 0.88, not 0.90. The guard needs free >= gmu*121.63. At 0.90 that is 109.46 GiB and a
+  # measured startup free of 109.41 GiB FAILED by 0.05 GiB (2026-07-10) — 0.90 clears by
+  # under 100 MiB, i.e. by luck. gmu does not cap allocation here (KV is pinned via
+  # --kv-cache-memory-bytes), so lowering it is free margin.
+  gpu_memory_utilization: 0.88
+  # 256K is the CEILING for this config, measured 2026-07-09 by bisection:
+  #   KV 7.00 GiB (262144) -> serves.
+  #   KV 7.75 GiB (294912) -> kernel OOM-kill of VLLM::Worker_TP during capture.
+  #   KV 8.50 GiB (327680) -> kernel OOM-kill during capture.
+  # Steady-state free while serving 256K is only ~2.9 GiB on the worst node:
+  # weights 93.9 + KV 7.0 + ~14 GiB of FULL cudagraphs / activations / CUDA
+  # contexts, out of 121.63. To go beyond 256K you must give something up —
+  # the separate MTP drafter (~4.8 GiB) or cudagraph FULL -> PIECEWISE — and
+  # both cost decode speed. Do not raise max_model_len without also raising
+  # --kv-cache-memory-bytes below; KV must hold >= max_model_len tokens
+  # (7.00 GiB = 274,560 tokens, i.e. only 4.7% slack over 262,144).
+  # ===================== WHY 320K, AND WHAT THE LIMIT REALLY IS =====================
+  # Measured 2026-07-10. The limiter is NOT the KV cache and NOT the DCP degree. The b12x
+  # sparse-indexer PREWARM (sparse_attn_indexer.py::_prewarm_b12x_paged_indexer_prefill ->
+  # b12x/attention/indexer/paged.py::index_topk_fp8) allocates
+  #     fold_values + fold_indices = (profile_q_rows * total_slices, topk) x 8 bytes
+  # with profile_q_rows = max_num_batched_tokens and total_slices proportional to max_model_len.
+  # So the transient workspace is proportional to  max_num_batched_tokens x max_model_len :
+  #     mnbt 2048 @ 256K -> 5.00 GiB   (observed exactly)
+  #     mnbt 2048 @ 512K -> 10.00 GiB  (observed exactly)
+  # That single allocation OOM-killed 288K, 320K and every DCP4 attempt. Halving mnbt to 1024
+  # halves it (3.12 GiB @ 320K), which more than pays for the +1.50 GiB of extra KV.
+  # Cost: ~11% prefill on short prompts (619 vs 698 tok/s @ pp=8192); decode UNCHANGED (23.8).
+  # Validated: a 300,036-token prompt (92% of the window) retrieved a buried needle, finish=stop,
+  # 893 tok/s prefill. Steady free while serving: ~1.7-1.9 GiB (was ~2.9 GiB at 256K).
+  # To go further, halve mnbt again (512 -> 1.56 GiB @ 320K) or raise KV; each step costs prefill.
+  # =================================================================================
+  max_model_len: 235520   # 230K x 2 concurrent = 471K tokens ~= the measured pool
+  served_model_name: glm-5.2
+env:
+  HF_HOME: /cache/huggingface
+  HF_HUB_OFFLINE: "1"
+  LD_PRELOAD: /cache/huggingface/nccl-2.30.4/libnccl.so.2
+  # All JIT caches under one subfolder on NFS (distinct from the pruned model's). Persisted -> warm relaunch.
+  TRITON_CACHE_DIR: /root/glm-jit/triton
+  TORCHINDUCTOR_CACHE_DIR: /root/glm-jit/inductor
+  VLLM_CACHE_ROOT: /root/glm-jit/vllm
+  FLASHINFER_JIT_DIR: /root/glm-jit/flashinfer-jit
+  FLASHINFER_WORKSPACE_DIR: /root/glm-jit/flashinfer-ws
+  FLASHINFER_AUTOTUNE_DIR: /root/glm-jit/flashinfer-autotune
+  FLASHINFER_AUTOTUNER_LOAD_FROM_FILE: "1"
+  TORCHINDUCTOR_COMPILE_THREADS: "1"   # serialize compile so its peak fits alongside the 97GB weights
+  MAX_JOBS: "2"
+  NVCC_THREADS: "1"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "5400"
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+  VLLM_USE_B12X_SPARSE_INDEXER: "1"
+  VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: "256"   # bound the sparse-indexer logits buffer (context-sized ~10GB) -> frees KV budget for 256K
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  VLLM_DCP_GLOBAL_TOPK: "1"
+  VLLM_DCP_SHARD_DRAFT: "1"
+  TORCH_CUDA_ARCH_LIST: "12.1a"
+  GLM52_BIND_HOST_TRITON: "0"
+  NCCL_NET: IB
+  NCCL_IB_DISABLE: "0"
+  NCCL_IB_HCA: "rocep1s0f0,roceP2p1s0f0"
+  NCCL_SOCKET_IFNAME: "enP7s7,enp1s0f0np0,enP2p1s0f0np0"
+  GLOO_SOCKET_IFNAME: enp1s0f0np0
+  NCCL_IB_GID_INDEX: "3"
+  NCCL_CROSS_NIC: "1"
+  NCCL_CUMEM_ENABLE: "0"
+  NCCL_IGNORE_CPU_AFFINITY: "1"
+  NCCL_DEBUG: WARN
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+command: |
+  vllm serve {model} --served-model-name {served_model_name} --host {host} --port {port} --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --enable-prefix-caching --speculative-config '{"model":"CosmicRaisins/GLM-5.2-MTP-INT4-aligned","method":"mtp","draft_attention_backend":"B12X_MLA_SPARSE","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' -tp {tensor_parallel} --pipeline-parallel-size 1 --decode-context-parallel-size 4 --dcp-kv-cache-interleave-size 1 --attention-backend B12X_MLA_SPARSE --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}' --max-model-len {max_model_len} --max-num-seqs 2 --max-num-batched-tokens 1024 --gpu-memory-utilization {gpu_memory_utilization} --kv-cache-dtype fp8_ds_mla --kv-cache-memory-bytes 6442450944 --async-scheduling --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"PIECEWISE","max_cudagraph_capture_size":8}'
