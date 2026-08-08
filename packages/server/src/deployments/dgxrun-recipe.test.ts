@@ -16,6 +16,41 @@ describe("resolveDgxrunRecipe", () => {
     expect(resolveDgxrunRecipe("::: not: valid: yaml: [").isDgxrun).toBe(false);
   });
 
+  // The manager validates the SHAPE of a mod name (it becomes a bind-mount
+  // source, so a path segment that escapes the mods dir must never reach a
+  // node); whether that mod is actually installed is the agent's check, because
+  // only the node knows which agent bundle it is running.
+  describe("mods", () => {
+    const withMods = (mods: string) =>
+      resolveDgxrunRecipe(
+        `runner: dgxrun\ncontainer: img:tag\ncommand: vllm serve x\nmods:\n${mods}`,
+      );
+
+    it("carries a list of mod names through to the resolved recipe", () => {
+      const r = withMods("  - instanttensor-hybrid-draft-loader\n  - drop-caches\n");
+      expect(r.error).toBeUndefined();
+      expect(r.recipe?.mods).toEqual(["instanttensor-hybrid-draft-loader", "drop-caches"]);
+    });
+
+    it("leaves mods undefined when the recipe declares none", () => {
+      const r = resolveDgxrunRecipe("runner: dgxrun\ncontainer: img:tag\ncommand: vllm serve x\n");
+      expect(r.recipe?.mods).toBeUndefined();
+    });
+
+    it("rejects a mod name that is not a single path segment", () => {
+      for (const bad of ["  - ../escape\n", "  - nested/name\n", "  - /absolute\n", '  - ""\n']) {
+        const r = withMods(bad);
+        expect(r.isDgxrun).toBe(true);
+        expect(r.error).toMatch(/mod name/i);
+        expect(r.recipe).toBeUndefined();
+      }
+    });
+
+    it("rejects a mods block that is not a list of strings", () => {
+      expect(withMods("  key: value\n").error).toMatch(/mods/i);
+    });
+  });
+
   it("resolves a full dgxrun recipe with env + defaults", () => {
     const yaml = [
       "runner: dgxrun",

@@ -1,6 +1,6 @@
 {
   "name": "@dgx-manager/agent",
-  "version": "0.5.790",
+  "version": "0.5.807",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,6 +13,7 @@
   },
   "devDependencies": {
     "@types/ws": "^8.5.0",
-    "tsx": "^4.19.0"
+    "tsx": "^4.19.0",
+    "yaml": "^2.6.0"
   }
 }

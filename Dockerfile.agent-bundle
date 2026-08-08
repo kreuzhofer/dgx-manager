@@ -10,11 +10,15 @@ COPY packages/dashboard/package.json ./packages/dashboard/
 RUN npm install --workspaces --include-workspace-root
 
 COPY packages/agent/ ./packages/agent/
+# Vendored mods travel with the agent: a dgxrun recipe naming a mod is only
+# deployable on a node whose bundle ships it, and the agent refuses otherwise.
+COPY mods/ ./mods/
 
 RUN npx tsc -p packages/agent/tsconfig.json && \
     mkdir -p /bundle && \
     cp -r packages/agent/dist /bundle/dist && \
     cp packages/agent/package.json /bundle/package.json && \
+    cp -r mods /bundle/mods && \
     cp -r node_modules /bundle/node_modules && \
     tar -czf /agent-bundle.tar.gz -C /bundle .
 

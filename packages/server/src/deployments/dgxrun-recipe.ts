@@ -20,7 +20,17 @@ export interface DgxrunResolvedRecipe {
   command: string;
   defaults?: Record<string, unknown>;
   cluster_only?: boolean;
+  /** Names of vendored mods to apply before serving. */
+  mods?: string[];
 }
+
+/**
+ * A mod name becomes a bind-mount source path on the node, so the manager
+ * refuses anything that is not a single path segment before it ever reaches an
+ * agent. Whether the mod is *installed* is checked on the node — only it knows
+ * which agent bundle it is running.
+ */
+const MOD_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export interface DgxrunRecipeResult {
   isDgxrun: boolean;
@@ -65,6 +75,20 @@ export function resolveDgxrunRecipe(yamlText: string): DgxrunRecipeResult {
   if (!container) return { isDgxrun: true, error: "dgxrun recipe missing container image" };
   if (!command.trim()) return { isDgxrun: true, error: "dgxrun recipe missing command" };
 
+  let mods: string[] | undefined;
+  if (o.mods != null) {
+    if (!Array.isArray(o.mods)) return { isDgxrun: true, error: "dgxrun recipe mods must be a list" };
+    for (const m of o.mods) {
+      if (typeof m !== "string" || !MOD_NAME_RE.test(m)) {
+        return {
+          isDgxrun: true,
+          error: `dgxrun recipe has an invalid mod name ${JSON.stringify(m)} — must be a single path segment`,
+        };
+      }
+    }
+    mods = o.mods as string[];
+  }
+
   const recipe: DgxrunResolvedRecipe = {
     runner: "dgxrun",
     model: typeof o.model === "string" ? o.model : undefined,
@@ -75,6 +99,7 @@ export function resolveDgxrunRecipe(yamlText: string): DgxrunRecipeResult {
       ? (o.defaults as Record<string, unknown>)
       : undefined,
     cluster_only: o.cluster_only === true,
+    mods,
   };
   return { isDgxrun: true, recipe };
 }

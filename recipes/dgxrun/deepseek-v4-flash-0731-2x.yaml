@@ -1,0 +1,112 @@
+# @dgxrun/deepseek-v4-flash-0731-2x — DeepSeek V4 Flash 0731 on TWO Sparks.
+#
+# A faithful port of @official/deepseek-v4-flash-0731-b12x-dspark-vllm (recipe-registry
+# 5c01fa3, 2026-08-07): same container, same env, same flags, same instanttensor loader
+# and dspark drafting. Only three things differ, all deliberate:
+#
+#   1. `--served-model-name` is in the command. sparkrun appends it; dgxrun does not.
+#   2. dgxrun forces `--distributed-executor-backend mp` — that is the whole reason
+#      dgxrun exists (ray is broken on this build).
+#   3. The NCCL/GLOO fabric env is injected by dgxrun rather than written here, so this
+#      file stays a port rather than a fork with ten extra variables bolted on.
+#
+# Why a port at all, rather than deploying the registry recipe: the upstream command
+# escapes its inline JSON as `{{...}}` and leaves `{num_speculative_tokens}` inside that
+# blob. Neither survives sparkrun's own substitution — `vpd.arg_substitute` matches
+# `\{(.*?)\}` non-greedily and restores anything it cannot resolve, so `{{...}}` reaches
+# vLLM verbatim (json_invalid) and the nested placeholder is swallowed by the outer
+# match and never substituted. The recipe as published cannot start, under sparkrun or
+# anything else; running it required hand-patching the registry clone on each node,
+# which a `sparkrun registry update` silently reverts. Single braces here, and
+# `{num_speculative_tokens}` left as a real placeholder — dgxrun's stricter
+# `\{([A-Za-z_][A-Za-z0-9_]*)\}` fills it correctly.
+#
+# Two nodes, not four: 284B total / 13B active at fp8 is ~78 GB per GPU at TP2, which
+# leaves the other two Sparks free — unlike every GLM-5.2 recipe here, which takes the
+# whole pool.
+#
+# NOTE ON A PREVIOUS FAILURE: an earlier attempt at this port died with
+#   RuntimeError: Assertion error (DeepGEMM .../layout.hpp:39): t.dim() == N  in fp8_einsum
+# and was misdiagnosed as the missing loader mod. The real cause was that the attempt
+# carried GLM-5.2's env block instead of this one, dropping 13 of the 14 B12X variables
+# — including VLLM_USE_B12X_FP8_GEMM and B12X_MOE_FORCE_A8, which select the very GEMM
+# path that asserted. Do not edit the env block below without knowing which of these
+# the b12x kernels read.
+recipe_version: "2"
+runner: dgxrun
+maxoutmem: true
+model: deepseek-ai/DeepSeek-V4-Flash-0731
+runtime: vllm
+container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly-b12x:latest
+cluster_only: true
+
+# Keeps InstantTensor for the target model while letting the dspark draft load via lazy
+# safetensors — without it the draft makes a second full GPU-streaming pass over the
+# checkpoint to read a small subset of tensors. Vendored at mods/ in this repo and
+# shipped in the agent bundle; a node whose agent predates it refuses the deploy.
+mods:
+  - instanttensor-hybrid-draft-loader
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 2
+  gpu_memory_utilization: 0.85
+  kv_cache_dtype: fp8
+  # `auto` lets vLLM negotiate the window from what is left after weights. Upstream's
+  # value; left alone so this stays a measurable baseline. Tune only after the port is
+  # confirmed equivalent, or the launcher change and the knob change confound.
+  max_model_len: auto
+  block_size: 256
+  max_num_seqs: 8
+  max_num_batched_tokens: 8192
+  max_cudagraph_capture_size: 64
+  num_speculative_tokens: 5
+  thinking: "true"
+  reasoning_effort: "high"
+  served_model_name: deepseek-v4-flash
+
+env:
+  CUTE_DSL_ARCH: "sm_121a"
+  VLLM_USE_AOT_COMPILE: "1"
+  VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
+  VLLM_USE_MEGA_AOT_ARTIFACT: "-1"
+  VLLM_MEMORY_PROFILE_INCLUDE_ATTN: "1"
+  VLLM_USE_FLASHINFER_SAMPLER: "1"
+  VLLM_USE_B12X_WO_PROJECTION: "1"
+  VLLM_USE_B12X_MHC: "1"
+  VLLM_USE_B12X_FP8_GEMM: "1"
+  VLLM_USE_B12X_MOE: "1"
+  VLLM_USE_B12X_SPARSE_INDEXER: "1"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  B12X_MLA_SM120_UNIFIED: "1"
+  B12X_MOE_FORCE_A8: "1"
+
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      --trust-remote-code \
+      --tensor-parallel-size {tensor_parallel} \
+      --kv-cache-dtype {kv_cache_dtype} \
+      --block-size {block_size} \
+      --max-model-len {max_model_len} \
+      --max-num-seqs {max_num_seqs} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --enable-prefix-caching \
+      --tokenizer-mode deepseek_v4 \
+      --tool-call-parser deepseek_v4 \
+      --enable-auto-tool-choice \
+      --reasoning-parser deepseek_v4 \
+      --reasoning-config '{"reasoning_parser":"deepseek_v4","reasoning_start_str":"","reasoning_end_str":""}' \
+      --default-chat-template-kwargs.thinking={thinking} \
+      --default-chat-template-kwargs.reasoning_effort={reasoning_effort} \
+      --load-format instanttensor \
+      --moe-backend b12x \
+      --linear-backend b12x \
+      --attention-backend B12X_MLA_SPARSE \
+      --max-cudagraph-capture-size {max_cudagraph_capture_size} \
+      --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}' \
+      --speculative-config '{"method":"dspark","num_speculative_tokens":{num_speculative_tokens},"draft_sample_method":"probabilistic","attention_backend":"B12X_MLA_SPARSE"}'

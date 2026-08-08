@@ -58,6 +58,31 @@ name may be served by any member. A pool of one is the ordinary case; a pool
 forms implicitly when a second deployment claims the same published name, and
 dissolves when it stops.
 
+### Runner
+
+The mechanism that launches a deployment's runtime on a node and supervises it
+for as long as it serves. A deployment names exactly one runner, and the runner
+owns how the model is launched — the manager never does.
+
+Two exist. **sparkrun** is a third-party tool the node invokes; the recipes it
+launches come from registries it clones and refreshes on its own schedule, so
+what a recipe means can change without anything in this repository changing.
+**dgxrun** is ours: the recipe is a file here, and the launch is expressed
+directly. That difference is the whole point of having a second runner — a
+dgxrun deployment can be reproduced on a node that has never been touched.
+
+### Mod
+
+A named change applied to a runtime *before* it begins serving, giving it a
+behaviour its own image does not have. A recipe declares the mods it needs, and
+they are part of what the deployment *is*: the same recipe without its mods is a
+different deployment, not a degraded one.
+
+A mod is not configuration. Configuration selects among behaviours a runtime
+already has; a mod adds one. That is why an unnamed or unrecognised mod is a
+rejected deployment rather than a warning — a runtime that starts without a mod
+it needed looks perfectly healthy, and fails much later somewhere unrelated.
+
 ### Allocation-inducing runtime
 
 A runtime whose inference API can be made to allocate resources by an

@@ -1,7 +1,13 @@
 import { spawn, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { dropCachesOnce, startDropCacheLoop, stopDropCacheLoop } from "./dgxrun-dropcache.js";
 import type { ChildProcess } from "node:child_process";
-import { buildDgxrunDockerArgs, type DgxrunRecipe } from "./dgxrun-args.js";
+import {
+  buildDgxrunDockerArgs,
+  missingModDirs,
+  DEFAULT_MODS_DIR,
+  type DgxrunRecipe,
+} from "./dgxrun-args.js";
 import { resolveHfHome } from "../sparkrun.js";
 import { saveDeployment, removeDeployment } from "../deployment-store.js";
 
@@ -78,6 +84,17 @@ export function launchDgxrun(
     masterAddr: args.masterAddr,
     masterPort: args.masterPort,
   });
+
+  // A recipe can name a mod newer than the agent bundle installed here. Launching
+  // anyway would produce a container that starts, patches nothing, and fails much
+  // later deep inside vLLM — so refuse while the error still names the cause.
+  const absent = missingModDirs(args.recipe.mods, DEFAULT_MODS_DIR, existsSync);
+  if (absent.length > 0) {
+    onLog(`[dgxrun] recipe requires mod(s) not installed on this node: ${absent.join(", ")}. ` +
+      `Expected under ${DEFAULT_MODS_DIR}/. Upgrade the agent to a bundle that ships them.\n`);
+    onExit(1);
+    return;
+  }
 
   // Fail fast if the custom image isn't on this node — v1 assumes it's present.
   if (!dgxrunImageExists(image)) {

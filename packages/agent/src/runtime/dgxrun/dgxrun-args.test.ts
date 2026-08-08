@@ -5,6 +5,9 @@ import {
   tokenizeCommand,
   fillPlaceholders,
   forceMpExecutor,
+  shellQuote,
+  missingModDirs,
+  FABRIC_ENV_DEFAULTS,
   type DgxrunRecipe,
 } from "./dgxrun-args.js";
 
@@ -53,6 +56,27 @@ describe("tokenizeCommand", () => {
   it("collapses runs of whitespace and ignores leading/trailing space", () => {
     expect(tokenizeCommand("  vllm   serve  x  ")).toEqual(["vllm", "serve", "x"]);
   });
+
+  // Every upstream sparkrun recipe writes its command with backslash line
+  // continuations. Treating `\<newline>` as an escaped literal emitted a bare
+  // "\n" as its own argv element, so vLLM received a phantom argument between
+  // every flag — silent corruption, since the recipe reads perfectly fine.
+  it("drops backslash line continuations instead of emitting a newline token", () => {
+    expect(tokenizeCommand("vllm serve m \\\n    --host 0.0.0.0 \\\n    --port 8000"))
+      .toEqual(["vllm", "serve", "m", "--host", "0.0.0.0", "--port", "8000"]);
+  });
+
+  it("keeps a literal backslash-n (not a continuation) as an escaped character", () => {
+    expect(tokenizeCommand("a b\\nc")).toEqual(["a", "bnc"]);
+  });
+
+  it("treats a bare newline as ordinary whitespace", () => {
+    expect(tokenizeCommand("a\nb")).toEqual(["a", "b"]);
+  });
+
+  it("preserves a backslash inside single quotes", () => {
+    expect(tokenizeCommand("'a\\\nb'")).toEqual(["a\\\nb"]);
+  });
 });
 
 describe("fillPlaceholders", () => {
@@ -92,7 +116,8 @@ describe("buildDgxrunDockerArgs — rank 0 (head)", () => {
     expect(s).toContain("--device /dev/infiniband:/dev/infiniband");
     expect(s).toContain("--cap-add IPC_LOCK");
     expect(s).toContain("--ulimit memlock=-1:-1");
-    expect(s).toContain("--shm-size 10gb");
+    expect(s).toContain("--ulimit stack=67108864:67108864");
+    expect(s).toContain("--shm-size 32gb");
   });
 
   it("bind-mounts the weights dir to /cache/huggingface", () => {
@@ -190,6 +215,142 @@ describe("buildDgxrunDockerArgs — overrides + validation", () => {
       expect(argv.includes("--headless")).toBe(rank > 0);
     },
   );
+});
+
+describe("shellQuote", () => {
+  it("wraps a plain token in single quotes", () => {
+    expect(shellQuote(["vllm", "serve"])).toBe("'vllm' 'serve'");
+  });
+
+  it("survives a token containing a single quote", () => {
+    expect(tokenizeCommand(shellQuote(["it's"]))).toEqual(["it's"]);
+  });
+
+  /**
+   * Invariant: quoting an argv and tokenizing it back yields the original argv,
+   * for ANY tokens. This is the load-bearing property of the mod wrapper — once
+   * the serve command is embedded inside `bash -c '…'`, a quoting bug silently
+   * reshapes vLLM's arguments instead of failing. The JSON-bearing args
+   * (`--speculative-config '{"method":"dspark",…}'`) are exactly the shape that
+   * has broken before, so they must survive a round trip untouched.
+   */
+  itProp.prop([fc.array(fc.string(), { minLength: 1, maxLength: 12 })])(
+    "tokenizeCommand(shellQuote(argv)) === argv",
+    (argv) => {
+      expect(tokenizeCommand(shellQuote(argv))).toEqual(argv);
+    },
+  );
+});
+
+describe("missingModDirs", () => {
+  const exists = (p: string) => p === "/opt/dgx-agent/mods/present";
+
+  it("reports a mod whose directory is absent on this node", () => {
+    expect(missingModDirs(["present", "absent"], "/opt/dgx-agent/mods", exists))
+      .toEqual(["absent"]);
+  });
+
+  it("reports nothing when every mod is present, or none are declared", () => {
+    expect(missingModDirs(["present"], "/opt/dgx-agent/mods", exists)).toEqual([]);
+    expect(missingModDirs(undefined, "/opt/dgx-agent/mods", exists)).toEqual([]);
+  });
+});
+
+describe("buildDgxrunDockerArgs — mods", () => {
+  const modded: DgxrunRecipe = { ...glmRecipe, mods: ["instanttensor-hybrid-draft-loader"] };
+  const argv = buildDgxrunDockerArgs(modded, { ...baseOpts, rank: 1 });
+
+  it("bind-mounts each mod read-only under /mods", () => {
+    expect(argv.join(" ")).toContain(
+      "-v /opt/dgx-agent/mods/instanttensor-hybrid-draft-loader:" +
+      "/mods/instanttensor-hybrid-draft-loader:ro",
+    );
+  });
+
+  it("runs the mod before serve, and execs serve so it stays the main process", () => {
+    const script = argv[argv.length - 1];
+    expect(argv[argv.length - 3]).toBe("bash");
+    expect(argv[argv.length - 2]).toBe("-c");
+    expect(script).toMatch(
+      /^bash \/mods\/instanttensor-hybrid-draft-loader\/run\.sh && exec /,
+    );
+  });
+
+  // The wrapper is only safe if the serve command it embeds is the SAME argv the
+  // unwrapped path would have run — same placeholders, same JSON, same
+  // distributed flags, same --headless. Anything less and mods silently change
+  // how the model is launched.
+  it("embeds exactly the argv the unwrapped launch would have used", () => {
+    const script = argv[argv.length - 1];
+    const embedded = tokenizeCommand(script.slice(script.indexOf(" exec ") + " exec ".length));
+
+    const plain = buildDgxrunDockerArgs(glmRecipe, { ...baseOpts, rank: 1 });
+    const serveStart = plain.indexOf(glmRecipe.container) + 1;
+    expect(embedded).toEqual(plain.slice(serveStart));
+  });
+
+  it("keeps the distributed flags and --headless INSIDE the wrapper, not after it", () => {
+    const script = argv[argv.length - 1];
+    expect(script).toContain("--node-rank");
+    expect(script).toContain("--headless");
+    expect(argv.slice(argv.indexOf("-c"))).not.toContain("--nnodes");
+  });
+
+  it("chains multiple mods in declaration order, failing fast on the first", () => {
+    const two = buildDgxrunDockerArgs({ ...glmRecipe, mods: ["a", "b"] }, { ...baseOpts, rank: 0 });
+    expect(two[two.length - 1]).toMatch(
+      /^bash \/mods\/a\/run\.sh && bash \/mods\/b\/run\.sh && exec /,
+    );
+  });
+
+  // Regression guard for the six existing dgxrun recipes: no mods must mean no
+  // wrapper at all, so the serve argv is still the container's command.
+  it("does NOT wrap when the recipe declares no mods", () => {
+    const plain = buildDgxrunDockerArgs(glmRecipe, { ...baseOpts, rank: 0 });
+    expect(plain).not.toContain("-c");
+    expect(plain[plain.indexOf(glmRecipe.container) + 1]).toBe("vllm");
+  });
+
+  it("rejects a mod name that could escape the mods directory", () => {
+    for (const bad of ["../evil", "a/b", "", "/abs"]) {
+      expect(() => buildDgxrunDockerArgs({ ...glmRecipe, mods: [bad] }, { ...baseOpts, rank: 0 }))
+        .toThrow(/mod name/i);
+    }
+  });
+});
+
+describe("buildDgxrunDockerArgs — fabric env defaults", () => {
+  // The NCCL/GLOO block was copy-pasted identically into all six dgxrun recipes,
+  // and the official upstream recipes omit it entirely because sparkrun injects
+  // it per node. Without it NCCL silently falls back to TCP over the management
+  // NIC — a working-but-slow deploy with no error to notice.
+  it("injects the fabric env so a recipe need not carry it", () => {
+    const bare: DgxrunRecipe = { ...glmRecipe, env: {} };
+    const s = buildDgxrunDockerArgs(bare, { ...baseOpts, rank: 0 }).join(" ");
+    expect(s).toContain("-e NCCL_NET=IB");
+    expect(s).toContain("-e NCCL_IB_HCA=rocep1s0f0,roceP2p1s0f0");
+    expect(s).toContain("-e NCCL_SOCKET_IFNAME=enP7s7,enp1s0f0np0,enP2p1s0f0np0");
+    expect(s).toContain("-e GLOO_SOCKET_IFNAME=enp1s0f0np0");
+    expect(s).toContain("-e OMP_NUM_THREADS=4");
+    expect(s).toContain("-e TRANSFORMERS_OFFLINE=1");
+  });
+
+  it("lets a recipe override any fabric default (recipe env comes last)", () => {
+    const r: DgxrunRecipe = { ...glmRecipe, env: { NCCL_DEBUG: "INFO" } };
+    const argv = buildDgxrunDockerArgs(r, { ...baseOpts, rank: 0 });
+    const defIdx = argv.findIndex((x, i) => argv[i - 1] === "-e" && x === "NCCL_DEBUG=WARN");
+    const ovrIdx = argv.findIndex((x, i) => argv[i - 1] === "-e" && x === "NCCL_DEBUG=INFO");
+    expect(defIdx).toBeGreaterThanOrEqual(0);
+    expect(ovrIdx).toBeGreaterThan(defIdx);
+  });
+
+  it("matches the block the existing recipes hardcode", () => {
+    expect(FABRIC_ENV_DEFAULTS.NCCL_IB_GID_INDEX).toBe("3");
+    expect(FABRIC_ENV_DEFAULTS.NCCL_CROSS_NIC).toBe("1");
+    expect(FABRIC_ENV_DEFAULTS.NCCL_CUMEM_ENABLE).toBe("0");
+    expect(FABRIC_ENV_DEFAULTS.NCCL_IGNORE_CPU_AFFINITY).toBe("1");
+    expect(FABRIC_ENV_DEFAULTS.NCCL_IB_DISABLE).toBe("0");
+  });
 });
 
 describe("buildDgxrunDockerArgs — HF cache defaults", () => {
