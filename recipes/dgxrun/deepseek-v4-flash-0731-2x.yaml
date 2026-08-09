@@ -10,16 +10,25 @@
 #   3. The NCCL/GLOO fabric env is injected by dgxrun rather than written here, so this
 #      file stays a port rather than a fork with ten extra variables bolted on.
 #
-# Why a port at all, rather than deploying the registry recipe: the upstream command
-# escapes its inline JSON as `{{...}}` and leaves `{num_speculative_tokens}` inside that
-# blob. Neither survives sparkrun's own substitution — `vpd.arg_substitute` matches
-# `\{(.*?)\}` non-greedily and restores anything it cannot resolve, so `{{...}}` reaches
-# vLLM verbatim (json_invalid) and the nested placeholder is swallowed by the outer
-# match and never substituted. The recipe as published cannot start, under sparkrun or
-# anything else; running it required hand-patching the registry clone on each node,
-# which a `sparkrun registry update` silently reverts. Single braces here, and
-# `{num_speculative_tokens}` left as a real placeholder — dgxrun's stricter
-# `\{([A-Za-z_][A-Za-z0-9_]*)\}` fills it correctly.
+# Why a port at all, rather than deploying the registry recipe: we control the knobs and
+# the launch, the file is reviewed alongside the code that runs it, and it reproduces on
+# a node that has never been touched. That is the whole case — it does not rest on any
+# defect upstream.
+#
+# CORRECTION (2026-08-09): an earlier version of this comment claimed the upstream recipe
+# "cannot start as published" because its command escapes inline JSON as `{{...}}` with
+# `{num_speculative_tokens}` nested inside. That was WRONG, and the mistake was ours. It
+# describes `sparkrun==0.2.38`, which is what this repo pins (see SPARKRUN_PKG in
+# packages/agent/src/recipes.ts). From 0.3.x, `Recipe.render_command` masks literal braces
+# to sentinels before vpd's placeholder regex runs, so `{{...}}` unescapes AND the nested
+# placeholder resolves. Verified against 0.3.3. Reported upstream and withdrawn:
+# https://github.com/spark-arena/recipe-registry/issues/20
+#
+# Single braces here regardless, and `{num_speculative_tokens}` as a real placeholder —
+# dgxrun does plain substitution with a stricter `\{([A-Za-z_][A-Za-z0-9_]*)\}` and has no
+# brace-escaping convention, so this is the correct spelling for THIS runner. It is also
+# what sparkrun 0.3.x wants for a `recipe_version: "2"` recipe; the doubled-brace form is
+# the v1 convention and is deprecated there.
 #
 # Two nodes, not four: 284B total / 13B active at fp8 is ~78 GB per GPU at TP2, which
 # leaves the other two Sparks free — unlike every GLM-5.2 recipe here, which takes the
