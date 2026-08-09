@@ -11,7 +11,10 @@ import { isEvalNode } from "../nodes/role.js";
 // sparkrun command-string builders (pure, exported for callers + tests)
 // ---------------------------------------------------------------------------
 
-export const SPARKRUN_PKG = "sparkrun==0.2.38";
+/** sparkrun version constraint — a floor, not a pin. Rationale + the verified
+ *  CLI surface are documented on the agent's copy in packages/agent/src/recipes.ts.
+ *  Keep the two in step: the agent runs sparkrun, the provisioner installs it. */
+export const SPARKRUN_PKG = "sparkrun>=0.3.3";
 const SPARKRUN = `uvx --from ${SPARKRUN_PKG} sparkrun`;
 
 /** Audit: is sparkrun runnable via uvx on this host? */

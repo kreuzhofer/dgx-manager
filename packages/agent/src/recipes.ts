@@ -2,7 +2,28 @@ import { execFileSync } from "node:child_process";
 import { parseSparkrunList, type SparkrunRecipeSummary } from "./runtime/sparkrun-parse.js";
 import { deriveRecipeArch, type RecipeArch } from "./runtime/recipe-arch.js";
 
-export const SPARKRUN_PKG = "sparkrun==0.2.38";
+/**
+ * sparkrun version constraint for every `uvx --from` invocation.
+ *
+ * A floor, not a pin. This was `==0.2.38` and went stale: 0.2.38 does not
+ * unescape a recipe command's `{{...}}`, and its placeholder regex swallows any
+ * `{placeholder}` nested inside a JSON-valued flag. We diagnosed that correctly
+ * and then reported it upstream as a registry bug, which it was not — 0.3.x
+ * masks literal braces before substitution and renders those recipes fine.
+ * See https://github.com/spark-arena/recipe-registry/issues/20.
+ *
+ * 0.3.3 is the floor because it is the version whose CLI we verified against
+ * every flag and subcommand used here — `run` (`-H --tp --pp --port --gpu-mem
+ * --max-model-len --served-model-name --no-follow -o`), `list --json`,
+ * `logs` (`--tail` is an alias of `-n/--lines`), `stop -H`,
+ * `cluster check-job -H`, and `registry update`.
+ *
+ * Trade-off worth knowing: with a floor, nodes resolve at first use, so a fleet
+ * provisioned weeks apart can land on different 0.3.x versions. That is
+ * acceptable while the surface we use is this small and stable; if a future
+ * release changes it, pin again deliberately rather than drifting.
+ */
+export const SPARKRUN_PKG = "sparkrun>=0.3.3";
 
 export interface Recipe {
   file: string;

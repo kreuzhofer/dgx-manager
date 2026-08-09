@@ -2,8 +2,18 @@ import { describe, it, expect } from "vitest";
 import { sparkrunAuditCmd, sparkrunSetupCmds, sparkrunPrewarmCmd, sparkrunMeshCmd, SPARKRUN_PKG } from "./provisioner.js";
 
 describe("sparkrun provisioning commands", () => {
-  it("pins the sparkrun version", () => {
-    expect(SPARKRUN_PKG).toBe("sparkrun==0.2.38");
+  // A floor rather than an equality pin: `==0.2.38` went stale and cost us a
+  // misfiled upstream bug (recipe-registry#20). The floor must stay at or above
+  // 0.3.3, the first version that unescapes `{{...}}` in a recipe command and
+  // resolves placeholders nested inside JSON-valued flags.
+  it("constrains sparkrun to a floor of at least 0.3.3, not an exact pin", () => {
+    const m = /^sparkrun>=(\d+)\.(\d+)\.(\d+)$/.exec(SPARKRUN_PKG);
+    expect(m, `expected a >= constraint, got ${SPARKRUN_PKG}`).not.toBeNull();
+
+    const [major, minor, patch] = m!.slice(1).map(Number);
+    const floor = major > 0 || (major === 0 && (minor > 3 || (minor === 3 && patch >= 3)));
+
+    expect(floor, `floor ${major}.${minor}.${patch} is below 0.3.3`).toBe(true);
   });
 
   it("audit checks sparkrun is runnable via uvx", () => {
