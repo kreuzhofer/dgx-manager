@@ -17,11 +17,16 @@ other. On the benchmarks a self-hoster can actually reproduce, they are not.
 | Benchmark | GLM-5.2 (4 nodes) | DeepSeek-V4-Flash (2 nodes) | Verdict |
 |---|---|---|---|
 | **GPQA-Diamond** (198) | **69.2%** | **55.1%** (±3.5) | GLM, decisively |
-| **SWE-bench Verified** (500) | **73.0%** (365/500) | **78.8%** (394/500) | DeepSeek — but see below |
-| SWE-bench, like-for-like (472) | **77.3%** (365/472) | **79.2%** (374/472) | tie (p=0.28) |
+| SWE-bench Verified (500), GLM at 64K | 73.0% (365/500) | 78.8% (394/500) | DeepSeek (p=0.001) — but confounded |
+| **SWE-bench Verified** (500), **GLM context-corrected** | **75.6%** (378/500) | **78.8%** (394/500) | DeepSeek, not significant (p=0.061) |
+| SWE-bench, like-for-like (472) | 77.3% (365/472) | 79.2% (374/472) | tie (p=0.28) |
 
-**The one-line summary: GLM-5.2 is the better reasoner; on agentic coding they are
-statistically indistinguishable, and DeepSeek achieves that on half the cluster.**
+**The one-line summary: GLM-5.2 is the better reasoner; on agentic coding DeepSeek is
+somewhat ahead but not decisively, and it gets there on half the cluster.**
+
+Roughly **half** of DeepSeek's apparent SWE-bench win was GLM's 64K context window rather
+than capability — see the context-corrected run below. Quote the corrected row, not the
+first one.
 
 ## GPQA-Diamond — 55.1% vs GLM's 69.2%
 
@@ -70,18 +75,67 @@ models are indistinguishable at agentic coding.
 **Report the 78.8% only alongside the 79.2%-vs-77.3%**, or it claims a capability
 advantage the data does not support.
 
+## Context-corrected — re-running GLM's 28 failures at 320K
+
+The obvious objection to the above is that DeepSeek ran at 1M context and GLM at 64K, so
+the comparison hands DeepSeek a structural advantage. We tested that directly: re-ran
+**only the 28 instances GLM failed to patch**, on
+`@dgxrun/glm-5.2-quanttrio-unpruned-dcp2-320k` — 320K context, `--max-num-seqs 1`.
+
+| Of the 28 | |
+|---|---|
+| Now produce a patch | **23** (was 0) |
+| Actually resolve | **13** |
+| Still `LimitsExceeded` | 5 |
+
+**Context was a real limiter.** 23 of 28 tasks that produced nothing at 64K produce a
+patch at 320K. But a patch is not a solution — only 13 resolved.
+
+**The 5 remaining failures are not about context.** KV usage sat at 6.8% of the window,
+so they are step-budget exhaustion — agentic inefficiency, which a bigger window cannot
+fix.
+
+Corrected: **365 + 13 = 378/500 = 75.6%**. Paired against DeepSeek:
+
+|  | count |
+|---|---|
+| Both resolved | 354 |
+| DeepSeek only | 40 |
+| GLM only | 24 |
+| Neither | 82 |
+
+McNemar: **χ² = 3.52, p = 0.061 — no longer significant at 0.05.** Removing GLM's
+truncation handicap moves the comparison from p=0.0012 to p=0.061 and halves the gap
+(5.8 → 3.2 points). Close enough that "settled tie" would also overclaim.
+
+A residual gap survives for a real reason: on those same 28 hard instances DeepSeek
+resolved **20** and GLM resolves **13**.
+
+**Caveat that must travel with the 75.6%:** it mixes two configurations — 472 instances
+from the `c16-64k` run and 28 from the 320K `c=1` run, and the latter also carries MTP and
+a different recipe. It is a defensible estimate of *GLM with adequate context*, not a
+clean single-condition measurement. The only way to remove that caveat is a full 500 at
+320K, measured at **~2.8 days** of cluster time (c=1 sustains ~20 tok/s aggregate; GB10
+concurrency buys ~2×, not 8×, so serialising costs roughly the whole speedup). Judged not
+worth it for an expected ≤1.6-point refinement.
+
 ## What this actually tells us
 
 - **GLM-5.2 wins on knowledge/reasoning.** 14 points on GPQA survives any framing.
-- **Neither model wins on agentic coding.** DeepSeek's headline edge is its context
-  window plus GLM's operational bad luck.
-- **DeepSeek wins decisively on efficiency.** Same coding capability on **2 nodes vs 4**,
+- **DeepSeek is somewhat ahead on agentic coding, not decisively.** 75.6% vs 78.8% once
+  GLM's context handicap is removed, p=0.061.
+- **About half the apparent SWE-bench gap was context, not capability.** That is the most
+  transferable finding here: on an agentic benchmark, the serving window is a first-order
+  variable, and a model evaluated at a short context is being measured with a handicap
+  that looks exactly like weakness.
+- **DeepSeek wins decisively on efficiency.** Comparable coding on **2 nodes vs 4**,
   13B active parameters vs 40B — freeing two Sparks for other work.
+- **Context stops paying at some point.** Going 64K → 320K converted 23 of 28 no-patch
+  failures into patches, but only 13 into solutions, and 5 tasks failed on step budget
+  with 93% of the window unused.
 - **The 1M context eliminated a whole failure class.** GLM's 64K window truncated ~1.6%
   of SWE tasks outright; DeepSeek never truncated once, and the long-prefill throughput
   collapse that killed GLM's 128K variant did not materialise.
-- **GLM's 73.0% is arguably understated.** ~8 of its 28 no-patch instances were Docker
-  startup timeouts, unrelated to the model, and would not necessarily recur on a rerun.
 - **Artificial Analysis's near-parity rating did not hold** on the one cleanly
   apples-to-apples knowledge benchmark a self-hoster can run.
 
@@ -132,3 +186,10 @@ caveat and is the obvious next tidy-up.
 - `MSWEA_COST_TRACKING=ignore_errors` is required (litellm knows neither model's pricing).
 - `-w 8` matches the recipe's `max_num_seqs: 8`; raising one without the other wastes
   either workers or KV.
+- **The GLM context-corrected run:** `~/swebench/run_glm_c1_swe.sh <outdir>
+  --filter "$(cat ~/glm_28_ids.txt | paste -sd'|' | sed 's/^/^(/;s/$/)$/')"`, where the
+  IDs come from `empty_patch_ids` in the baseline report. It uses `-w 4` (not `-w 1`)
+  against the `max_num_seqs: 1` server — the server serialises regardless, so extra client
+  workers only keep the queue full while agents run bash/docker — and
+  `model.model_kwargs.timeout=3600`, because a request can now wait behind up to three
+  others and exceeding the timeout triggers the re-prefill death spiral.
