@@ -1,0 +1,80 @@
+# @dgxrun/muse-glimmer-30b — Meta Muse Glimmer 30B on ONE Spark.
+#
+# 29.6B dense text decoder (52 layers, hidden 6656) + ~1.8B ViT-G/14 perception
+# encoder, Apache 2.0, released 2026-08-10. Distilled from Muse Spark 1.2 and aimed
+# at agentic workloads.
+#
+# WHY THIS MATTERS FOR US: it is the first model we serve whose official numbers land
+# on exactly the benchmarks we can reproduce — GPQA-Diamond 83.5 and SWE-bench Verified
+# 76.0. And BF16 fits one Spark, so we measure the REFERENCE weights: no quantization
+# confound, unlike GLM-5.2 (INT4) or DeepSeek V4 Flash (fp8). A gap against Meta's
+# numbers is therefore harness or serving, never "our quantization is worse".
+#
+# ONE node, not four: 55.46 GiB of weights on a 121.6 GB GB10 leaves ample room for a
+# 131K window, so this frees three Sparks. Every GLM-5.2 recipe here is tp=4 and takes
+# the whole pool, so the two cannot coexist.
+#
+# CONTAINER: the tf5 nightly, NOT b12x. b12x pins vLLM to its own branch and rejects
+# --vllm-ref; tf5 builds from vLLM main, which is where Muse Glimmer support landed
+# (vllm-project/vllm#51655, merged 2026-08-14, 136/136 checks green). A dense model
+# needs none of b12x's sparse-MLA/MoE kernels anyway. Verified in image d2eb44d303ba:
+# ModelRegistry resolves MuseGlimmerForConditionalGeneration (what this checkpoint
+# declares) and DFlashMuseGlimmerAssistantModel (the drafter).
+#
+# gpu_memory_utilization 0.88, NOT the 0.92 the vendor recipe suggests: vLLM's startup
+# guard compares gmu*total against CUDA-VISIBLE free, which runs ~7 GiB below MemFree on
+# these nodes. We measured 0.90 failing by 0.05 GiB on this fleet (2026-07-10). 0.88 is
+# the value every GLM-5.2 recipe here uses and it clears reliably; it does not cap KV,
+# which is bounded by max_model_len and max_num_seqs.
+recipe_version: "2"
+runner: dgxrun
+model: meta-models/Muse-Glimmer-30B
+runtime: vllm
+container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly-tf5:latest
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.88
+  # 128K trained context. The full window costs us nothing here — the DeepSeek run
+  # showed a large window removes the truncation failure class that cost GLM-5.2
+  # ~1.6 points on SWE-bench at 64K.
+  max_model_len: 131072
+  # Matches the benchmark harness (-w 8 for mini-SWE-agent, num_concurrent=8 for
+  # lm-eval). Raising one without the other wastes either workers or KV.
+  max_num_seqs: 8
+  # DFlash predicts blocks of tokens in one forward pass. The drafter is a separate
+  # checkpoint, already staged on NFS beside the target.
+  #
+  # 15, NOT a smaller value: DFlash predicts a 16-token block per forward pass, so
+  # 15 drafted + 1 verified is exactly one block. Lowering it does not make drafting
+  # cheaper — the drafter still runs a full block — it just discards predictions.
+  # Measured on one GB10, 600-token decode, 3 runs each:
+  #     nst=15, mnbt=2048  -> 17.56 tok/s   <- this config
+  #     nst=15, mnbt=8192  -> 17.09 tok/s
+  #     nst=6,  mnbt=8192  -> 13.70 tok/s   (block alignment broken)
+  num_speculative_tokens: 15
+  # 2048 is what vLLM clamps to on its own when speculative decoding is on; setting it
+  # explicitly silences the "suboptimal performance" warning without changing anything.
+  # Raising it to 8192 was measured SLOWER (above) — the warning is misleading here.
+  max_num_batched_tokens: 2048
+  served_model_name: muse-glimmer
+
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      --trust-remote-code \
+      --tensor-parallel-size {tensor_parallel} \
+      --max-model-len {max_model_len} \
+      --max-num-seqs {max_num_seqs} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --enable-prefix-caching \
+      --enable-auto-tool-choice \
+      --tool-call-parser muse_glimmer \
+      --reasoning-parser muse_glimmer \
+      --generation-config auto \
+      --speculative-config '{"method":"dflash","model":"meta-models/Muse-Glimmer-30B-assistant","num_speculative_tokens":{num_speculative_tokens}}'
