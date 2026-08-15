@@ -2,6 +2,64 @@ import http from "node:http";
 import { AddressInfo } from "node:net";
 import { stripReasoning } from "./reasoning.js";
 
+/**
+ * Disable every inbound timeout on a proxy server.
+ *
+ * Node applies a 300 s `requestTimeout` and a 60 s `headersTimeout` by default.
+ * Both are wrong here: a non-streaming completion emits nothing until generation
+ * finishes, so "time to first byte" is the entire generation, and a slow
+ * accuracy item legitimately exceeds five minutes. A GPQA run against Muse
+ * Glimmer died at 126/198 when these fired on the tail — the client saw
+ * `ServerDisconnectedError` and its connector collapsed, taking the run with it.
+ *
+ * There is no safe non-zero value: the correct bound is the upstream's, not
+ * ours. gateway/proxy.ts takes the same position for the same reason.
+ */
+export function applyNoTimeouts(server: http.Server): void {
+  server.requestTimeout = 0;
+  server.headersTimeout = 0;
+  server.setTimeout(0);
+}
+
+/** Forward a request with no timeout of any kind, collecting the full response. */
+function forwardNoTimeout(
+  targetUrl: string,
+  method: string,
+  headers: Record<string, string>,
+  body: Buffer,
+): Promise<{ status: number; contentType: string | null; text: string }> {
+  return new Promise((resolve, reject) => {
+    const u = new URL(targetUrl);
+    const send = method === "GET" || method === "HEAD" ? undefined : body;
+    const req = http.request(
+      {
+        hostname: u.hostname,
+        port: u.port,
+        path: `${u.pathname}${u.search}`,
+        method,
+        headers: send ? { ...headers, "content-length": String(send.length) } : headers,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () =>
+          resolve({
+            status: res.statusCode ?? 502,
+            contentType: res.headers["content-type"] ?? null,
+            text: Buffer.concat(chunks).toString(),
+          }),
+        );
+        res.on("error", reject);
+      },
+    );
+    // Deliberately no req.setTimeout(): undici's fetch defaults are exactly what
+    // broke this, and node:http imposes none unless asked.
+    req.on("error", reject);
+    if (send) req.write(send);
+    req.end();
+  });
+}
+
 export type ReasoningProxy = {
   url: string;             // .../v1 base to hand to lm-eval
   close: () => Promise<void>;
@@ -65,25 +123,21 @@ export function startReasoningProxy(
           }
         }
 
-        const upstream = await fetch(targetUrl, {
-          method: req.method,
-          headers,
-          body: req.method === "GET" || req.method === "HEAD" ? undefined : body,
-        });
+        const upstream = await forwardNoTimeout(targetUrl, req.method ?? "GET", headers, body);
 
-        const text = await upstream.text();
         const isChat = suffix.includes("/chat/completions");
-        const out = isChat ? rewriteChatBody(text) : text;
+        const out = isChat ? rewriteChatBody(upstream.text) : upstream.text;
 
         res.statusCode = upstream.status;
-        const ct = upstream.headers.get("content-type");
-        if (ct) res.setHeader("content-type", ct);
+        if (upstream.contentType) res.setHeader("content-type", upstream.contentType);
         res.end(out);
       } catch (e) {
         res.statusCode = 502;
         res.end(JSON.stringify({ error: `reasoning-proxy: ${(e as Error).message}` }));
       }
     });
+
+    applyNoTimeouts(server);
 
     server.listen(0, bindHost, () => {
       const { port } = server.address() as AddressInfo;
