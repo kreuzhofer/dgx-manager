@@ -97,3 +97,32 @@ it, while a pinned runtime is reachable directly on the local network.
 
 The rule is about *what a caller can cause*, not about which runtime is
 trusted. A future runtime that loads on demand inherits Ollama's restriction.
+
+### Cache group
+
+The set of nodes that see the same model weights, because they share one
+storage location. Membership is a property of the storage, not of the nodes: a
+group forms wherever nodes mount the same shared filesystem, and a node with no
+shared storage is simply not in one rather than being a group of its own.
+
+The group, not the node, is what a body of weights belongs to. Asking whether a
+node has a model is the wrong question — the answer is a property of its group,
+and the same weights fetched a second time for a sibling node would be the same
+bytes written to the same place.
+
+### Staging job
+
+The act of bringing a model's weights into a cache group, tracked as something
+with a lifetime of its own. It exists because weights are large enough that
+acquiring them is an event in its own right — hours long, worth watching, and
+worth refusing — rather than a step that can hide inside something else.
+
+A staging job belongs to a cache group and names one model. It is deliberately
+*not* part of a deployment: the same weights outlive any particular deployment,
+may be wanted before anyone has decided what to run, and their absence is the
+user's decision to resolve rather than an error to report. A deployment may wait
+on a staging job, but it never owns one.
+
+The distinction that gives the concept its point is between weights that are
+*absent* and weights that are *arriving*. Without it, a runner that cannot find
+weights can only fail, and a user who wants them can only be told no.
