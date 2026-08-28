@@ -1,0 +1,201 @@
+# @dgxrun/qwen3.8-27b-bf16 — Qwen3.8-27B at BF16 reference weights, on ONE Spark.
+#
+# 27B hybrid-attention multimodal dense model, Apache 2.0, released 2026-08-05..13.
+# 64 layers of which only 16 are full attention (full_attention_interval: 4); the other
+# 48 are linear/GDN carrying a constant-size recurrent state. Native context 262,144.
+#
+# WHY BF16 AND NOT THE FP8 RECIPE: @official/qwen3.8-27b-fp8-mtp-vllm already exists
+# upstream (recipe-registry, 2026-08-14) and is the right choice for SERVING. This recipe
+# exists to MEASURE. At 51.7 GiB the reference weights fit one 121.6 GB GB10 outright, so
+# we do not have to accept a quantization confound — the same argument muse-glimmer-30b.yaml
+# makes for itself. Benchmarking an FP8 Qwen against a BF16 Muse Glimmer would bias the
+# comparison in Glimmer's favour and make any Qwen loss unattributable.
+#
+# It also sidesteps every sm_121 quantization-kernel question at once: the blockwise-FP8
+# DeepGEMM family-12 gate (vllm#51884), NVFP4 Marlin fallback, and MXFP4 (which does not
+# load on NVIDIA at all). Lowest-risk first boot as well as the most rigorous measurement.
+#
+# NO NEW vLLM SUPPORT WAS NEEDED. This checkpoint declares Qwen3_5ForConditionalGeneration —
+# the same class Qwen3.5 and Qwen3.6 declare — registered since vLLM v0.17.0 (2026-03-07)
+# via vllm-project/vllm#34110 (merged 2026-02-09). Its config.json is field-for-field
+# identical to Qwen3.6-27B's. The multimodal processor is native in-tree, so unlike the
+# Qwen3.6 recipe this needs NO --trust-remote-code and no chat-template override.
+#
+# CONTAINER: the eugr nightly, pinned to a DATED tag for reproducible benchmark numbers.
+# NOTE: `-tf5` is now a DEPRECATED ALIAS of `-nightly` (identical digest, per the dgx-vllm
+# README) — the tf5 comment block in muse-glimmer-30b.yaml is historically out of date.
+# b12x is unnecessary: this is a dense model, so none of b12x's sparse-MLA/MoE kernels apply.
+# If load fails with "ParallelLMHead has no output_size_per_partition" (vllm#52434, filed
+# 2026-08-15 against main from #52147), drop back to :2026081201, which predates it.
+recipe_version: "2"
+runner: dgxrun
+model: Qwen/Qwen3.8-27B
+runtime: vllm
+container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:2026081501
+description: Qwen3.8-27B BF16 reference weights, one Spark — the unquantized benchmark target
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+
+  # 0.88, NOT 0.92: vLLM's startup guard compares gmu*total against CUDA-VISIBLE free, which
+  # runs ~7 GiB below MemFree on these nodes. 0.90 was measured failing by 0.05 GiB on this
+  # fleet (2026-07-10). Same value every GLM-5.2 recipe and muse-glimmer-30b.yaml use.
+  gpu_memory_utilization: 0.88
+
+  # Native trained context. Do NOT chase the 1M headline — that needs an explicit YaRN
+  # --hf-overrides, and Qwen warns that because every open framework implements *static*
+  # YaRN it degrades short-context quality. Agentic coding lives well inside 262K.
+  #
+  # This window is far cheaper than it looks: only 16 of 64 layers hold a KV cache, at
+  # num_key_value_heads=4 x head_dim=256 x 2 (K+V) x 2 bytes = 64 KiB/token. ~55 GiB of KV
+  # after 51.7 GiB of weights is ~800K tokens of pool, comfortably above the 262K per-request
+  # cap (max_model_len bounds a request, it is not preallocated).
+  # VERIFIED ON HARDWARE 2026-08-28: KV cache came out at 716,119 tokens (2.73x concurrency
+  # at this window). The estimate above was close; the full native window is affordable.
+  max_model_len: 262144
+
+  # Matches the benchmark harness (-w 8 for mini-SWE-agent, num_concurrent=8 for lm-eval),
+  # same as muse-glimmer-30b.yaml. The one published GB10 datapoint for this model
+  # (sglang#34872, FP8) also ran concurrency 8.
+  max_num_seqs: 8
+
+  # 2048: muse-glimmer measured 2048 FASTER than 8192 under speculative decoding on this
+  # hardware (block alignment), and vLLM clamps to 2048 on its own when spec decoding is on.
+  # The @official FP8 recipe uses 16384, but that recipe is not spec-decode-tuned for GB10.
+  max_num_batched_tokens: 2048
+
+  # MTP weights ship INSIDE the checkpoint — 15 `mtp.*` keys in the BF16 safetensors index,
+  # and Qwen3_5MTP is registered in vLLM. So unlike Muse Glimmer's DFlash there is NO separate
+  # drafter to stage on NFS and no second model path to configure.
+  # nst=3 is what both the @official sparkrun recipe and the vLLM recipe page use, and what
+  # the GB10 SGLang validation ran. No Qwen3.8-27B DFlash drafter exists on HF; DSpark
+  # (RadixArk/Qwen3.8-27B-DSpark) is blocked on vllm#52197, still open.
+  num_speculative_tokens: 3
+
+  served_model_name: qwen3.8-27b
+
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      --tensor-parallel-size {tensor_parallel} \
+      --max-model-len {max_model_len} \
+      --max-num-seqs {max_num_seqs} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --enable-auto-tool-choice \
+      --tool-call-parser qwen3_coder \
+      --reasoning-parser qwen3 \
+      --generation-config auto \
+      --speculative-config '{"method":"mtp","num_speculative_tokens":{num_speculative_tokens}}'
+
+# ---------------------------------------------------------------------------------------
+# DELIBERATELY OMITTED — each would either confound the measurement or is unverified:
+#
+#   --kv-cache-dtype fp8
+#       @official sets it. It would quantize the KV cache, reintroducing exactly the
+#       precision confound this recipe exists to avoid. Muse Glimmer does not set it either,
+#       so leaving it off is also what keeps the two comparable.
+#
+#   --enable-prefix-caching
+#       CORRECTION (measured 2026-08-28): vLLM defaults this to TRUE, so omitting the flag
+#       does NOT disable it — the running engine reports enable_prefix_caching=True. To
+#       actually turn it off the flag is --no-enable-prefix-caching.
+#       Relevant because vllm#52244 (OPEN) shows that on Qwen3.5-family hybrid GDN with MTP
+#       on, replaying a cached prompt returns ZERO cached tokens when the prompt is a
+#       multiple of the hash unit. Perf-only, not correctness, so it is left at the default
+#       — but do not believe a comment that says it is off.
+#
+#   --attention-backend flashinfer
+#       @official sets it and the GB10 SGLang run used FlashInfer, but vllm#51987 ("Revert
+#       FlashInfer XQA decode support on SM12x") is open. Leaving it unset lets vLLM pick.
+#       Worth an A/B once a baseline number exists.
+#
+#   --language-model-only / --skip-mm-profiling / --limit-mm-per-prompt '{"image":0}'
+#       DO NOT ADD THESE. They disable the vision tower — get_limit_per_prompt() returns 0 for
+#       EVERY modality when language_model_only is set. Vision is a primary use case for this
+#       deployment (visual inspection of 3D render images), so the ViT must stay live and mm
+#       profiling must run so its memory is actually reserved. Noted here because these flags
+#       look like free wins for a text benchmark and would silently break image input.
+#
+#   --load-format instanttensor
+#       An eugr-image-specific fast loader used by @official. Not an upstream vLLM flag;
+#       not confirmed present in this pinned tag.
+#
+# VISION TUNING — the knobs that matter for inspecting 3D renders. All verified present in
+# this pinned image via `vllm serve --help=all`. Left at defaults for the first boot so a
+# syntax error cannot masquerade as a load failure; tune against the live endpoint.
+#
+#   --limit-mm-per-prompt
+#       DEFAULT IS 1 IMAGE PER REQUEST. Raise before sending multi-view prompts (e.g. four
+#       camera angles of one part in one request), or those requests are rejected.
+#
+#   --mm-processor-kwargs
+#       Qwen-VL dynamic resolution: min_pixels / max_pixels. This is the real quality lever
+#       for defect inspection — too low and fine surface artifacts are resampled away before
+#       the model ever sees them; too high and a single render eats the token budget. Tune
+#       against actual renders, not a benchmark.
+#
+#   --mm-processor-cache-gb
+#       Caches processed images; worth setting if the same render is queried repeatedly.
+#
+#   --mm-encoder-attn-dtype fp8
+#       Quantizes the vision encoder's attention. Do NOT use while vision quality is the
+#       thing being evaluated.
+#
+# NOTE for a future FP8 variant: Qwen's FP8 checkpoint leaves the vision tower UNQUANTIZED
+# (246 `model.visual.*` tensors in modules_to_not_convert) — only the language model is
+# quantized. FP8 therefore costs nothing on the encoder, making it a reasonable SERVING
+# choice for vision work even though this BF16 recipe is the one for unconfounded measurement.
+#
+#   --trust-remote-code
+#       Needed by the Qwen3.6 recipe, NOT by this one — the processor is native in-tree.
+#
+# env:
+#   VLLM_USE_DEEP_GEMM: "0"
+#   VLLM_MOE_USE_DEEP_GEMM: "0"
+#       Not needed for BF16. Keep in your pocket for the FP8 variant: vllm#51884 reports
+#       blockwise-FP8 weights failing in process_weights_after_loading on capability
+#       family 12 ("Unknown SF transformation"), with exactly these two vars as the fix.
+# ---------------------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------------------
+# MEASURED ON HARDWARE — dgx-spark-01, 2026-08-28, this exact recipe
+#
+#   Loads and serves.       vramActual 103,778 MiB; graph capture 5 s / 0.13 GiB.
+#   Context.                KV cache 716,119 tokens at max_model_len 262144
+#                           (2.73x concurrency). The full native window is affordable —
+#                           only 16 of 64 layers hold a KV cache.
+#   MTP works, no drafter.  SpeculativeConfig(method='mtp', num_spec_tokens=3);
+#                           "Detected MTP model. Sharing target model embedding weights".
+#                           Acceptance: 56.2% of drafted tokens, mean 1.68 accepted per
+#                           draft => 2.68 tokens per forward pass.
+#                           Per position: 77% / 53% / 38%.
+#   Decode.                 ~9-12 tok/s single stream. For reference, muse-glimmer-30b
+#                           measured 17.6 tok/s on one Spark. Qwen3.8-27B is the smaller
+#                           model and is SLOWER here; not yet explained.
+#   Vision.                 Works and is accurate. A 768x768 synthetic render of a bracket
+#                           with a hairline crack was described correctly, including the
+#                           defect's location between the two bores and its zigzag path.
+#                           Cost: 677 prompt tokens for one 768x768 image.
+#
+# ⚠ REASONING EFFORT — READ BEFORE BENCHMARKING
+#
+#   The default reasoning effort (xhigh) can think past ANY token cap, and when it does the
+#   API returns a COMPLETELY EMPTY response: finish_reason="length", completion_tokens at
+#   the cap, and BOTH content AND reasoning_content empty. Not truncated — empty.
+#
+#   Measured on the prompt "Write a clear 250-word explanation ...":
+#       default (xhigh)              >4000 tokens, finish=length -> EMPTY
+#       chat_template_kwargs
+#         reasoning_effort: low        564 tokens, finish=stop   -> full answer
+#         enable_thinking: false       356 tokens, finish=stop   -> full answer
+#
+#   Consequence for evals: the acc-gpqa-diamond-full preset uses maxGenToks 4096 with
+#   reasoning=true. Any item whose reasoning overruns returns empty and scores WRONG with
+#   no error anywhere — indistinguishable from the model being bad. Raise the cap well
+#   above 4096, or pin reasoning_effort, before trusting any accuracy number from this model.
+# ---------------------------------------------------------------------------------------
