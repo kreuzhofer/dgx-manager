@@ -32,6 +32,11 @@ export type AccuracyConfig = {
    *  latency-tuned serving recipe, higher (e.g. 16) for the batched eval recipe.
    *  Optional/omitted => 1. */
   numConcurrent?: number;
+  /** Per-request timeout in SECONDS, bounding the whole request including
+   *  generation (lm-eval applies it as aiohttp ClientTimeout(total=...)).
+   *  Optional/omitted => DEFAULT_TIMEOUT_S. Raise it when maxGenToks divided by
+   *  the model's realistic per-request tokens/sec exceeds the default. */
+  timeout?: number;
 };
 
 export type BenchmarkKind = "throughput" | "tool-eval" | "accuracy";

@@ -330,6 +330,21 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
     config = { ...(config as AccuracyConfig), numConcurrent: n };
   }
 
+  // Optional per-run timeout override (SECONDS) for accuracy runs. lm-eval
+  // applies it as aiohttp ClientTimeout(total=...), bounding the whole request
+  // including generation, so the right value is a function of maxGenToks and the
+  // model's per-request throughput. Its default (300s) livelocked a GPQA run on a
+  // slow model at concurrency 8 — see DEFAULT_TIMEOUT_S in lm-eval-args.ts.
+  // Upper bound 86400 keeps a typo from parking a run for a week.
+  const toOverride = (req.body as { timeout?: unknown }).timeout;
+  if (kind === "accuracy" && toOverride !== undefined) {
+    const t = Number(toOverride);
+    if (!Number.isInteger(t) || t < 1 || t > 86400) {
+      return res.status(400).json({ error: "timeout must be an integer number of seconds between 1 and 86400" });
+    }
+    config = { ...(config as AccuracyConfig), timeout: t };
+  }
+
   let endpointUrl: string;
   try {
     // llama-benchy follows the OpenAI client convention where `--base-url`
