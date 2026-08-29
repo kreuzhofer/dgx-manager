@@ -69,10 +69,42 @@ defaults:
   # MTP weights ship INSIDE the checkpoint — 15 `mtp.*` keys in the BF16 safetensors index,
   # and Qwen3_5MTP is registered in vLLM. So unlike Muse Glimmer's DFlash there is NO separate
   # drafter to stage on NFS and no second model path to configure.
-  # nst=3 is what both the @official sparkrun recipe and the vLLM recipe page use, and what
-  # the GB10 SGLang validation ran. No Qwen3.8-27B DFlash drafter exists on HF; DSpark
-  # (RadixArk/Qwen3.8-27B-DSpark) is blocked on vllm#52197, still open.
-  num_speculative_tokens: 3
+  #
+  # 5, NOT the 3 that @official, the vLLM recipe page and the GB10 SGLang validation all use.
+  # The margin is SMALL and NOT statistically significant — read this before quoting it.
+  #
+  # MEASURED 2026-08-29, one Spark. 500-token greedy decode, thinking disabled, decode timed
+  # separately from prefill, PAIRED over 8 diverse prompts (prose, code, history, fiction,
+  # biochem, shell, philosophy) because MTP acceptance is strongly CONTENT-dependent:
+  #     nst=3  ->  10.99 tok/s   2.924 tokens/forward   accept 64.1%
+  #     nst=5  ->  11.38 tok/s   3.369 tokens/forward   accept 47.4%   <- this config
+  #     nst=7  ->   9.03 tok/s   3.077 tokens/forward   accept 29.7%   (clearly worse)
+  # Paired delta of 5 over 3: +0.385 tok/s (+3.5%), 95% CI -0.27..+1.04, t(7)=1.39 — NOT
+  # significant at p<0.05, though 6 of 8 prompts favour it. nst=7 is decisively worse and
+  # needs no statistics. Keep 5; do NOT quote a speedup number from this.
+  #
+  # THE SIGN FLIPS WITH WORKLOAD, which is the part worth knowing. Extra draft passes are
+  # paid whether or not they are accepted, so predictable text wins and unpredictable text
+  # LOSES:  bash-script prompt 1.153x  |  creative fiction 0.909x.
+  #
+  # MTP drafts AUTOREGRESSIVELY: every extra speculative token costs a full pass over the
+  # MTP layer PLUS the 2.54 GiB BF16 lm_head (vocab 248,320 x hidden 5120), about 5.8% of
+  # the target model's bytes per draft step. That is why +15% tokens per forward (2.924 ->
+  # 3.369) nets only ~3% decode, and why nst=7 goes backwards.
+  #
+  # nst > 1 works even though this checkpoint has mtp_num_hidden_layers: 1 — vLLM loops the
+  # single MTP module rather than requiring one module per position. Verified by booting it.
+  #
+  # ⚠ METHOD — DO NOT REPEAT THIS MISTAKE. A greedy engine regenerates IDENTICAL text for a
+  # given prompt, so repeating ONE prompt measures repeatability (spread <0.5%), not the
+  # variance that matters. Across a restart the text diverges slightly and acceptance moves
+  # with it: the SAME nst=5 config measured 10.40 and 9.65 tok/s on two boots of one prompt,
+  # which is LARGER than the effect being chased. Content sd is ~12-17%. Sweep diverse
+  # prompts and pair them; a single-prompt A/B on this model is worthless.
+  #
+  # No Qwen3.8-27B DFlash drafter exists on HF; DSpark (RadixArk/Qwen3.8-27B-DSpark) is
+  # blocked on vllm#52197, still open.
+  num_speculative_tokens: 5
 
   served_model_name: qwen3.8-27b
 
@@ -163,20 +195,38 @@ command: |
 # ---------------------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------------------
-# MEASURED ON HARDWARE — dgx-spark-01, 2026-08-28, this exact recipe
+# MEASURED ON HARDWARE — dgx-spark-01, first boot 2026-08-28; MTP sweep 2026-08-29
 #
 #   Loads and serves.       vramActual 103,778 MiB; graph capture 5 s / 0.13 GiB.
 #   Context.                KV cache 716,119 tokens at max_model_len 262144
 #                           (2.73x concurrency). The full native window is affordable —
 #                           only 16 of 64 layers hold a KV cache.
-#   MTP works, no drafter.  SpeculativeConfig(method='mtp', num_spec_tokens=3);
+#   MTP works, no drafter.  SpeculativeConfig(method='mtp', num_spec_tokens=5);
 #                           "Detected MTP model. Sharing target model embedding weights".
-#                           Acceptance: 56.2% of drafted tokens, mean 1.68 accepted per
-#                           draft => 2.68 tokens per forward pass.
-#                           Per position: 77% / 53% / 38%.
-#   Decode.                 ~9-12 tok/s single stream. For reference, muse-glimmer-30b
-#                           measured 17.6 tok/s on one Spark. Qwen3.8-27B is the smaller
-#                           model and is SLOWER here; not yet explained.
+#                           Over 8 diverse prompts: nst=5 accepts 47.4% of drafted tokens
+#                           => 3.369 tokens per forward pass; nst=3 accepts 64.1% => 2.924.
+#   Decode.                 11.38 tok/s at nst=5 against 10.99 at nst=3, paired over the
+#                           same 8 prompts (500-token greedy decode, thinking disabled,
+#                           decode timed separately from prefill). That +3.5% is NOT
+#                           significant (95% CI -0.27..+1.04 tok/s).
+#                           QUOTE A RANGE, NOT A FIGURE: content variance dominates this
+#                           model, sd ~12-17% across prompts — 7.6 tok/s on creative fiction
+#                           up to 14.2 on a bash script. The first boot's "~9-12 tok/s" is
+#                           consistent with that spread.
+#   Why Glimmer is faster.  RESOLVED — this block previously recorded the gap as "not yet
+#                           explained". muse-glimmer-30b measures 17.6 tok/s on one Spark
+#                           while being the LARGER model (55.5 vs 51.7 GiB of weights), so
+#                           it is not a size effect. It is the DRAFTER. DFlash predicts a
+#                           16-token block in ONE forward pass: ~3% drafting overhead for
+#                           ~3.9 tokens per forward. MTP drafts autoregressively: 5 extra
+#                           passes to reach 3.37 tokens per forward, ~17% overhead, and a
+#                           hard ceiling of nst+1 tokens. Both models are bandwidth-bound
+#                           at the GB10's 273 GB/s; the gap is speculative-decoding yield
+#                           per byte read, and nst=5 is the most of it MTP can get.
+#                           ⚠ CAVEAT: Glimmer's 17.6 tok/s was itself measured with the
+#                           single-prompt method the nst comment warns about, so part of
+#                           that gap may be a content artifact. Re-measure Glimmer with the
+#                           paired 8-prompt sweep before treating 17.6 vs 11.4 as settled.
 #   Vision.                 Works and is accurate. A 768x768 synthetic render of a bracket
 #                           with a hairline crack was described correctly, including the
 #                           defect's location between the two bores and its zigzag path.
