@@ -22,13 +22,21 @@ import { buildDgxrunDockerArgs, tokenizeCommand, type DgxrunRecipe } from "./dgx
 
 const RECIPE = join(process.cwd(), "recipes/dgxrun/glm-5.3-flash-nvfp4-2x.yaml");
 
-/** Upstream's serve argv for rank 0, verbatim apart from the model path. */
+/**
+ * Upstream's serve argv for rank 0, verbatim apart from the model path.
+ *
+ * Transcribed from `scripts/launch-glm53-vllm-dflash2-tp2.sh` in
+ * barrydeen/glm53-flash-dgx-spark @ c267f9f. Only that repo's `docker/` tree is
+ * vendored here (scripts/glm53-flash-overlay/), so the launcher itself is NOT
+ * in this repo — check it upstream before trusting this line.
+ */
 const UPSTREAM_SERVE = `vllm serve LibertAIDAI/GLM-5.3-Flash-NVFP4 \
 --served-model-name glm-5.3-flash --host 0.0.0.0 --port 8000 --trust-remote-code \
 --tensor-parallel-size 2 --gpu-memory-utilization 0.85 --max-model-len 262144 \
 --max-num-seqs 6 --block-size 2304 --moe-backend marlin --kv-cache-dtype fp8_e4m3 \
 --enforce-eager --tool-call-parser glm47 --enable-auto-tool-choice \
 --reasoning-parser glm45 --distributed-executor-backend mp \
+--speculative-config '{"method":"dflash","model":"/models/glm-5.3-flash-dflash2","num_speculative_tokens":7}' \
 --nnodes 2 --node-rank 0 --master-addr 192.168.44.37 --master-port 25000`;
 
 /** Env upstream set, minus its own fleet's NIC names (see DELIBERATE_ENV_*). */
@@ -67,17 +75,12 @@ const DELIBERATE_FLAG_DIFFERENCES: Record<string, string> = {
     "327680 (320K), not upstream's 262144 — issue #24. Validated by needle probe " +
     "at 294,828 prompt tokens; 491520 was tried and could not serve its own " +
     "window. The recipe carries the measurements.",
-};
-
-/**
- * Flags upstream passed that we deliberately do not. Each entry is a decision
- * recorded in the recipe, not an oversight — deleting one from here without
- * changing the recipe fails the test.
- */
-const DELIBERATE_FLAG_OMISSIONS: Record<string, string> = {
   "--speculative-config":
-    "no spec decode on first bring-up: native MTP is unvalidated at TP2 and the " +
-    "DFlash2 draft is CC-BY-NC-ND against an MIT target. See the recipe.",
+    "native MTP, not upstream's DFlash2 — issue #26. The checkpoint carries the " +
+    "MTP head in layer 45 (eh_proj/enorm/hnorm/shared_head), so drafting needs " +
+    "no extra weights and no extra licence. DFlash2 would need a ninth overlay " +
+    "layer porting an unmerged vLLM PR plus a CC-BY-NC-ND draft against an MIT " +
+    "target.",
 };
 
 /** Env keys we deliberately do not carry over from upstream's launcher. */
@@ -144,7 +147,6 @@ describe("@dgxrun/glm-5.3-flash-nvfp4-2x vs the validated 2x-Spark launcher", ()
   it("passes every flag upstream passed, with the same value", () => {
     const wrong: string[] = [];
     for (const [flag, value] of theirs) {
-      if (flag in DELIBERATE_FLAG_OMISSIONS) continue;
       if (!ours.has(flag)) wrong.push(`missing ${flag}`);
       else if (flag in DELIBERATE_FLAG_DIFFERENCES) {
         // Stated divergence — the exact values are pinned by their own test, so
@@ -163,10 +165,6 @@ describe("@dgxrun/glm-5.3-flash-nvfp4-2x vs the validated 2x-Spark launcher", ()
   it("adds no flag beyond the deliberate ones", () => {
     const extra = [...ours.keys()].filter((f) => !theirs.has(f) && !(f in DELIBERATE_EXTRA_FLAGS));
     expect(extra).toEqual([]);
-  });
-
-  it("omits only the upstream flags we chose to drop", () => {
-    for (const f of Object.keys(DELIBERATE_FLAG_OMISSIONS)) expect(ours.has(f)).toBe(false);
   });
 
   /**
@@ -195,6 +193,20 @@ describe("@dgxrun/glm-5.3-flash-nvfp4-2x vs the validated 2x-Spark launcher", ()
   it("pins the empirically validated memory and window settings", () => {
     expect(ours.get("--gpu-memory-utilization")).toBe("0.87");
     expect(ours.get("--max-model-len")).toBe("327680");
+  });
+
+  /**
+   * 4 is a measured setting, not a default: it halves the KV pool. Pinned for
+   * the same reason as the two above — see the recipe for the numbers.
+   */
+  it("drafts with the checkpoint's own MTP head, not an external draft model", () => {
+    expect(ours.has("--speculative-config")).toBe(true);
+    const spec = JSON.parse(ours.get("--speculative-config") as string);
+    expect(spec.method).toBe("mtp");
+    // No `model` key: an external drafter would mean extra weights, and the only
+    // published option carries a licence mismatch. See the allowlist entry.
+    expect(spec.model).toBeUndefined();
+    expect(spec.num_speculative_tokens).toBe(4);
   });
 
   it("sets every env var upstream set, with the same value", () => {

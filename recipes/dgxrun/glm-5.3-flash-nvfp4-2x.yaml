@@ -32,7 +32,7 @@
 #      --node-rank, --master-addr, --master-port, --headless) come from dgxrun.
 #   3. Weights resolve from the shared HF cache via `model:` rather than a
 #      bind-mounted /models path.
-#   4. No DFlash2 — see "SPECULATIVE DECODING" below.
+#   4. Native MTP rather than upstream's DFlash2 — see "SPECULATIVE DECODING".
 #
 # NODES: build and deploy on exactly the two nodes the image was built on.
 # There is no cluster-wide distribution step; a node without
@@ -94,13 +94,15 @@ defaults:
   gpu_memory_utilization: 0.87
   # 327680 (320K) — 1.25x upstream's 262144, measured in issue #24.
   #
-  # MEASURED AT THIS SETTING (gmu 0.87, 2026-08-29, spark-02 head + spark-03):
+  # MEASURED AT THIS SETTING (gmu 0.87, 2026-08-29, spark-02 head + spark-03).
+  # All figures here are WITHOUT speculative decoding; enabling MTP changes the
+  # pool and the decode rate, and those numbers live with num_speculative_tokens.
   #     GPU KV cache size: 1,015,403 tokens
   #     Maximum concurrency for 327,680 tokens per request: 3.10x
   #     needle at 294,828 prompt tokens (90% of window, 50% depth): retrieved
   #       verbatim, finish_reason=stop
-  #     cold prefill ~1,311 tok/s ; decode 14.3 tok/s (baseline was 14.4 — the
-  #       window and gmu do not touch decode)
+  #     cold prefill ~1,311 tok/s ; decode 14.3 tok/s (the window and gmu do not
+  #       touch decode — 14.4 before this change)
   # Do NOT quote the ~21,000 tok/s a repeat of the same long prompt reports:
   # that is prefix cache, not prefill.
   #
@@ -173,6 +175,48 @@ defaults:
   # sequence length and GB10's SM count. That one needs a kernel fix upstream.
   max_model_len: 327680
   max_num_seqs: 6
+  # Speculative decoding via the checkpoint's OWN multi-token-prediction head —
+  # issue #26. No external drafter, so no extra weights and no extra licence.
+  #
+  # The head is real and in this quant: layer 45, one beyond `num_hidden_layers:
+  # 45`, carrying eh_proj / enorm / hnorm / shared_head.norm. Those four are
+  # unique to a nextn layer. NOTE the obvious check misleads — grepping tensor
+  # names for "nextn"/"mtp"/"draft" returns ZERO hits because GLM names the
+  # layer positionally, and concluding from that the head is absent would push
+  # you to DFlash2 (an unmerged vLLM PR plus a CC-BY-NC-ND draft against an MIT
+  # target), which is not needed.
+  #
+  # 4 draft tokens: the value the published TP4 config uses.
+  #
+  # MEASURED at this setting (2026-08-30, spark-02 + spark-03):
+  #     decode      22.4 and 26.0 tok/s over two runs, vs 14.3 without MTP
+  #                 (same 600-token prompt) -> 1.57x to 1.82x
+  #     acceptance  874 accepted / 1,924 drafted over 481 drafts = 45.4%,
+  #                 i.e. 1.82 accepted per step, so ~2.82 tokens per engine step
+  #     per-position  pos0 363 (75%), pos1 252 (52%), pos2 157 (33%), pos3 102 (21%)
+  #     KV pool     554,535 tokens (was 1,015,403) — the draft head costs about
+  #                 half the pool; concurrency 3.10x -> 1.69x. This is why #24
+  #                 had to be measured BEFORE turning MTP on.
+  #     window      still served with the pool halved: needle RE-RUN with MTP on
+  #                 at 294,828 prompt tokens, retrieved verbatim, finish=stop,
+  #                 cold prefill 1,307 tok/s (1,311 without MTP — drafting does
+  #                 not cost prefill). Arithmetic (554,535 > 327,680) was NOT
+  #                 accepted as sufficient: this file says elsewhere that a
+  #                 window is proven by probe and never by arithmetic, and
+  #                 halving the pool is exactly the change that rule exists for.
+  #     probes      both trick questions still answered correctly with MTP on
+  #                 ("all but 9" -> 9 sheep; 3 machines/3 widgets -> 3 minutes).
+  #                 Recorded because a bad drafter degrades quality rather than
+  #                 erroring, so this is the check that catches a SILENT failure.
+  #
+  # Note the gap between the 2.82x tokens-per-step and the 1.57-1.82x actually
+  # observed: that is the cost of the draft forward pass. Raising this number
+  # buys less than the acceptance table suggests, because every extra draft
+  # token is paid for whether or not it is accepted. pos3 still lands 21% of the
+  # time, so 4 is not obviously too many — but tune against
+  # vllm:spec_decode_num_{accepted,draft}_tokens_total, never by intuition, and
+  # re-check the KV pool afterwards.
+  num_speculative_tokens: 4
   # 2304 = 9 x 256. Load-bearing: must be a multiple of BOTH 256 (index pool
   # alignment) and 128 (MLA alignment). Not a tuning knob — changing it to a
   # "rounder" number breaks one of the two alignments.
@@ -209,7 +253,8 @@ command: |
       --enforce-eager \
       --tool-call-parser glm47 \
       --enable-auto-tool-choice \
-      --reasoning-parser glm45
+      --reasoning-parser glm45 \
+      --speculative-config '{"method":"mtp","num_speculative_tokens":{num_speculative_tokens}}'
 #
 # ------------------------------- LOAD-BEARING ---------------------------------
 #
@@ -238,23 +283,23 @@ command: |
 #
 # --------------------------- SPECULATIVE DECODING -----------------------------
 #
-# There is none yet, and that is a deliberate first-bring-up choice rather than
-# an omission. Expect decode well below the published figures until this is
-# resolved; the numbers quoted for this model (24.7 code / 30.3 structured tok/s
-# at TP2) are all *with* spec decode.
+# Native MTP, enabled and measured — issue #26. Decode 22.4-26.0 tok/s against a
+# 14.3 baseline. For scale, the figures published for this model at TP2 are
+# 24.7 code / 30.3 structured / 19.6 prose — but ours is ONE 600-token prose
+# prompt, so it is not a like-for-like comparison and should not be quoted as
+# matching them. Full numbers sit with num_speculative_tokens in the defaults
+# block above, next to the knob they justify.
 #
-# Two options, neither yet measured on our fleet:
+# The alternative, DFlash2 via incoai/GLM-5.3-Flash-DFlash2, is what upstream
+# actually measured here — and is NOT needed. It would cost a ninth overlay
+# layer porting an UNMERGED vLLM PR (#52816) plus a CC-BY-NC-ND-4.0 draft
+# checkpoint against an MIT target. Native MTP needs neither: the head ships
+# inside the quant. Do not reach for DFlash2 without a reason that survives
+# those two costs.
 #
-#   1. Native MTP. The checkpoint carries num_nextn_predict_layers: 1, and the
-#      published TP4 recipe drives it with method "mtp" at 4-5 draft tokens.
-#      Free (no extra weights, no extra licence) but unvalidated at TP2 on this
-#      overlay.
-#   2. DFlash2 via incoai/GLM-5.3-Flash-DFlash2. This is what upstream actually
-#      measured here, but it needs a ninth overlay layer porting an UNMERGED vLLM
-#      PR (#52816), and the draft checkpoint is CC-BY-NC-ND-4.0 against an MIT
-#      target — a licence asymmetry worth a deliberate decision, not a default.
-#
-# Try (1) first: it is a one-line --speculative-config on this same image.
+# Ordering mattered and would again: the draft head takes roughly half the KV
+# pool, so this had to be measured AFTER the context ceiling in #24 rather than
+# alongside it, or neither measurement would have meant anything.
 #
 # ------------------------------ MULTIMODAL ------------------------------------
 #
