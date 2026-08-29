@@ -49,17 +49,129 @@ defaults:
   port: 8000
   host: 0.0.0.0
   tensor_parallel: 2
-  # 0.85 is upstream's validated value and reserves headroom on the unified pool.
-  # NOTE the GLM-5.2 lesson does NOT apply here: those recipes run 0.88 because
-  # vLLM's startup guard compares gmu*total against CUDA-visible free. That guard
-  # is about the *floor*; 0.85 clears it by a wide margin at this weight size.
-  gpu_memory_utilization: 0.85
-  # 262144, not the model's native 1,048,576. The 1M configs published so far are
-  # TP4 (4 ranks of KV pool); at TP2 the pool is half the size. 256K is what
-  # upstream needle-tested on two Sparks. Raising it is a measurement, not an
-  # edit — and it must be measured under concurrent traffic, because on GB10 a
-  # KV pool that allocates cleanly can still fail under real long prefills.
-  max_model_len: 262144
+  # 0.87, NOT upstream's 0.85 and NOT the 0.89 the startup guard would allow.
+  # Raised, then deliberately backed off, while measuring issue #24.
+  #
+  # At 0.85 vLLM auto-computed only 4.41 GiB of KV (667,275 tokens) and said so
+  # itself — "Replace gpu_memory_utilization config with --kv-cache-memory=
+  # 10020882432 (9.33 GiB) to fully utilize gpu memory" — i.e. ~5 GiB of the
+  # device sat unused.
+  #
+  # ================ WHY NOT 0.89, WHICH THE GUARD ALLOWS ================
+  # 0.89 works right up until it doesn't. It boots, profiles, and allocates a
+  # 9.76 GiB / 1,445,763-token pool — and is then SIGKILLed:
+  #     ERROR multiproc_executor.py:310  Worker proc VllmWorker-0 died
+  #           unexpectedly (exit code: None)
+  #     INFO  base.py:235  Multi-modal warmup completed in 9.704s
+  # `exit code: None` is a signal kill. The VISION-ENCODER WARMUP runs AFTER KV
+  # is sized and allocates outside the profiled budget, so what actually matters
+  # is the slack left over, free - gmu*total:
+  #     gmu 0.85 -> 108.45 - 103.38 = 5.07 GiB -> warmup fits
+  #     gmu 0.89 -> 108.49 - 108.25 = 0.24 GiB -> worker OOM-killed
+  # Clearing vLLM's startup guard is necessary but NOT sufficient. This is the
+  # GLM-5.2 memory-wall lesson again, from a new direction.
+  #
+  # ======================= WHY 0.87 SPECIFICALLY ========================
+  # The most KV we can buy while still leaving the multimodal warmup room.
+  # Measured at 0.87 rather than derived:
+  #     KV pool                          = 1,015,403 tokens
+  #     concurrency at 327,680/request   = 3.10x   (0.85 gave 2.55x at 262K)
+  #     warmup slack 108.49 - 105.82     = 2.67 GiB  (0.24 died, 5.07 worked)
+  #
+  # NOTE the KV pool is three times what the 320K window below needs. That is
+  # not waste and not an argument for lowering gmu: the surplus is CONCURRENCY.
+  # The window is capped by a kernel limit, not by memory, so spare pool is the
+  # only thing the extra memory can usefully buy.
+  #
+  # (Weights + non-torch measured 96.34 GiB at gmu 0.85 and 95.87 at 0.87; free
+  # at startup 108.45 and 108.49 respectively. Both pairs are real readings from
+  # different boots, not a transcription error — the figures wobble by ~0.5 GiB
+  # run to run, which is itself a reason not to sit on a computed boundary.)
+  #
+  # Raising gmu is preferred over pinning --kv-cache-memory-bytes: pinning
+  # re-introduces the GLM-5.2 failure where a hand-set pool allocates cleanly and
+  # then fails under load.
+  gpu_memory_utilization: 0.87
+  # 327680 (320K) — 1.25x upstream's 262144, measured in issue #24.
+  #
+  # MEASURED AT THIS SETTING (gmu 0.87, 2026-08-29, spark-02 head + spark-03):
+  #     GPU KV cache size: 1,015,403 tokens
+  #     Maximum concurrency for 327,680 tokens per request: 3.10x
+  #     needle at 294,828 prompt tokens (90% of window, 50% depth): retrieved
+  #       verbatim, finish_reason=stop
+  #     cold prefill ~1,311 tok/s ; decode 14.3 tok/s (baseline was 14.4 — the
+  #       window and gmu do not touch decode)
+  # Do NOT quote the ~21,000 tok/s a repeat of the same long prompt reports:
+  # that is prefix cache, not prefill.
+  #
+  # ============ THE REAL CEILING IS A KERNEL LIMIT, NOT MEMORY ============
+  # 480K was configured, booted, allocated a 927,955-token pool and served short
+  # prompts perfectly. It then died on the FIRST long prefill:
+  #     RuntimeError: launch_persistent_topk, topk.cu:138, persistent_topk would
+  #     oversubscribe and the FilteredTopK fallback requires >=128KB smem per
+  #     block (have 101376). total_ctas=59 > num_sms*occupancy=48
+  #     (TopK=512, vec_size=4, ctas_per_group=59, smem=35968)
+  # The sparse indexer's top-k launch caps at 48 CTAs on GB10, and its fallback
+  # wants 128 KB of shared memory where GB10 offers ~99 KB — the same smem wall
+  # overlay layer v8 works around for the KV tile.
+  #
+  # WHAT WE ACTUALLY KNOW, stated carefully because it is easy to over-read:
+  #     max_model_len 491,520 + a ~367K-token prompt -> 59 CTAs -> FAILED
+  #     max_model_len 327,680 + a  294,828-token prompt      -> SERVED
+  # BOTH variables differ between those runs, so this does NOT establish which
+  # one drives the CTA count. An earlier revision of this comment claimed the
+  # driver is max_model_len and derived a "~400K ceiling" from it; that was a
+  # confounded inference and has been removed. The only sound conclusions are
+  # that 327,680 is validated and 491,520 is not.
+  #
+  # (For the same reason, do not trust the token counts in older notes: this
+  # filler prose runs ~5.31 chars/token, not the ~4 first assumed, which is what
+  # made the failing prompt look like 487K when it was ~367K.)
+  #
+  # To find the real ceiling, vary ONE of them at a time and probe each with a
+  # long prefill. Upstream's 262144 was evidently not arbitrary either.
+  #
+  # THE LESSON, and why the recipe says this twice: a config here can boot,
+  # profile, allocate, pass /health and answer short prompts while being unable
+  # to serve the window it advertises. Only a long-prefill probe finds it — so
+  # if you raise this value, raise it with evidence from
+  # scripts/needle-probe.py, never with arithmetic.
+  # ========================================================================
+  #
+  # Superseded reasoning, kept because it is still true and still bounds us:
+  #
+  # KV itself is astonishingly cheap here: ~148,131 tokens/GiB, because fp8 over
+  # MLA's compressed latent costs roughly two orders of magnitude less per token
+  # than an ordinary cache. On that arithmetic alone the full native 1,048,576
+  # window looks like it fits in ~7 GiB, and 1M was tried on exactly that basis.
+  #
+  # It does not fit, and the reason is the GLM-5.2 lesson once more: PEAK
+  # ACTIVATION GROWS WITH THE WINDOW, so the pool shrinks precisely as the
+  # requirement rises. Measured at gmu 0.87:
+  #     max_model_len 262144 -> peak activation 2.63 GiB -> KV 7.32 GiB
+  #     max_model_len 1048576 -> peak activation 6.80 GiB -> KV 3.15 GiB
+  # and vLLM refused to start:
+  #     ValueError: To serve at least one request with the model's max seq len
+  #     (1048576), 6.1 GiB KV cache is needed, which is larger than the available
+  #     KV cache memory (3.15 GiB). Based on the available memory, the estimated
+  #     maximum model length is 520704.
+  #
+  # 520,704 is vLLM's own activation-aware ceiling — a MEMORY bound, and not the
+  # binding one: 491,520 sits under it and still failed, in the kernel. Both are
+  # recorded because they are independent walls and a future change (a bigger
+  # gmu, a kernel fix) moves only one of them. Neither is a licence to raise the
+  # window without a probe.
+  #
+  # Superseded note, wrong but instructive: an earlier revision set 480K here on
+  # the memory arithmetic alone. It booted, allocated, and served short prompts —
+  # and could not serve its own window. Raise this value with a long-prefill
+  # needle probe, never with arithmetic.
+  #
+  # If you do want more window, --max-num-batched-tokens is the lever for the
+  # MEMORY wall (it is what the indexer workspace scales with; it took GLM-5.2
+  # from 256K to 320K). It does NOT move the 48-CTA kernel wall, which is set by
+  # sequence length and GB10's SM count. That one needs a kernel fix upstream.
+  max_model_len: 327680
   max_num_seqs: 6
   # 2304 = 9 x 256. Load-bearing: must be a multiple of BOTH 256 (index pool
   # alignment) and 128 (MLA alignment). Not a tuning knob — changing it to a

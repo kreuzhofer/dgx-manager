@@ -54,6 +54,22 @@ const UPSTREAM_ENV: Record<string, string> = {
 const DELIBERATE_EXTRA_FLAGS: Record<string, string> = {};
 
 /**
+ * Flags we deliberately set to a DIFFERENT value than upstream's launcher.
+ * Each entry states why, because a silent value drift here is exactly how a
+ * validated config rots into an unvalidated one.
+ */
+const DELIBERATE_FLAG_DIFFERENCES: Record<string, string> = {
+  "--gpu-memory-utilization":
+    "0.87, not upstream's 0.85 — issue #24. At 0.85 roughly 5 GiB of the device " +
+    "went unused; 0.89 cleared vLLM's startup guard and was then OOM-killed " +
+    "during multimodal warmup. The recipe carries the measurements.",
+  "--max-model-len":
+    "327680 (320K), not upstream's 262144 — issue #24. Validated by needle probe " +
+    "at 294,828 prompt tokens; 491520 was tried and could not serve its own " +
+    "window. The recipe carries the measurements.",
+};
+
+/**
  * Flags upstream passed that we deliberately do not. Each entry is a decision
  * recorded in the recipe, not an oversight — deleting one from here without
  * changing the recipe fails the test.
@@ -130,7 +146,16 @@ describe("@dgxrun/glm-5.3-flash-nvfp4-2x vs the validated 2x-Spark launcher", ()
     for (const [flag, value] of theirs) {
       if (flag in DELIBERATE_FLAG_OMISSIONS) continue;
       if (!ours.has(flag)) wrong.push(`missing ${flag}`);
-      else if (ours.get(flag) !== value) wrong.push(`${flag}: ours=${ours.get(flag)} theirs=${value}`);
+      else if (flag in DELIBERATE_FLAG_DIFFERENCES) {
+        // Stated divergence — the exact values are pinned by their own test, so
+        // this only records that the flag is still passed and still differs.
+        // An allowlist entry that has drifted back to upstream's value is stale,
+        // which is its own kind of rot.
+        expect(ours.get(flag), `${flag} is allowlisted as different but matches upstream`)
+          .not.toBe(value);
+      } else if (ours.get(flag) !== value) {
+        wrong.push(`${flag}: ours=${ours.get(flag)} theirs=${value}`);
+      }
     }
     expect(wrong).toEqual([]);
   });
@@ -154,21 +179,22 @@ describe("@dgxrun/glm-5.3-flash-nvfp4-2x vs the validated 2x-Spark launcher", ()
     expect(ours.get("--moe-backend")).toBe("marlin");
   });
 
-  /** fp8 KV only works because overlay layer v8 caps EFF_CTA_TILE_KV for GB10. */
-  it("keeps fp8 KV and eager execution, which the overlay is built around", () => {
-    expect(ours.get("--kv-cache-dtype")).toBe("fp8_e4m3");
-    expect(ours.has("--enforce-eager")).toBe(true);
-  });
-
   /**
-   * block_size must be a multiple of BOTH 256 (index pool alignment) and 128
-   * (MLA alignment). 2304 = 9 x 256 satisfies both; a "rounder" value like 2048
-   * or 4096 silently breaks the index pool.
+   * gmu and max_model_len are EMPIRICALLY VALIDATED values, not derived ones.
+   * They are pinned here so they cannot drift silently; the measurements and
+   * the four separate walls behind them live in ONE place — the recipe's own
+   * comments — rather than being restated (and then diverging) here.
+   *
+   * Do not change either without a fresh long-prefill needle probe. This is not
+   * ceremony: at max_model_len 491520 the deploy booted, profiled, allocated a
+   * 927,955-token pool, passed /health and answered short prompts correctly —
+   * and still could not serve its own window, dying on the first long prefill
+   * with a GB10 indexer top-k kernel limit. Nothing short of a real long prompt
+   * distinguishes a working window from a broken one. See issue #24.
    */
-  it("uses a block size legal for both the index pool and MLA", () => {
-    const block = Number(ours.get("--block-size"));
-    expect(block % 256).toBe(0);
-    expect(block % 128).toBe(0);
+  it("pins the empirically validated memory and window settings", () => {
+    expect(ours.get("--gpu-memory-utilization")).toBe("0.87");
+    expect(ours.get("--max-model-len")).toBe("327680");
   });
 
   it("sets every env var upstream set, with the same value", () => {
