@@ -50,6 +50,20 @@ export function loadDgxrunCatalog(dir: string, deps: CatalogDeps = {}): CatalogR
       console.warn(`[dgxrun-catalog] skip ${f}: not runner:dgxrun`);
       continue;
     }
+    // `arch` and `cluster_only` are recipe-declared, with the pre-existing
+    // values as defaults. Every recipe written before these fields existed
+    // targets the arm64 Sparks in a multi-node cluster, so an omitted field
+    // must keep meaning exactly that — the amd64 single-GPU host is the case
+    // that has to opt in.
+    //
+    // An unrecognised arch is dropped rather than defaulted: silently routing
+    // a typo'd recipe to the wrong hardware is the failure this field exists
+    // to prevent.
+    const arch = o.arch === undefined ? "arm64" : o.arch;
+    if (arch !== "amd64" && arch !== "arm64") {
+      console.warn(`[dgxrun-catalog] skip ${f}: arch must be amd64 or arm64, got ${JSON.stringify(o.arch)}`);
+      continue;
+    }
     const d = (o.defaults && typeof o.defaults === "object" ? o.defaults : {}) as Record<string, unknown>;
     out.push({
       file: `@dgxrun/${base}`,
@@ -58,8 +72,8 @@ export function loadDgxrunCatalog(dir: string, deps: CatalogDeps = {}): CatalogR
       model: typeof o.model === "string" ? o.model : undefined,
       container: "dgxrun",
       source: "dgxrun",
-      arch: "arm64",
-      cluster_only: true,
+      arch,
+      cluster_only: o.cluster_only === undefined ? true : o.cluster_only === true,
       defaults: {
         tensor_parallel: d.tensor_parallel ?? 4,
         gpu_memory_utilization: d.gpu_memory_utilization ?? 0.85,
