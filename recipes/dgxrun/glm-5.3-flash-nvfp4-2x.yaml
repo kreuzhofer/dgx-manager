@@ -267,10 +267,28 @@ command: |
 #
 # GLM-5.3 defaults `clear_thinking` to FALSE and adds `reasoning_effort`
 # (low|high|max, defaulting to max). Neither is pinned here because neither is
-# validated against this quant's template yet. Relevant known hazard: LibertAI's
-# own model card recommends `--reasoning-parser deepseek_r1` rather than glm45
-# for their NVFP4 export, on the grounds that the template emits <think> as the
-# last prompt token so glm45 never opens a span and DISCARDS THE WHOLE REPLY.
-# Upstream's 2x-Spark launcher nonetheless runs glm45 successfully against this
-# same repo, so glm45 is what ships here — but if first responses come back
-# empty, that is the first thing to switch, not a model problem.
+# validated against this quant's template yet.
+#
+# --reasoning-parser stays glm45, matching upstream. Do NOT "fix" this to
+# deepseek_r1 — that was tried and measured, and it changes nothing. See #25.
+#
+# The temptation is real: this quant's chat_template.jinja ends
+#     {%- if add_generation_prompt -%}
+#         <|assistant|>{{- '<think>' -}}
+#     {%- endif -%}
+# so `<think>` is the last PROMPT token — generation starts INSIDE the reasoning
+# span and the model only ever emits the closing `</think>`. That is the
+# DeepSeek-R1 convention, and LibertAI's own model card recommends deepseek_r1
+# for this export on exactly that reasoning.
+#
+# It does not matter. Measured back-to-back on identical prompts at temp 0:
+#     glm45       -> reasoning 311 chars, content 402, completion_tokens 317
+#     deepseek_r1 -> reasoning 311 chars, content 404, completion_tokens 314
+# glm45 splits this template correctly already.
+#
+# The bug report that prompted the change was a MEASUREMENT error, not a model
+# defect: it read `reasoning_content`, which this vLLM does not return. The
+# field is `reasoning`. Reading the wrong key yields empty for every parser,
+# which then looks like "the reasoning was silently discarded". Nothing is
+# discarded. If you are auditing token accounting here, note also that this
+# markdown output runs ~2.28 chars/token, not 4.
