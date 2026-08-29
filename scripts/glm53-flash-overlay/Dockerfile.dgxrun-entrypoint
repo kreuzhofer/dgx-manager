@@ -1,0 +1,15 @@
+ARG FROM_TAG=glm53:sm121-v8
+FROM ${FROM_TAG}
+
+# The ONLY layer in this overlay that is ours rather than vendored.
+#
+# dgxrun passes the entire serve argv as the container COMMAND and appends the
+# rank flags to it (--nnodes/--node-rank/--master-addr/--master-port/--headless),
+# so the recipe's `vllm serve {model} …` must be argv[0..]. The official
+# vllm/vllm-openai image entrypoints straight into the server, which would make
+# that land as arguments *to* an already-running serve.
+#
+# Every other dgxrun container on this cluster is entrypoint-less. Resetting it
+# here keeps GLM-5.3-Flash a normal recipe instead of the one recipe that has to
+# know its image is shaped differently.
+ENTRYPOINT []
