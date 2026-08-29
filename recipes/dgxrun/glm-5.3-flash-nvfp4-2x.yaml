@@ -1,0 +1,164 @@
+# @dgxrun/glm-5.3-flash-nvfp4-2x — GLM-5.3-Flash (NVFP4) on TWO Sparks.
+#
+# 320B total / 18B active, hybrid KDA + sparse-MLA, natively multimodal, 1M-token
+# native window. At NVFP4 the weights are ~182 GB, i.e. ~85 GiB per rank at TP2 —
+# so this leaves two Sparks free, unlike every GLM-5.2 recipe here which takes
+# the whole pool.
+#
+# ============================ NOT A GLM-5.2 VARIANT ============================
+# GLM-5.3-Flash is `glm5_next` (Glm5NextForConditionalGeneration): 45 layers,
+# hidden 4096, 288 experts, 34 KDA linear-attention layers + 11 full sparse-MLA
+# layers, and NoPE MLA (qk_rope_head_dim = 0). GLM-5.2/5.3 are `glm_moe_dsa`:
+# 78 layers, hidden 6144, 256 experts, uniform DSA with a real RoPE dim.
+#
+# Nothing transfers. Not the container, not the CosmicRaisins sm12x kernels, not
+# b12x, not the B12X_MLA_SPARSE backend, not the index_topk_pattern override, not
+# DCP. The GLM-5.2 image does not contain the `glm5_next` model class at all —
+# vLLM 0.28.0 *release* does not either. Do not "adapt" a GLM-5.2 recipe to this
+# model; you will get a config that cannot load and a long afternoon.
+#
+# Container: built by scripts/build-glm53-flash-image.sh from vLLM's own day-0
+# arm64 image plus the vendored sm_121 overlay (scripts/glm53-flash-overlay/).
+# Unlike the GLM-5.2 image this involves no CUDA compile — it is a pull plus
+# eight Python/pip layers.
+# ===============================================================================
+#
+# Ported from barrydeen/glm53-flash-dgx-spark @ c267f9f (MIT), which validated
+# this exact shape on 2x GB10. Deviations from that launcher, all deliberate:
+#
+#   1. Fabric env (NCCL_IB_HCA / *_SOCKET_IFNAME / GLOO_*) is injected by dgxrun,
+#      not written here — upstream's values name a different fleet's NICs.
+#   2. `--distributed-executor-backend mp` and the rank flags (--nnodes,
+#      --node-rank, --master-addr, --master-port, --headless) come from dgxrun.
+#   3. Weights resolve from the shared HF cache via `model:` rather than a
+#      bind-mounted /models path.
+#   4. No DFlash2 — see "SPECULATIVE DECODING" below.
+#
+# NODES: build and deploy on exactly the two nodes the image was built on.
+# There is no cluster-wide distribution step; a node without
+# vllm-glm53-flash-sm121:probe refuses the deploy (dgxrun requires the image
+# locally and fails fast).
+recipe_version: "2"
+runner: dgxrun
+maxoutmem: true
+model: LibertAIDAI/GLM-5.3-Flash-NVFP4
+runtime: vllm
+container: vllm-glm53-flash-sm121:probe
+cluster_only: true
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 2
+  # 0.85 is upstream's validated value and reserves headroom on the unified pool.
+  # NOTE the GLM-5.2 lesson does NOT apply here: those recipes run 0.88 because
+  # vLLM's startup guard compares gmu*total against CUDA-visible free. That guard
+  # is about the *floor*; 0.85 clears it by a wide margin at this weight size.
+  gpu_memory_utilization: 0.85
+  # 262144, not the model's native 1,048,576. The 1M configs published so far are
+  # TP4 (4 ranks of KV pool); at TP2 the pool is half the size. 256K is what
+  # upstream needle-tested on two Sparks. Raising it is a measurement, not an
+  # edit — and it must be measured under concurrent traffic, because on GB10 a
+  # KV pool that allocates cleanly can still fail under real long prefills.
+  max_model_len: 262144
+  max_num_seqs: 6
+  # 2304 = 9 x 256. Load-bearing: must be a multiple of BOTH 256 (index pool
+  # alignment) and 128 (MLA alignment). Not a tuning knob — changing it to a
+  # "rounder" number breaks one of the two alignments.
+  block_size: 2304
+  served_model_name: glm-5.3-flash
+env:
+  # FlashInfer autotunes its kernel variants on first boot with no cached result.
+  # That presents as a 60+ minute "No available shared memory broadcast block
+  # found" loop with the worker at 150%+ CPU. It is NOT a hang. The caches are
+  # container-local (this fleet has scar tissue about JIT caches on NFS — see the
+  # GLM-5.2 load failures), so budget it on every cold launch, not just the first.
+  VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  TORCH_CUDA_ARCH_LIST: "12.1a"
+  FLASHINFER_CUDA_ARCH_LIST: "12.1a"
+  # The overlay pins FlashInfer to a nightly (0.6.18.dev20260819); its own version
+  # check rejects the pin it needs.
+  FLASHINFER_DISABLE_VERSION_CHECK: "1"
+  NCCL_NVLS_ENABLE: "0"
+  TORCH_NCCL_ASYNC_ERROR_HANDLING: "1"
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      --trust-remote-code \
+      --tensor-parallel-size {tensor_parallel} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --max-model-len {max_model_len} \
+      --max-num-seqs {max_num_seqs} \
+      --block-size {block_size} \
+      --moe-backend marlin \
+      --kv-cache-dtype fp8_e4m3 \
+      --enforce-eager \
+      --tool-call-parser glm47 \
+      --enable-auto-tool-choice \
+      --reasoning-parser glm45
+#
+# ------------------------------- LOAD-BEARING ---------------------------------
+#
+# --moe-backend marlin
+#   THE most important flag in this file. Left to auto-select, vLLM picks
+#   FLASHINFER_CUTLASS for the NVFP4 MoE, which on GB10 produces degenerate
+#   output — repeated-token loops from the very first generated token — with
+#   ZERO errors. The model loads, /health passes, the gateway publishes it, and
+#   every completion is garbage. This is the silent-degradation case Principle 3
+#   exists for, so it is pinned rather than discovered.
+#
+# --enforce-eager
+#   CUDA graphs are not viable on this stack. Costs decode speed and is the first
+#   thing to revisit once the deploy is stable — but it is what upstream measured,
+#   and "it booted without graphs" is a different claim from "it works with them".
+#
+# --kv-cache-dtype fp8_e4m3
+#   Requires overlay layer v8 (EFF_CTA_TILE_KV capped at 32 for GB10's ~101 KB
+#   opt-in smem). Without v8 this dies in warmup with cudaFuncSetAttribute
+#   "invalid argument". Do not enable fp8 KV against a partially-built overlay.
+#
+# Deliberately NOT set: --kv-cache-memory-bytes. Every GLM-5.2 recipe here pins
+# it, which makes omitting it look like an oversight. It is not — upstream is
+# explicit that vLLM should auto-compute the pool for this model, and a hand-set
+# value is how you get a pool that allocates and then fails under load.
+#
+# --------------------------- SPECULATIVE DECODING -----------------------------
+#
+# There is none yet, and that is a deliberate first-bring-up choice rather than
+# an omission. Expect decode well below the published figures until this is
+# resolved; the numbers quoted for this model (24.7 code / 30.3 structured tok/s
+# at TP2) are all *with* spec decode.
+#
+# Two options, neither yet measured on our fleet:
+#
+#   1. Native MTP. The checkpoint carries num_nextn_predict_layers: 1, and the
+#      published TP4 recipe drives it with method "mtp" at 4-5 draft tokens.
+#      Free (no extra weights, no extra licence) but unvalidated at TP2 on this
+#      overlay.
+#   2. DFlash2 via incoai/GLM-5.3-Flash-DFlash2. This is what upstream actually
+#      measured here, but it needs a ninth overlay layer porting an UNMERGED vLLM
+#      PR (#52816), and the draft checkpoint is CC-BY-NC-ND-4.0 against an MIT
+#      target — a licence asymmetry worth a deliberate decision, not a default.
+#
+# Try (1) first: it is a one-line --speculative-config on this same image.
+#
+# ------------------------------ MULTIMODAL ------------------------------------
+#
+# This is the first natively multimodal model on the cluster (image + video).
+# Vision requests additionally need `--chat-template chat_template_mm.jinja`,
+# which is NOT set here — text-only is the smaller, testable first step, and the
+# gateway publishes a text completion surface today regardless.
+#
+# ------------------------------- CHAT TEMPLATE --------------------------------
+#
+# GLM-5.3 defaults `clear_thinking` to FALSE and adds `reasoning_effort`
+# (low|high|max, defaulting to max). Neither is pinned here because neither is
+# validated against this quant's template yet. Relevant known hazard: LibertAI's
+# own model card recommends `--reasoning-parser deepseek_r1` rather than glm45
+# for their NVFP4 export, on the grounds that the template emits <think> as the
+# last prompt token so glm45 never opens a span and DISCARDS THE WHOLE REPLY.
+# Upstream's 2x-Spark launcher nonetheless runs glm45 successfully against this
+# same repo, so glm45 is what ships here — but if first responses come back
+# empty, that is the first thing to switch, not a model problem.
