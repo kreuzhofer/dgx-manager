@@ -49,8 +49,10 @@ export type AccuracyMetric = {
 export type ExtractionFailure = {
   task: string;
   metric: string;
-  zeroFilters: string[];
+  /** null for a metric with no named filter - distinct from "every filter". */
+  zeroFilters: (string | null)[];
   bestValue: number;
+  bestFilter: string | null;
 };
 
 export type ToolEvalCategory = {

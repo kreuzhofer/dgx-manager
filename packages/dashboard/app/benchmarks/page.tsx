@@ -251,7 +251,19 @@ export default function BenchmarksPage() {
                       {r.kind === "tool-eval"
                         ? (r.toolEvalScore != null ? `${r.toolEvalScore}/100` : "—")
                         : r.kind === "accuracy"
-                        ? (r.accuracyScore != null ? `${r.accuracyScore.toFixed(1)}/100` : "—")
+                        ? (r.accuracyScore != null ? (
+                            <>
+                              {r.accuracyScore.toFixed(1)}/100
+                              {(r.extractionFailures?.length ?? 0) > 0 && (
+                                <span
+                                  className="ml-1 text-amber-400"
+                                  title="Answer extraction may have failed - this score may not reflect the model"
+                                >
+                                  &#9888;
+                                </span>
+                              )}
+                            </>
+                          ) : "—")
                         : (r.meanTps != null ? r.meanTps.toFixed(1) : "—")}
                     </td>
                     <td className="px-4 py-3 text-right font-mono">

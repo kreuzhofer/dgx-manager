@@ -33,8 +33,10 @@ export function AccuracyResultCard({ run }: { run: BenchmarkRun }) {
           <ul className="mt-2 space-y-0.5 font-mono text-xs text-amber-200/70">
             {failures.map((f, i) => (
               <li key={`${f.task}-${f.metric}-${i}`}>
-                {f.task} / {f.metric}: {f.zeroFilters.filter(Boolean).join(", ") || "all filters"} at 0.0
-                {f.bestValue > 0 && ` (best filter: ${(f.bestValue * 100).toFixed(1)})`}
+                {f.task} / {f.metric}:{" "}
+                {f.zeroFilters.map((n) => n ?? "unnamed filter").join(", ")} at 0.0
+                {f.bestValue > 0 &&
+                  ` (best: ${f.bestFilter ?? "unnamed filter"} at ${(f.bestValue * 100).toFixed(1)})`}
               </li>
             ))}
           </ul>

@@ -13,10 +13,15 @@ import type { AccuracyMetricInput } from "./lm-eval-parser.js";
 export type ExtractionFailure = {
   task: string;
   metric: string;
-  /** Filters that returned exactly 0 (empty string for an unnamed filter). */
-  zeroFilters: string[];
+  /** Filters that returned exactly 0. Carries the parser's own representation -
+   *  null for a metric with no `,<filter>` suffix - rather than re-encoding it,
+   *  so "unnamed filter" cannot be confused with "every filter". */
+  zeroFilters: (string | null)[];
   /** Highest value any filter of this metric reached; 0 when all of them failed. */
   bestValue: number;
+  /** Filter that reached bestValue, so a caller can name it rather than
+   *  reporting a bare number under a label that promises a name. */
+  bestFilter: string | null;
 };
 
 /**
@@ -26,11 +31,19 @@ export type ExtractionFailure = {
  * Two shapes qualify:
  *   - a filter at exactly 0 alongside a sibling filter above 0, which means the
  *     answer was there and one filter could not see it;
- *   - every filter at exactly 0, where nothing was extracted at all.
+ *   - two or more filters all at exactly 0, where nothing was extracted at all.
+ *
+ * A LONE zero qualifies as neither. With one filter and no sibling there is no
+ * evidence the answer was extractable at all, so reporting it would fire on
+ * every legitimately-zero metric - and a warning that cries wolf is worse than
+ * no warning, since this one exists precisely to be trusted.
  *
  * Exactly 0 is the signal rather than "low": a model that knows even a fraction
  * of the answers still produces some matches, so a clean zero over a whole
  * dataset is a harness result, not a model result.
+ *
+ * Filters are only compared within the same sample count - a value measured over
+ * 3 items says nothing about one measured over 198.
  *
  * Pure over parsed metrics, so it applies to an already-stored result without
  * re-running anything.
@@ -40,7 +53,7 @@ export function detectExtractionFailures(
 ): ExtractionFailure[] {
   const groups = new Map<string, AccuracyMetricInput[]>();
   for (const m of metrics) {
-    const key = `${m.task}\u0000${m.metric}`;
+    const key = `${m.task}\u0000${m.metric}\u0000${m.nSamples ?? ""}`;
     const g = groups.get(key);
     if (g) g.push(m);
     else groups.set(key, [m]);
@@ -50,11 +63,17 @@ export function detectExtractionFailures(
   for (const rows of groups.values()) {
     const zeros = rows.filter((r) => r.value === 0);
     if (zeros.length === 0) continue;
+    // Either a sibling proves the answer was extractable, or several filters
+    // agree they found nothing. One filter alone proves neither.
+    const hasNonZeroSibling = zeros.length < rows.length;
+    if (!hasNonZeroSibling && rows.length < 2) continue;
+    const best = rows.reduce((a, b) => (b.value > a.value ? b : a));
     out.push({
       task: rows[0].task,
       metric: rows[0].metric,
-      zeroFilters: zeros.map((r) => r.filter ?? ""),
-      bestValue: Math.max(...rows.map((r) => r.value)),
+      zeroFilters: zeros.map((r) => r.filter),
+      bestValue: best.value,
+      bestFilter: best.filter,
     });
   }
   return out;

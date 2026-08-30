@@ -55,6 +55,23 @@ describe("detectExtractionFailures", () => {
     ).toEqual([]);
   });
 
+  // A warning that fires on legitimate zeros trains you to ignore it. A metric
+  // with ONE filter at zero carries no evidence either way: nothing scored
+  // above zero to prove the answer was extractable. Only a non-zero sibling, or
+  // two-plus filters agreeing on zero, distinguishes "not found" from "wrong".
+  it("does not flag a lone zero with no sibling to contradict it", () => {
+    expect(detectExtractionFailures([row({ filter: "none", value: 0 })])).toEqual([]);
+  });
+
+  it("does not compare filters that scored over different sample counts", () => {
+    expect(
+      detectExtractionFailures([
+        row({ filter: "strict-match", value: 0, nSamples: 198 }),
+        row({ filter: "flexible-extract", value: 0.5, nSamples: 3 }),
+      ]),
+    ).toEqual([]);
+  });
+
   it("does not flag a single filter that scored above zero", () => {
     expect(detectExtractionFailures([row({ filter: "none", value: 0.42 })])).toEqual([]);
   });
