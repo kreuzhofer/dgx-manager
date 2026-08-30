@@ -56,6 +56,21 @@ describe("applyNoTimeouts", () => {
     expect(s.headersTimeout).toBe(0);
     expect(s.timeout).toBe(0);
   });
+
+  // keepAliveTimeout was MISSED by the original fix and is the reason a GPQA
+  // longgen run died at 193/198 after 3h50m with ServerDisconnectedError, having
+  // survived the tail that killed every previous attempt. It is not a request
+  // timeout, which is why it slipped through: it closes an IDLE pooled connection
+  // after 5 s. lm-eval's aiohttp pools connections, so on the slow tail — where
+  // gaps between requests exceed 5 s — the client reuses a socket Node has just
+  // closed, and the whole run dies one item from the end.
+  it("disables keepAliveTimeout, which closes IDLE pooled connections", () => {
+    const s = http.createServer(() => {});
+    servers.push(s);
+    expect(s.keepAliveTimeout).toBeGreaterThan(0); // Node default 5000ms
+    applyNoTimeouts(s);
+    expect(s.keepAliveTimeout).toBe(0);
+  });
 });
 
 describe("reasoning proxy forwarding", () => {
