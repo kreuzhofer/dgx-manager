@@ -216,6 +216,14 @@ defaults:
   # time, so 4 is not obviously too many — but tune against
   # vllm:spec_decode_num_{accepted,draft}_tokens_total, never by intuition, and
   # re-check the KV pool afterwards.
+  #
+  # THE 45.4% ABOVE IS THE PESSIMISTIC CASE. Sampled mid-GPQA under batch load
+  # (see BENCHMARKS at the foot of this file), acceptance was 255,458/356,264 =
+  # **71.7%**, with ~98-106 tok/s aggregate throughput across ~8 sequences vs
+  # 22-26 tok/s single-stream. Long chain-of-thought is far more predictable for
+  # the draft head than the short prose answers the 45.4% was measured on, so
+  # MTP is worth materially more on reasoning workloads than the single-stream
+  # figure suggests. Which number applies depends entirely on your traffic.
   num_speculative_tokens: 4
   # 2304 = 9 x 256. Load-bearing: must be a multiple of BOTH 256 (index pool
   # alignment) and 128 (MLA alignment). Not a tuning knob — changing it to a
@@ -337,3 +345,47 @@ command: |
 # which then looks like "the reasoning was silently discarded". Nothing is
 # discarded. If you are auditing token accounting here, note also that this
 # markdown output runs ~2.28 chars/token, not 4.
+#
+# ------------------------------- BENCHMARKS -----------------------------------
+#
+# GPQA-Diamond (CoT, zero-shot): 81.31 +/- 2.78   [2026-08-30]
+#     preset acc-gpqa-diamond-full-longgen, 198/198 items, seed 42,
+#     maxGenToks 32768, numConcurrent 16, timeout 7200s, 5h37m,
+#     0 timeouts / 0 retries.
+#
+# For context, measured on this same cluster:
+#     qwen3.8-27b (bf16 and nvfp4)   76.77   longgen 32k
+#     GLM-5.2 quanttrio dcp2 320k    67.68   full 4k   <- SEE CAVEAT
+#     deepseek-v4-flash              55.05   full 4k
+#     muse-glimmer-30b               22.73   longgen 32k
+#
+# CAVEAT on the GLM-5.2 comparison: 67.68 was measured with a 4k generation cap.
+# That cap badly suppresses reasoning models — muse-glimmer went 10.61 -> 22.73
+# on the identical task purely by moving 4k -> 32k. GLM-5.2's number is very
+# likely understated, so the +13.6 gap is an UPPER bound until GLM-5.2 is re-run
+# at longgen. Do not quote it as a like-for-like result.
+#
+# 81.31 IS A FLOOR, NOT A POINT ESTIMATE. The run log carries 23 occurrences of
+# "returned null content" — 11.6% of items produced nothing extractable and were
+# scored WRONG rather than skipped. Those are the long tail hitting the 32,768
+# cap: at reasoning_effort=max (the default), 32k is still not enough for about
+# an eighth of GPQA. A larger cap would probably raise this number.
+#
+# Read the flexible-extract metric, not strict-match. strict-match reads 0.0354
+# here, which measures answer-format compliance, not capability: the model
+# reasons at length and rarely emits the exact expected envelope. qwen3.8-27b
+# shows the same split (0.0202 strict / 0.7677 flexible), so this is a property
+# of the harness, not of GLM.
+#
+# REPRODUCING IT — the eval config is load-bearing, not incidental:
+#   - timeout MUST exceed queue wait + generation. The 1800s default livelocks:
+#     items needing ~2340s of generation time out, get retried, and the retries
+#     stack on live work until throughput collapses. Our first attempt showed
+#     122 server-side completions against 53 counted by the client before it was
+#     killed. Comparing those two counters is how you detect this; GPU
+#     utilisation looks perfectly healthy throughout.
+#   - numConcurrent 16 with a matching --max-num-seqs 16 override at deploy time
+#     (the shipped recipe serves at 6). vLLM still only admits ~8 at a 32k
+#     reservation, so KV is the real limit; raising max_num_seqs further does
+#     nothing without more pool.
+#   - serial (numConcurrent 1) projects 21-30h. Batched: 5h37m.
