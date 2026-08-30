@@ -2,6 +2,7 @@ import express, { type Request, type Response } from "express";
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { prisma } from "../prisma.js";
+import { extractionFailuresFor } from "../benchmarks/extraction-failure.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import {
   BENCHMARK_PRESETS,
@@ -68,7 +69,9 @@ benchmarksRouter.get("/", async (req, res) => {
     orderBy: { createdAt: "desc" },
     include: { deployment: { include: { node: true, model: true } } },
   });
-  res.json(runs);
+  // Derived, not stored: a score whose extraction failed looks identical to a
+  // genuine one, and deriving on read means historical runs are checked too.
+  res.json(runs.map((r) => ({ ...r, extractionFailures: extractionFailuresFor(r.accuracyMetrics) })));
 });
 
 /**
@@ -137,7 +140,7 @@ benchmarksRouter.get("/:id", async (req, res) => {
     },
   });
   if (!run) return res.status(404).json({ error: "not found" });
-  res.json(run);
+  res.json({ ...run, extractionFailures: extractionFailuresFor(run.accuracyMetrics) });
 });
 
 /**

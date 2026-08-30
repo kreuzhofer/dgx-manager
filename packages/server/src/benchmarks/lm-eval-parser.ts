@@ -5,6 +5,13 @@ export type AccuracyMetricInput = {
   stderr: number | null;
   isGroup: boolean;
   nSamples: number | null;
+  /** The extraction filter that produced this value ("strict-match",
+   *  "flexible-extract", "none"…), or null when the key carried no `,<filter>`
+   *  suffix. Without it two rows of the same metric are indistinguishable, and
+   *  which filter produced a 0.0 is exactly what separates "the model got none
+   *  right" from "we could not find the model's answer". Absent on rows stored
+   *  before this field existed, so consumers must tolerate null. */
+  filter: string | null;
 };
 
 export type LmEvalSummary = {
@@ -74,6 +81,9 @@ export function parseLmEvalResults(
         stderr: numOrNull(entry[stderrKey]),
         isGroup,
         nSamples,
+        // `filter` still carries the leading comma here because it builds the
+        // stderr key; the stored form drops it.
+        filter: filter === "" ? null : filter.slice(1),
       });
     }
   }

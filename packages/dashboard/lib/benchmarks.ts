@@ -39,6 +39,18 @@ export type AccuracyMetric = {
   stderr: number | null;
   isGroup: boolean;
   nSamples: number | null;
+  /** Extraction filter that produced this value ("strict-match",
+   *  "flexible-extract"...). Absent on rows stored before it was recorded. */
+  filter?: string | null;
+};
+
+/** A metric whose zero is better explained by failed answer extraction than by
+ *  the model getting answers wrong. Derived server-side on read. */
+export type ExtractionFailure = {
+  task: string;
+  metric: string;
+  zeroFilters: string[];
+  bestValue: number;
 };
 
 export type ToolEvalCategory = {
@@ -78,6 +90,8 @@ export type BenchmarkResult = {
 };
 
 export type BenchmarkRun = {
+  /** Derived on read; absent from older API responses. */
+  extractionFailures?: ExtractionFailure[];
   id: string;
   deploymentId: string | null;
   presetId: string | null;

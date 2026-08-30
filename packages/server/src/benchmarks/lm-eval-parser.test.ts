@@ -112,3 +112,39 @@ describe("multi-filter headline selection (GPQA-style)", () => {
     expect(parseLmEvalResults(raw, "t", "exact_match").primaryScore).toBeCloseTo(50, 5);
   });
 });
+
+describe("extraction filter identity", () => {
+  // lm-eval reports the same metric once per extraction filter. Which filter
+  // produced a value is what tells you whether a 0.0 means "the model got none
+  // right" or "we could not find its answer" — GPQA reports exact_match under
+  // both strict-match and flexible-extract, and only the filter name
+  // distinguishes the two rows.
+  const twoFilters = JSON.stringify({
+    results: {
+      gpqa: {
+        "exact_match,strict-match": 0,
+        "exact_match_stderr,strict-match": 0,
+        "exact_match,flexible-extract": 0.227,
+        "exact_match_stderr,flexible-extract": 0.029,
+      },
+    },
+  });
+
+  it("reports a null filter for a metric with no `,<filter>` suffix", () => {
+    const json = JSON.stringify({ results: { t: { acc: 0.5, acc_stderr: 0.01 } } });
+    const { metrics } = parseLmEvalResults(json, "t", "acc");
+    expect(metrics.find((m) => m.metric === "acc")!.filter).toBeNull();
+  });
+
+  it("records which filter produced each metric", () => {
+    const { metrics } = parseLmEvalResults(twoFilters, "gpqa", "exact_match");
+    const strict = metrics.find((m) => m.filter === "strict-match")!;
+    const flexible = metrics.find((m) => m.filter === "flexible-extract")!;
+    expect(strict.value).toBe(0);
+    expect(flexible.value).toBeCloseTo(0.227, 5);
+    // the metric NAME still has the suffix stripped
+    expect(strict.metric).toBe("exact_match");
+    expect(flexible.metric).toBe("exact_match");
+  });
+});
+
