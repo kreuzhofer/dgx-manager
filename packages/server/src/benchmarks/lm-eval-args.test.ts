@@ -127,3 +127,31 @@ describe("--log_samples", () => {
     expect(args[args.indexOf("--output_path") + 1]).toBe(target.outputDir);
   });
 });
+
+describe("system instruction plumbing", () => {
+  const base: AccuracyConfig = { tasks:["gpqa"], primaryTask:"gpqa", primaryMetric:"exact_match", limit:null, numFewshot:null, maxGenToks:2048, applyChatTemplate:true, reasoning:true, seed:1 };
+  const tgt = { baseUrl:"http://h/v1", modelName:"m", outputDir:"/o" };
+  const valueAfterFlag = (cfg: AccuracyConfig, flag: string) => {
+    const a = buildLmEvalArgs(cfg, tgt); const i = a.indexOf(flag);
+    return i < 0 ? undefined : a[i + 1];
+  };
+
+  // The GPQA task's prompt never states an answer format - it ends "Let's think
+  // step by step: " and relies on the model spontaneously writing "The answer is
+  // (C)". Models that phrase it otherwise score zero on strict-match however
+  // correct they are. lm-eval exposes --system_instruction for exactly this.
+  it("omits the flag entirely when no instruction is configured", () => {
+    expect(buildLmEvalArgs(base, tgt)).not.toContain("--system_instruction");
+  });
+
+  it("passes a configured instruction through verbatim", () => {
+    const text = "End with: The answer is (X)";
+    expect(valueAfterFlag({ ...base, systemInstruction: text }, "--system_instruction")).toBe(text);
+  });
+
+  it("ignores an empty or whitespace-only instruction", () => {
+    expect(buildLmEvalArgs({ ...base, systemInstruction: "" }, tgt)).not.toContain("--system_instruction");
+    expect(buildLmEvalArgs({ ...base, systemInstruction: "   " }, tgt)).not.toContain("--system_instruction");
+  });
+});
+

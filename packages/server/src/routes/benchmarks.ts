@@ -339,6 +339,19 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
   // model's per-request throughput. Its default (300s) livelocked a GPQA run on a
   // slow model at concurrency 8 — see DEFAULT_TIMEOUT_S in lm-eval-args.ts.
   // Upper bound 86400 keeps a typo from parking a run for a week.
+  // Optional per-run answer-format instruction for accuracy runs. Deliberately
+  // per-run rather than baked into the shared presets: it changes what the score
+  // MEANS, so a preset carrying it would silently make new numbers incomparable
+  // with the baselines already measured without it. The value is stored in the
+  // run's config, which is the only record of how a number was produced.
+  const siOverride = (req.body as { systemInstruction?: unknown }).systemInstruction;
+  if (kind === "accuracy" && siOverride !== undefined) {
+    if (typeof siOverride !== "string" || siOverride.trim() === "" || siOverride.length > 2000) {
+      return res.status(400).json({ error: "systemInstruction must be a non-empty string under 2000 characters" });
+    }
+    config = { ...(config as AccuracyConfig), systemInstruction: siOverride };
+  }
+
   const toOverride = (req.body as { timeout?: unknown }).timeout;
   if (kind === "accuracy" && toOverride !== undefined) {
     const t = Number(toOverride);

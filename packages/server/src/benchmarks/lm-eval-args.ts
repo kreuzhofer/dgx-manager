@@ -79,6 +79,10 @@ export function buildLmEvalArgs(config: AccuracyConfig, target: LmEvalTarget): s
     // That is a good trade against publishing a number no one can check.
     "--log_samples",
   ];
+  // Only emitted when set, so a preset that does not ask for it produces the
+  // exact argv it produced before this existed.
+  const instruction = typeof config.systemInstruction === "string" ? config.systemInstruction.trim() : "";
+  if (instruction !== "") args.push("--system_instruction", instruction);
   if (config.applyChatTemplate) args.push("--apply_chat_template");
   if (config.limit !== null) args.push("--limit", String(config.limit));
   if (config.numFewshot !== null) args.push("--num_fewshot", String(config.numFewshot));

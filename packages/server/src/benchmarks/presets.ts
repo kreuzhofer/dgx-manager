@@ -32,6 +32,15 @@ export type AccuracyConfig = {
    *  latency-tuned serving recipe, higher (e.g. 16) for the batched eval recipe.
    *  Optional/omitted => 1. */
   numConcurrent?: number;
+  /** Prepended as a system message on every request (lm-eval's
+   *  --system_instruction). Exists because the GPQA prompt never states an
+   *  answer format: it ends "Let's think step by step: " and assumes the model
+   *  will spontaneously write "The answer is (C)". A model that phrases it
+   *  differently scores zero however correct it is. Optional/omitted => the flag
+   *  is not passed at all, so existing presets and their baselines are
+   *  unaffected. Setting it CHANGES WHAT THE NUMBER MEANS - a run with an
+   *  instruction is not comparable with one without. */
+  systemInstruction?: string;
   /** Per-request timeout in SECONDS, bounding the whole request including
    *  generation (lm-eval applies it as aiohttp ClientTimeout(total=...)).
    *  Optional/omitted => DEFAULT_TIMEOUT_S. Raise it when maxGenToks divided by
