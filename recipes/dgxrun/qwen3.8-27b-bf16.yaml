@@ -213,20 +213,40 @@ command: |
 #                           model, sd ~12-17% across prompts — 7.6 tok/s on creative fiction
 #                           up to 14.2 on a bash script. The first boot's "~9-12 tok/s" is
 #                           consistent with that spread.
-#   Why Glimmer is faster.  RESOLVED — this block previously recorded the gap as "not yet
-#                           explained". muse-glimmer-30b measures 17.6 tok/s on one Spark
-#                           while being the LARGER model (55.5 vs 51.7 GiB of weights), so
-#                           it is not a size effect. It is the DRAFTER. DFlash predicts a
-#                           16-token block in ONE forward pass: ~3% drafting overhead for
-#                           ~3.9 tokens per forward. MTP drafts autoregressively: 5 extra
-#                           passes to reach 3.37 tokens per forward, ~17% overhead, and a
-#                           hard ceiling of nst+1 tokens. Both models are bandwidth-bound
-#                           at the GB10's 273 GB/s; the gap is speculative-decoding yield
-#                           per byte read, and nst=5 is the most of it MTP can get.
-#                           ⚠ CAVEAT: Glimmer's 17.6 tok/s was itself measured with the
-#                           single-prompt method the nst comment warns about, so part of
-#                           that gap may be a content artifact. Re-measure Glimmer with the
-#                           paired 8-prompt sweep before treating 17.6 vs 11.4 as settled.
+#   With reasoning on.      10.75 tok/s (sd 16.1%) at reasoning_effort=low, measured as
+#                           tokens/WALL over the same 8 prompts — the number to compare
+#                           against other reasoning models.
+#   ⚠ Silent thinking.      The qwen3 parser emits NOTHING during the reasoning phase: zero
+#                           reasoning_content deltas, then content starts. First delta landed
+#                           14.8-39.4 s in, even at LOW effort — 20-40% of wall time with
+#                           nothing on the wire. Two consequences. (1) UX: expect tens of
+#                           seconds of dead air before any output. (2) MEASUREMENT: any
+#                           "tokens / (wall - time-to-first-token)" formula treats that
+#                           silence as prefill and inflates the rate — it read 14.66 tok/s
+#                           against a true 10.75, a 23% overstatement. Use tokens/wall.
+#   Glimmer is NOT faster.  This file used to record Muse Glimmer at 17.6 tok/s against our
+#                           ~11 and call the gap "not yet explained". THE GAP IS AN
+#                           ARTEFACT — it does not reproduce. Re-measured 2026-08-30 with
+#                           the paired 8-prompt sweep, tokens/wall, one Spark each, both
+#                           models at minimum reasoning (Qwen reasoning_effort=low, Glimmer
+#                           reasoning_strength=low — Glimmer's template has NO
+#                           enable_thinking, it ALWAYS reasons, so that is the matched knob):
+#                               Qwen3.8-27B    median 10.72 tok/s   mean 10.75
+#                               Muse Glimmer   median 10.36 tok/s   mean 14.56
+#                           Median ratio 1.11x to Glimmer; the paired delta is NOT
+#                           significant (t(7)=1.33, 95% CI -2.97..+10.58 tok/s), and Glimmer
+#                           LOSES on 2 of 8 prompts. Its mean is inflated by ONE outlier, a
+#                           red-black-tree coding prompt at 35.74 tok/s (2.91x Qwen).
+#                           Glimmer's real character is BIMODAL — 8.8 to 35.7 tok/s, huge on
+#                           predictable code, level with Qwen on prose. Do not carry "17.6"
+#                           anywhere; it was one lucky prompt under the bad method above.
+#   Drafter mechanism.      Real, but worth ~10%, not the ~60% the old number implied.
+#                           Per forward pass Qwen yields MORE than Glimmer: 3.241 tokens at
+#                           44.8% MTP acceptance vs 3.134 at 14.2% of DFlash's 15-token
+#                           block. Glimmer's only edge is that DFlash pays ONE block pass
+#                           where MTP pays 5 sequential ones. Against Glimmer's larger
+#                           weights (59.6 vs 55.5 GB) the roofline puts that at ~1.12x; the
+#                           measured median is 1.11x. Both are bandwidth-bound at 273 GB/s.
 #   Vision.                 Works and is accurate. A 768x768 synthetic render of a bracket
 #                           with a hairline crack was described correctly, including the
 #                           defect's location between the two bores and its zigzag path.
