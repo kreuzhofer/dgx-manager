@@ -136,10 +136,36 @@ command: |
 #       CORRECTION (measured 2026-08-28): vLLM defaults this to TRUE, so omitting the flag
 #       does NOT disable it — the running engine reports enable_prefix_caching=True. To
 #       actually turn it off the flag is --no-enable-prefix-caching.
-#       Relevant because vllm#52244 (OPEN) shows that on Qwen3.5-family hybrid GDN with MTP
-#       on, replaying a cached prompt returns ZERO cached tokens when the prompt is a
-#       multiple of the hash unit. Perf-only, not correctness, so it is left at the default
-#       — but do not believe a comment that says it is off.
+#
+#       ⚠ IT IS ENABLED AND IT DOES NOTHING. MEASURED 2026-08-30: with MTP on, this engine
+#       serves ZERO prefix-cache hits. Not degraded — zero, on 1630+ queries, and a repeated
+#       1342-token prompt got no speedup (1.84 s both times). Verified against the flag, not
+#       assumed: the log says enable_prefix_caching=True and prefix_cache_queries_total
+#       increments while prefix_cache_hits_total stays at 0.
+#
+#       MTP IS THE CAUSE, proven by removing it. An otherwise identical deployment with
+#       --speculative-config dropped (speculative_config=None) hit the cache immediately:
+#       784 blocks on the first repeat, 1568 per pair after, and the repeat cost 1.12 s
+#       against 1.84 s with MTP. Nothing else changed.
+#
+#       This is BROADER than vllm#52244, which reports the collapse only for prompts that
+#       are a multiple of the hash unit. Tested at prompt_tokens % 16 = 14, 15, 0, 1, 2 —
+#       zero hits at every one. So on this stack MTP and prefix caching are MUTUALLY
+#       EXCLUSIVE; you get one or the other.
+#
+#       KEEPING MTP ANYWAY, and here is the arithmetic. With P reused prompt tokens and G
+#       generated tokens, at the measured ~980 tok/s prefill:
+#           MTP on   =  P/980 + G/10.75      (full prefill every turn, no reuse)
+#           MTP off  =  ~0    + G/4.61       (prefix free, but decode is 2.33x slower)
+#       Break-even at P ~= 121 x G. Typical agentic turns sit far below that — 20K context
+#       generating 500 tokens is 67 s with MTP against 109 s without. MTP off only wins on
+#       very long contexts with very short replies (100K in / 200 out: 121 s vs 43 s).
+#       It also makes the silent-thinking wait far worse: first visible token at 34.7-260.2 s
+#       without MTP against 14.8-39.4 s with it.
+#
+#       If your workload is genuinely prefix-heavy and reply-light, drop --speculative-config
+#       (nst=0 is REJECTED at config validation — the flag has to go entirely, which means a
+#       recipe edit, not a config override).
 #
 #   --attention-backend flashinfer
 #       @official sets it and the GB10 SGLang run used FlashInfer, but vllm#51987 ("Revert
