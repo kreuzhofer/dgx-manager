@@ -10,7 +10,7 @@ import type { AccuracyMetricInput } from "./lm-eval-parser.js";
  * reports a precise-looking number that measures the model's phrasing habits
  * rather than its knowledge.
  */
-export type ExtractionFailure = {
+export type ExtractionFinding = {
   task: string;
   metric: string;
   /** Filters that returned exactly 0. Carries the parser's own representation -
@@ -22,6 +22,20 @@ export type ExtractionFailure = {
   /** Filter that reached bestValue, so a caller can name it rather than
    *  reporting a bare number under a label that promises a name. */
   bestFilter: string | null;
+  /**
+   * How much the metrics actually support.
+   *
+   * "failed" - every filter returned exactly 0, so nothing was extracted by any
+   * method and no score can be trusted.
+   *
+   * "partial" - one filter found nothing while another did. Common and usually
+   * benign: reasoning models rarely phrase answers as "The answer is (C)", which
+   * is why the headline prefers flexible-extract. Reported as information, not
+   * as a verdict, because the metrics cannot separate "this score is an artefact"
+   * from "this model is bad" - a low surviving score is only suspicious if you
+   * know the chance level, which is not in the data.
+   */
+  severity: "failed" | "partial";
 };
 
 /**
@@ -48,9 +62,9 @@ export type ExtractionFailure = {
  * Pure over parsed metrics, so it applies to an already-stored result without
  * re-running anything.
  */
-export function detectExtractionFailures(
+export function detectExtractionFindings(
   metrics: AccuracyMetricInput[],
-): ExtractionFailure[] {
+): ExtractionFinding[] {
   const groups = new Map<string, AccuracyMetricInput[]>();
   for (const m of metrics) {
     const key = `${m.task}\u0000${m.metric}\u0000${m.nSamples ?? ""}`;
@@ -59,7 +73,7 @@ export function detectExtractionFailures(
     else groups.set(key, [m]);
   }
 
-  const out: ExtractionFailure[] = [];
+  const out: ExtractionFinding[] = [];
   for (const rows of groups.values()) {
     const zeros = rows.filter((r) => r.value === 0);
     if (zeros.length === 0) continue;
@@ -74,6 +88,7 @@ export function detectExtractionFailures(
       zeroFilters: zeros.map((r) => r.filter),
       bestValue: best.value,
       bestFilter: best.filter,
+      severity: hasNonZeroSibling ? "partial" : "failed",
     });
   }
   return out;
@@ -89,9 +104,9 @@ export function detectExtractionFailures(
  * Defensive like the dashboard's own parse - a malformed value degrades to "no
  * findings" rather than breaking the response.
  */
-export function extractionFailuresFor(
+export function extractionFindingsFor(
   accuracyMetrics: string | null,
-): ExtractionFailure[] {
+): ExtractionFinding[] {
   if (!accuracyMetrics) return [];
   let parsed: unknown;
   try {
@@ -114,6 +129,6 @@ export function extractionFailuresFor(
       nSamples: typeof r.nSamples === "number" ? r.nSamples : null,
       filter: typeof r.filter === "string" ? r.filter : null,
     }));
-  return detectExtractionFailures(rows);
+  return detectExtractionFindings(rows);
 }
 

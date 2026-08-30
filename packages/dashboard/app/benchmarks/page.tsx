@@ -254,7 +254,7 @@ export default function BenchmarksPage() {
                         ? (r.accuracyScore != null ? (
                             <>
                               {r.accuracyScore.toFixed(1)}/100
-                              {(r.extractionFailures?.length ?? 0) > 0 && (
+                              {(r.extractionFindings ?? []).some((f) => f.severity === "failed") && (
                                 <span
                                   className="ml-1 text-amber-400"
                                   title="Answer extraction may have failed - this score may not reflect the model"

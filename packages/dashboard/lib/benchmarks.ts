@@ -46,13 +46,16 @@ export type AccuracyMetric = {
 
 /** A metric whose zero is better explained by failed answer extraction than by
  *  the model getting answers wrong. Derived server-side on read. */
-export type ExtractionFailure = {
+export type ExtractionFinding = {
   task: string;
   metric: string;
   /** null for a metric with no named filter - distinct from "every filter". */
   zeroFilters: (string | null)[];
   bestValue: number;
   bestFilter: string | null;
+  /** "failed" = nothing extracted at all; "partial" = one filter found
+   *  nothing while another did (common and usually benign). */
+  severity: "failed" | "partial";
 };
 
 export type ToolEvalCategory = {
@@ -93,7 +96,7 @@ export type BenchmarkResult = {
 
 export type BenchmarkRun = {
   /** Derived on read; absent from older API responses. */
-  extractionFailures?: ExtractionFailure[];
+  extractionFindings?: ExtractionFinding[];
   id: string;
   deploymentId: string | null;
   presetId: string | null;

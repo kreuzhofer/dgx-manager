@@ -69,7 +69,7 @@ function ComparePageBody() {
                 <div className="flex justify-between text-xs text-gray-400 mb-0.5">
                   <span>{r.deployment?.displayName ?? r.modelName} · {r.presetId ?? "custom"}</span>
                   <span>
-                    {(r.extractionFailures?.length ?? 0) > 0 && (
+                    {(r.extractionFindings ?? []).some((f) => f.severity === "failed") && (
                       <span
                         className="mr-1 text-amber-400"
                         title="Answer extraction may have failed - not comparable with the others"

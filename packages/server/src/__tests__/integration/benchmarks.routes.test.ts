@@ -487,7 +487,7 @@ describe("GET /api/benchmarks/:id", () => {
   });
 });
 
-describe("extractionFailures on GET responses", () => {
+describe("extractionFindings on GET responses", () => {
   // Derived on read, so it must actually reach the client on BOTH list and
   // detail - a warning nobody receives is no warning. The blob below is the
   // shape lm-eval produces for GPQA: exact_match once per extraction filter,
@@ -512,9 +512,9 @@ describe("extractionFailures on GET responses", () => {
     const run = await seedRun(gpqaMetrics);
     const res = await request(makeApp()).get(`/api/benchmarks/${run.id}`);
     expect(res.status).toBe(200);
-    expect(res.body.extractionFailures).toHaveLength(1);
-    expect(res.body.extractionFailures[0]).toMatchObject({
-      task: "gpqa", metric: "exact_match", zeroFilters: ["strict-match"], bestFilter: "flexible-extract",
+    expect(res.body.extractionFindings).toHaveLength(1);
+    expect(res.body.extractionFindings[0]).toMatchObject({
+      task: "gpqa", metric: "exact_match", zeroFilters: ["strict-match"], bestFilter: "flexible-extract", severity: "partial",
     });
   });
 
@@ -523,13 +523,13 @@ describe("extractionFailures on GET responses", () => {
     const res = await request(makeApp()).get(`/api/benchmarks?deploymentId=${run.deploymentId}`);
     expect(res.status).toBe(200);
     const found = res.body.find((r: { id: string }) => r.id === run.id);
-    expect(found.extractionFailures).toHaveLength(1);
+    expect(found.extractionFindings).toHaveLength(1);
   });
 
   it("reports an empty list for a run with no accuracy metrics", async () => {
     const run = await seedRun(null);
     const res = await request(makeApp()).get(`/api/benchmarks/${run.id}`);
-    expect(res.body.extractionFailures).toEqual([]);
+    expect(res.body.extractionFindings).toEqual([]);
   });
 
   it("leaves accuracyScore untouched", async () => {

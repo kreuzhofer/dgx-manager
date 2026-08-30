@@ -15,28 +15,45 @@ function parseMetrics(raw: string | null): AccuracyMetric[] {
 export function AccuracyResultCard({ run }: { run: BenchmarkRun }) {
   const metrics = parseMetrics(run.accuracyMetrics);
 
-  const failures = run.extractionFailures ?? [];
+  const findings = run.extractionFindings ?? [];
+  const failed = findings.filter((f) => f.severity === "failed");
+  const partial = findings.filter((f) => f.severity === "partial");
 
   return (
     <div className="space-y-6">
-      {failures.length > 0 && (
+      {failed.length > 0 && (
         <div className="rounded border border-amber-700/60 bg-amber-950/40 p-3 text-sm">
           <div className="font-medium text-amber-300">
-            Answer extraction may have failed &mdash; this score may not reflect the model
+            Answer extraction failed &mdash; this score does not reflect the model
           </div>
           <div className="mt-1 text-amber-200/80">
-            lm-eval finds the answer with regex filters that expect particular phrasings
-            (&ldquo;The answer is (C)&rdquo;). A model that answers correctly in different
-            words scores zero. A filter at exactly 0.0 across a whole dataset means the
-            answer was not found, not that it was wrong.
+            No extraction filter found an answer on any item, so the score measures
+            nothing. Re-run once the model&rsquo;s answer format is handled.
           </div>
           <ul className="mt-2 space-y-0.5 font-mono text-xs text-amber-200/70">
-            {failures.map((f, i) => (
+            {failed.map((f, i) => (
               <li key={`${f.task}-${f.metric}-${i}`}>
-                {f.task} / {f.metric}:{" "}
-                {f.zeroFilters.map((n) => n ?? "unnamed filter").join(", ")} at 0.0
-                {f.bestValue > 0 &&
-                  ` (best: ${f.bestFilter ?? "unnamed filter"} at ${(f.bestValue * 100).toFixed(1)})`}
+                {f.task} / {f.metric}: {f.zeroFilters.map((n) => n ?? "unnamed filter").join(", ")} all at 0.0
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {partial.length > 0 && (
+        <div className="rounded border border-gray-700 bg-gray-900/60 p-3 text-sm">
+          <div className="font-medium text-gray-300">Some extraction filters found nothing</div>
+          <div className="mt-1 text-gray-400">
+            Usually benign &mdash; reasoning models rarely phrase answers as
+            &ldquo;The answer is (C)&rdquo;, so strict matching finds nothing and the
+            score comes from a looser filter. Worth checking the model&rsquo;s raw
+            output only if the score itself looks implausible: the metrics alone
+            cannot tell a scoring artefact from a weak model.
+          </div>
+          <ul className="mt-2 space-y-0.5 font-mono text-xs text-gray-500">
+            {partial.map((f, i) => (
+              <li key={`${f.task}-${f.metric}-${i}`}>
+                {f.task} / {f.metric}: {f.zeroFilters.map((n) => n ?? "unnamed filter").join(", ")} at 0.0
+                {` (score from ${f.bestFilter ?? "unnamed filter"} at ${(f.bestValue * 100).toFixed(1)})`}
               </li>
             ))}
           </ul>
