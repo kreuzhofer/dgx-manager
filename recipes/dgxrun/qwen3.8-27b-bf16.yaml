@@ -122,6 +122,7 @@ command: |
       --tool-call-parser qwen3_coder \
       --reasoning-parser qwen3 \
       --generation-config auto \
+      --default-chat-template-kwargs '{"reasoning_effort":"medium"}' \
       --speculative-config '{"method":"mtp","num_speculative_tokens":{num_speculative_tokens}}'
 
 # ---------------------------------------------------------------------------------------
@@ -294,4 +295,20 @@ command: |
 #   reasoning=true. Any item whose reasoning overruns returns empty and scores WRONG with
 #   no error anywhere — indistinguishable from the model being bad. Raise the cap well
 #   above 4096, or pin reasoning_effort, before trusting any accuracy number from this model.
+#
+#   ✅ THIS RECIPE NOW PINS reasoning_effort=medium (measured 2026-08-30 on the
+#   NVFP4 sibling, qwen3.8-27b-nvfp4-rtx.yaml).
+#
+#   The template default is xhigh — the MAXIMUM — and nobody chose it. On agentic
+#   work it is actively harmful: reasoning accumulates in a conversation resent
+#   every turn, exhausting the context window. On SWE-bench Verified (same seeded
+#   50 instances, only this flag changed) it took context-exceeded 4 -> 0, empty
+#   patches 7 -> 1, and median messages 102 -> 52, with resolved rate unchanged
+#   within noise (a same-config replicate varied by 8 points, twice the apparent
+#   config effect).
+#
+#   PINNED HERE FOR COMPARABILITY, NOT JUST SPEED. The NVFP4 recipe sets it, and
+#   an A/B of the two quantizations is only meaningful if reasoning effort is held
+#   equal. If you unset it here, this recipe silently reverts to xhigh and any
+#   comparison against the NVFP4 numbers becomes meaningless.
 # ---------------------------------------------------------------------------------------
