@@ -222,7 +222,51 @@ command: |
 # ---------------------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------------------
-# MEASURED ON HARDWARE — dgx-spark-01, first boot 2026-08-28; MTP sweep 2026-08-29
+# MEASURED ON HARDWARE — dgx-spark-01, first boot 2026-08-28; MTP sweep 2026-08-29;
+#                         GPQA-Diamond 2026-08-30
+#
+#   ★ GPQA-Diamond.         76.77% (+/- 3.01), 152/198, flexible-extract / exact_match.
+#                           THE NUMBER THIS RECIPE EXISTS FOR: the unquantized reference
+#                           measured against the NVFP4 quant with no precision confound.
+#                             BF16  (this recipe, spark-01, nc=8)   76.77% +/- 3.01, 2 nulls
+#                             NVFP4 (qwen3.8-27b-nvfp4-rtx, nc=1)   76.77% +/- 3.01, 2 nulls
+#                           NVFP4 costs NOTHING MEASURABLE here — far inside the ~6-point
+#                           difference this harness can resolve at n=198.
+#                           Do NOT read "identical" as "same answers". strict-match differs
+#                           (0.0202 vs 0.0354), so the generations are NOT the same, only the
+#                           extracted-answer counts. Two independent runs tying exactly has
+#                           ~7% odds anyway at n=198, p~0.77 (count sd ~5.9 items). The claim
+#                           is NO DETECTABLE DIFFERENCE, not identical behaviour.
+#
+#                           Conditions — lm-eval 0.4.12, preset acc-gpqa-diamond-full-longgen,
+#                           max_gen_toks 32768, seed 42, greedy (do_sample=False, temp 0.0),
+#                           and reasoning_effort=medium ON BOTH SIDES. That last one is what
+#                           makes the pair valid and is why this recipe pins it (60e662d).
+#                           Asymmetries recorded rather than hidden: num_concurrent 8 vs 1,
+#                           timeout 10800 vs 1800, MTP nst 5 vs 3. None should touch accuracy,
+#                           but vLLM has no batch invariance, so nc=8 is a nondeterminism
+#                           source. Wall time 3h45m (BF16) against 1h41m (NVFP4).
+#
+#   ⚠ Comparison hygiene.   Both earlier xhigh GPQA numbers are SUPERSEDED; do not quote them
+#                           beside these. At xhigh the model reasons past even a 32768-token
+#                           cap and returns EMPTY content, which lm-eval scores WRONG in
+#                           silence — null rates 33% at 4096, 16.7% (RTX) and 13.5% (here) at
+#                           32768. medium drops that to 2/198 on BOTH sides, so these are real
+#                           scores rather than floors, and it ran 5x faster (52 s/item against
+#                           352 s/item).
+#                           The old "adjusted for nulls, ~84.8%" extrapolation was TOO
+#                           GENEROUS: the clean number is 76.77%. Assuming empty items would
+#                           score like answered ones was always optimistic — the items whose
+#                           reasoning overruns are the harder ones.
+#                           GLM-5.2's 69.2% is NOT comparable: standard 4096 preset at xhigh,
+#                           so it carries the null artefact, in GLM's disfavour.
+#                           Official Qwen3.8-27B is 89.2. That 12.4-point gap is harness and
+#                           sampling — lm-eval CoT zeroshot, greedy, flexible-extract against
+#                           Qwen's in-house harness at temp 1.0/top_p 0.95 — NOT quantization
+#                           and NOT this fleet.
+#                           strict-match reads ~0.02-0.04 for both. That is the strict
+#                           answer-format filter failing on CoT prose, not a 2-4% score.
+#                           flexible-extract is the metric.
 #
 #   Loads and serves.       vramActual 103,778 MiB; graph capture 5 s / 0.13 GiB.
 #   Context.                KV cache 716,119 tokens at max_model_len 262144
