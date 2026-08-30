@@ -57,6 +57,23 @@ type AccuracyBench = {
   quickLimit: number;
   maxGenToks: number;
   blurb: string;
+  /**
+   * When set, also emit an `acc-<idBase>-full-longgen` preset with this
+   * generation cap instead of {@link maxGenToks}.
+   *
+   * Exists because a reasoning model that thinks past max_gen_toks returns
+   * EMPTY content; lm-eval substitutes LMEVAL_MODEL_NONE_ANSWER_PLACEHOLDER and
+   * scores the item WRONG, silently, with no error in the results. Measured on
+   * Qwen3.8-27B (2026-08-29): 33% of GPQA-Diamond items came back null at the
+   * standard 4096 cap, which would have produced a badly depressed score that
+   * looked like a real result.
+   *
+   * This is ADDITIVE rather than a raise of the shared cap on purpose: GLM-5.2
+   * ran the standard preset with 0 errors and its published 69.2% is a
+   * comparison baseline, so changing that preset's cap would silently
+   * invalidate every number already measured with it.
+   */
+  longGenToks?: number;
 };
 
 // The v1 lineup: HF Open LLM Leaderboard v2 minus MuSR, all generative/CoT so
@@ -65,11 +82,22 @@ type AccuracyBench = {
 const ACCURACY_BENCHES: AccuracyBench[] = [
   { idBase: "ifeval", label: "IFEval", task: "ifeval", primaryMetric: "prompt_level_strict_acc", quickLimit: 100, maxGenToks: 2048, blurb: "Instruction-following adherence." },
   { idBase: "mmlu-pro", label: "MMLU-Pro (CoT)", task: "mmlu_pro", primaryMetric: "exact_match", quickLimit: 200, maxGenToks: 4096, blurb: "Knowledge/reasoning tail, chain-of-thought." },
-  { idBase: "gpqa-diamond", label: "GPQA-Diamond (CoT)", task: "gpqa_diamond_cot_zeroshot", primaryMetric: "exact_match", quickLimit: 50, maxGenToks: 4096, blurb: "Hard graduate-level Q&A, chain-of-thought." },
+  { idBase: "gpqa-diamond", label: "GPQA-Diamond (CoT)", task: "gpqa_diamond_cot_zeroshot", primaryMetric: "exact_match", quickLimit: 50, maxGenToks: 4096, longGenToks: 32768, blurb: "Hard graduate-level Q&A, chain-of-thought." },
   { idBase: "gsm8k", label: "GSM8K", task: "gsm8k_cot", primaryMetric: "exact_match", quickLimit: 200, maxGenToks: 2048, blurb: "Grade-school math word problems." },
   { idBase: "bbh", label: "BBH", task: "bbh_cot_zeroshot", primaryMetric: "exact_match", quickLimit: 40, maxGenToks: 4096, blurb: "Big-Bench-Hard reasoning suite, chain-of-thought." },
   { idBase: "math-hard", label: "MATH-hard", task: "leaderboard_math_hard", primaryMetric: "exact_match", quickLimit: 100, maxGenToks: 4096, blurb: "Competition-level MATH (level-5)." },
 ];
+
+/**
+ * Slowest per-request generation rate we plan for, in tokens/sec, used to derive a
+ * long-generation preset's timeout from its own cap.
+ *
+ * Not a measurement of any one model — a floor. Qwen3.8-27B measures 10.75 tok/s
+ * single-stream on one Spark and Muse Glimmer ~16.8 at concurrency 5, but presets run at
+ * numConcurrent 8 where per-request throughput is a fraction of that. Lower this if a
+ * slower endpoint starts timing out; the derivation then widens every longgen timeout.
+ */
+const SLOWEST_PER_REQUEST_TOKS_PER_SEC = 5;
 
 function accuracyPresets(): BenchmarkPreset[] {
   const out: BenchmarkPreset[] = [];
@@ -99,6 +127,27 @@ function accuracyPresets(): BenchmarkPreset[] {
       kind: "accuracy",
       config: { ...base },
     });
+    if (b.longGenToks) {
+      out.push({
+        id: `acc-${b.idBase}-full-longgen`,
+        label: `${b.label} — full, long generation (${Math.round(b.longGenToks / 1024)}k)`,
+        description:
+          `${b.blurb} Complete dataset with a ${b.longGenToks}-token generation cap, for ` +
+          `reasoning models that overrun the standard ${b.maxGenToks}. Use this when the run log ` +
+          `shows "API returned null content" — those items score WRONG rather than erroring.`,
+        kind: "accuracy",
+        config: {
+          ...base,
+          maxGenToks: b.longGenToks,
+          // DERIVED, never hardcoded: the timeout bounds the WHOLE request including
+          // generation, so a cap the timeout cannot reach is a guaranteed failure rather
+          // than a bigger budget. Deriving it from the cap is what stops the two drifting
+          // apart — which is exactly how the 2026-08-30 GPQA run died at 137/198 after
+          // 4h34m, needing >18 tok/s per request to fit 32768 tokens in the 1800s default.
+          timeout: Math.ceil(b.longGenToks / SLOWEST_PER_REQUEST_TOKS_PER_SEC),
+        },
+      });
+    }
   }
   return out;
 }

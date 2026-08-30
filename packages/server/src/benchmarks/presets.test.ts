@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BENCHMARK_PRESETS, BenchmarkConfig, getPreset, listPresets } from "./presets.js";
+import { AccuracyConfig, BENCHMARK_PRESETS, BenchmarkConfig, getPreset, listPresets } from "./presets.js";
 
 describe("BENCHMARK_PRESETS", () => {
   it("exposes the five throughput presets plus four tool-eval presets by id", () => {
@@ -7,6 +7,7 @@ describe("BENCHMARK_PRESETS", () => {
       "acc-bbh-full",
       "acc-bbh-quick",
       "acc-gpqa-diamond-full",
+      "acc-gpqa-diamond-full-longgen",
       "acc-gpqa-diamond-quick",
       "acc-gsm8k-full",
       "acc-gsm8k-quick",
@@ -129,5 +130,55 @@ describe("accuracy presets", () => {
       expect(cfg.applyChatTemplate).toBe(true);
       expect(cfg.maxGenToks).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("long-generation accuracy variants", () => {
+  // A reasoning model that thinks past max_gen_toks returns EMPTY content, which
+  // lm-eval fills with LMEVAL_MODEL_NONE_ANSWER_PLACEHOLDER and scores WRONG —
+  // silently, with no error anywhere. Measured on Qwen3.8-27B 2026-08-29: 33% of
+  // GPQA-Diamond items came back null at the standard 4096 cap. GLM-5.2 ran the
+  // same preset with 0 errors, so this is per-model, not a broken default —
+  // hence an ADDITIVE variant rather than raising the shared cap, which would
+  // silently invalidate comparisons against already-published numbers.
+  it("offers a GPQA variant with a generation cap big enough for long reasoning", () => {
+    const p = getPreset("acc-gpqa-diamond-full-longgen")!;
+    expect(p).toBeDefined();
+    expect(p.kind).toBe("accuracy");
+    const cfg = p.config as AccuracyConfig;
+    expect(cfg.maxGenToks).toBeGreaterThanOrEqual(32768);
+  });
+
+  it("differs from the standard full preset ONLY in the cap and its matching timeout", () => {
+    const base = getPreset("acc-gpqa-diamond-full")!.config as AccuracyConfig;
+    const long = getPreset("acc-gpqa-diamond-full-longgen")!.config as AccuracyConfig;
+    expect(long.maxGenToks).toBeGreaterThan(base.maxGenToks);
+    const strip = (c: AccuracyConfig) => ({ ...c, maxGenToks: 0, timeout: 0 });
+    expect(strip(long)).toEqual(strip(base));
+  });
+
+  // The timeout bounds the WHOLE request, generation included — lm-eval applies it as
+  // aiohttp ClientTimeout(total=...). A cap the timeout cannot reach is not a larger
+  // budget, it is a guaranteed failure. The 2026-08-30 GPQA run died at 137/198 after
+  // 4h34m with ServerDisconnectedError for exactly this reason: 32768 tokens inside the
+  // 1800s default needs >18 tok/s per request, and this fleet serves roughly 5 at
+  // numConcurrent 8 (Qwen3.8-27B measures 10.75 tok/s single-stream). Encode the rule
+  // that lm-eval-args.ts already states in prose.
+  const SLOWEST_PER_REQUEST_TOKS_PER_SEC = 5;
+  it("gives every long-generation variant a timeout its own cap can actually reach", () => {
+    const longGen = listPresets().filter((x) => x.id.endsWith("-full-longgen"));
+    expect(longGen.length).toBeGreaterThan(0);
+    for (const p of longGen) {
+      const cfg = p.config as AccuracyConfig;
+      expect(cfg.timeout, `${p.id} must set an explicit timeout`).toBeDefined();
+      expect(
+        cfg.timeout! * SLOWEST_PER_REQUEST_TOKS_PER_SEC,
+        `${p.id}: timeout ${cfg.timeout}s cannot reach ${cfg.maxGenToks} tokens`,
+      ).toBeGreaterThanOrEqual(cfg.maxGenToks);
+    }
+  });
+
+  it("leaves the standard preset's cap untouched, so old numbers stay comparable", () => {
+    expect((getPreset("acc-gpqa-diamond-full")!.config as AccuracyConfig).maxGenToks).toBe(4096);
   });
 });
