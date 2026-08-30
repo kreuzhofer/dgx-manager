@@ -280,14 +280,32 @@ command: |
 #   max_num_seqs=8 batching cap; past it only latency grows.
 #
 #   GPQA-Diamond (198, gpqa_diamond_cot_zeroshot, lm-eval 0.4.12, num_concurrent 1,
-#   acc-gpqa-diamond-full-longgen @ max_gen_toks 32768, 4h37m):
-#       70.7% (stderr 0.032) — but this is a FLOOR, not a score.
-#       33 of 198 items (16.7%) returned EMPTY content and were scored WRONG, because
-#       reasoning at the default xhigh ran past even a 32768-token cap. Adjusted: ~84.8%
-#       if the nulls would have scored like the answered items; 87.4% absolute ceiling.
-#       For reference GLM-5.2 (INT4) scored 69.2% on the same harness.
-#       At the STANDARD acc-gpqa-diamond-full (4096) the null rate was 33% — do not use
-#       that preset for this model.
+#   acc-gpqa-diamond-full-longgen @ max_gen_toks 32768):
+#
+#       ✅ 76.8% at reasoning_effort=medium — THE NUMBER FOR THIS RECIPE.
+#          2 of 198 nulls (1.0%), 1h41m, 31 s/item. This is what the recipe serves,
+#          so it is the number to quote. GLM-5.2 (INT4) scored 69.2% on the same
+#          harness; the official 91.2 uses Qwen's own prompt/extraction stack and is
+#          not reproducible off the shelf.
+#
+#          70.7% at the old default xhigh, for contrast — a FLOOR, not a score:
+#          33 of 198 items (16.7%) returned EMPTY content and were scored WRONG
+#          because reasoning ran past even a 32768-token cap. Runtime 4h37m
+#          (144 s/item), 2.7x slower for a worse, untrustworthy number.
+#
+#       THE NULLS WERE NEVER A CAP PROBLEM. Raising 4096 -> 32768 only moved the null
+#       rate 33% -> 17%; pinning medium took it to 1%. reasoning_effort is a prompt
+#       steer with no enforced budget, so a bigger cap cannot fix a model that has
+#       been told to think maximally — see the REASONING EFFORT block above.
+#
+#       Do NOT use the standard acc-gpqa-diamond-full preset (4096) for this model
+#       under any effort setting; at xhigh its null rate was 33%.
+#
+#       CAUTION ON ADJUSTED FIGURES: the xhigh run was reported at the time as
+#       "~84.8% adjusted", assuming the 33 nulls would have scored like the answered
+#       items. The measured 76.8% suggests that was too optimistic — items that
+#       overrun are harder than average, not representative. Prefer a measured
+#       number over an adjusted one.
 #
 # COMPARISON TO THE SPARKS — read carefully, it is NOT apples to apples.
 #
