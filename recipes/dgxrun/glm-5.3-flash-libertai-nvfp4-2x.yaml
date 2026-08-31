@@ -441,6 +441,32 @@ command: |
 #   returning nothing. Pick max only if a headline benchmark number is the
 #   goal — and note that 81.31 was itself depressed by its own nulls.
 #
+# THIRD REASON BOTH NUMBERS ARE FLOORS: no answer-format instruction.
+#
+#   GPQA's prompt never states an answer format — doc_to_text ends "Let's think
+#   step by step: " — while the strict-match filter demands the literal "The
+#   answer is ". A model that reasons correctly and phrases the conclusion its
+#   own way scores ZERO however right it is. This model's strict-match is 0.0354
+#   against a flexible-extract of 0.7727, i.e. it essentially never writes the
+#   expected envelope and the whole score rests on the looser filter.
+#
+#   How large that effect can be, measured on this cluster: Muse Glimmer wrote
+#   "This is choice B", matched NEITHER filter, and scored 22.73 — against a
+#   published 83.5. Instructing the format lifted the same model to 82.83 on the
+#   same 198 items (2026-08-31). A 60-point swing from formatting, not capability.
+#
+#   Do NOT expect a swing that large here. Muse Glimmer's flexible-extract had
+#   failed outright; ours works (0.7727). Our remaining upside is only whatever
+#   flexible-extract still misses, which is unmeasured. But it is upside, not
+#   noise, and it is a third independent reason these numbers understate.
+#
+#   Both runs above are UN-INSTRUCTED, which is correct: that is what makes them
+#   comparable to GLM-5.2 67.68, DeepSeek 55.05 and Qwen3.8 76.77, all measured
+#   the same way. An instructed run is a DIFFERENT MEASUREMENT and must never be
+#   compared against them. `acc-gpqa-diamond-full-longgen-formatted` exists for
+#   that purpose as a distinct preset id — it needs a server rebuild to appear,
+#   since presets are compiled in.
+#
 # WANTED: a clean `max` measurement. Both runs were capped at maxGenToks 32768,
 # which is what generates the nulls — at reasoning_effort=max this model needs
 # more than that for ~12% of GPQA. At TP4 the context ceiling rises far above
