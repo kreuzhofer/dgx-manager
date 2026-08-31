@@ -364,9 +364,12 @@ command: |
 #                           115 tok/s and MARGINAL at this endpoint's 10.75 — the same bug
 #                           class as the lm-eval longgen timeout, and the documented route to
 #                           the death spiral (request exceeds timeout -> retry -> vLLM
-#                           re-prefills from scratch -> ~1 tok/s), which is worse here because
-#                           prefix caching serves zero hits under MTP so every agent turn
-#                           re-prefills its whole context. Use timeout=7200. That is safe for
+#                           re-prefills from scratch -> ~1 tok/s). (An earlier version of this
+#                           note added "and prefix caching serves zero hits under MTP so every
+#                           turn re-prefills" — that was based on the retracted zero-hits
+#                           finding and is withdrawn; caching does work here. The timeout risk
+#                           itself stands, since it comes from the 10x speed gap, not from
+#                           caching.) Use timeout=7200. That is safe for
 #                           reproducibility: the seeded --shuffle only determines WHICH
 #                           instances a --slice picks, and a full 500-run has no slice.
 #                           Keep -w 8 equal to max_num_seqs.
@@ -390,15 +393,19 @@ command: |
 #                           an 8x length increase. Quadratic attention never dominates here,
 #                           which is the hybrid design (16 of 64 layers) paying off on the
 #                           prefill side as well as the KV side.
-#   ⚠ But long context is   COMBINE THIS WITH THE PREFIX-CACHE FINDING BELOW BEFORE PLANNING
-#     impractical per-turn. ANY LONG-CONTEXT AGENTIC WORKLOAD. A full-window prompt costs
-#                           ~400 s of prefill, and prefix caching serves ZERO hits under MTP,
-#                           so that cost is paid IN FULL ON EVERY TURN — it is never amortised
-#                           across a conversation. A 250K agent context is therefore ~7 minutes
-#                           per turn before a single token is generated. The window is usable
-#                           for one-shot analysis of a large document; it is NOT usable for
-#                           multi-turn work at anything near full length until prefix caching
-#                           works (i.e. without MTP, or once vllm#52244 is fixed).
+#   Cost per turn.          RETRACTED AND CORRECTED. This block previously said long context
+#                           was "impractical per-turn" because prefix caching served zero
+#                           hits under MTP, so a ~400 s full-window prefill was paid on every
+#                           turn. That rested on the zero-hits finding, which was WRONG and is
+#                           withdrawn (see --enable-prefix-caching above, and d7531d4): those
+#                           probes were 1342 tokens against a 1632-token reuse threshold, so
+#                           they could only report zero.
+#                           MTP costs exactly ONE 816-token hash unit per hit, which is
+#                           negligible at real context lengths — 96.8% cached at 48K, TTFT
+#                           33.0 s -> 2.6 s. So the ~400 s prefill IS amortised across a
+#                           conversation, and multi-turn work near full window is viable.
+#                           The first turn still pays it in full; plan for that, not for a
+#                           per-turn cost.
 #   MTP works, no drafter.  SpeculativeConfig(method='mtp', num_spec_tokens=5);
 #                           "Detected MTP model. Sharing target model embedding weights".
 #                           Over 8 diverse prompts: nst=5 accepts 47.4% of drafted tokens
