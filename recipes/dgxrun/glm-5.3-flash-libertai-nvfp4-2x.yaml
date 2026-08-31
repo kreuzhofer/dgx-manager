@@ -464,8 +464,9 @@ command: |
 #   comparable to GLM-5.2 67.68, DeepSeek 55.05 and Qwen3.8 76.77, all measured
 #   the same way. An instructed run is a DIFFERENT MEASUREMENT and must never be
 #   compared against them. `acc-gpqa-diamond-full-longgen-formatted` exists for
-#   that purpose as a distinct preset id — it needs a server rebuild to appear,
-#   since presets are compiled in.
+#   that purpose as a distinct preset id, and is live on the manager. Its
+#   instructed result belongs beside Muse Glimmer's instructed 82.83, never
+#   beside the un-instructed baselines above.
 #
 # WANTED: a clean `max` measurement. Both runs were capped at maxGenToks 32768,
 # which is what generates the nulls — at reasoning_effort=max this model needs
