@@ -89,7 +89,17 @@ defaults:
   # disambiguate with a per-deploy `displayName` rather than editing this — that is how the
   # fleet already does it (the BF16 recipe declares `qwen3.8-27b` and its live deployment
   # publishes `qwen3.8-27b-bf16`). Do NOT let the two pool under one published name: they
-  # differ by ~5x in speed, so round-robin between them would make latency unpredictable.
+  # differ by ~5x in speed (21.25 vs 115.4 tok/s at concurrency 1), so round-robin would make
+  # latency a lottery, and any benchmark against that name would measure a MIXTURE of two
+  # backends rather than either one.
+  #
+  # ⚠ NOTHING ENFORCES THAT TODAY — see issue #63. validateDisplayNameUnique compares the
+  # `displayName` COLUMN, not the effective served name, and returns early when displayName
+  # is null — exactly the case where the name comes from the recipe. Deploy this recipe and
+  # the -rtx one without a displayName and BOTH come up publishing `qwen3.8-27b-nvfp4` with
+  # no error, after which gateway/router.ts treats deployments sharing a published name as a
+  # POOL and load-balances across it. So the warning above is a convention you must honour
+  # by hand, not a guard rail.
   served_model_name: qwen3.8-27b-nvfp4
 
 command: |
