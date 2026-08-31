@@ -204,55 +204,45 @@ The 816-token unit is the inflated attention block covering the GDN mamba page �
 mechanism as [#53749](https://github.com/vllm-project/vllm/issues/53749). Not tunable from the
 recipe.
 
-### Qwen3.8-27B NVFP4 on v0.28.0 — **still zero, and not explained by the law**
+### Qwen3.8-27B NVFP4 on v0.28.0 — **starved, not broken**
 
-The sibling deployment (`qwen3.8-27b-nvfp4-rtx`, aihost01, vLLM **v0.28.0**) reports
-**0 hits over 49M queried tokens** with MTP active — where the BF16 engine on the older image
-hits 88.7% lifetime. Same model family; different image, quantization and hardware. The law
-above does not explain a flat zero at that query volume.
+The sibling deployment (`qwen3.8-27b-nvfp4-rtx`, aihost01, vLLM **v0.28.0**) reports ~0 hits
+over 53M queried tokens with MTP active. **MEASURED 2026-08-31**: a controlled sweep at
+1,222 / 2,422 / 4,822 / 19,222 / 48,022 prompt tokens returned 0 hits at every length.
 
-Two further facts about that deployment:
+**The cause is pool headroom, not a vLLM defect.** From its startup log:
 
-- **It never opted in.** [#50991](https://github.com/vllm-project/vllm/pull/50991) shipped in
-  v0.28.0 under "New defaults — prefix caching enabled by default for Mamba models". The recipe
-  passes no caching flag either way, so it runs align-mode APC by default.
-- That puts it in [#50188](https://github.com/vllm-project/vllm/issues/50188)'s exact
-  configuration (RTX 5090, NVFP4, MTP k=3, APC), where 3 of 6 byte-identical repeats returned
-  malformed tool markup in 1.4-3.5 s instead of 20-65 s. Discriminator: set `cache_salt` on the
-  failing request; if it comes back correct, it is that bug.
+```
+Setting attention block size to 1600 tokens (attention page >= mamba page)
+GPU KV cache size: 109,794 tokens
+Maximum concurrency for 98,304 tokens per request: 1.12x
+```
 
-A controlled sweep on that endpoint is the obvious next measurement; it was serving traffic
-when this was written.
+109,794 KV tokens against a 98,304-token window is **one request's worth**. Under the load
+this endpoint actually carries (2–3 running, 4–7 queued, KV usage swinging 47–97%, **11,466
+preemptions**), every completed request's blocks are evicted immediately to admit the next.
+There is no headroom to retain a prefix in.
 
-### Muse Glimmer 30B (dflash drafter) — **MEASURED working, 2026-08-31**
+Two details that settle it:
 
-Engine `0.27.2rc1.dev113+g5cecfc013` on dgx-spark-04, `--enable-prefix-caching` explicit,
-`dflash` drafter with a separate assistant model, `num_speculative_tokens: 15`.
+- **It is not structurally dead.** Across ~3,500 logged intervals the rate is mostly 0.0% but
+  reaches 0.1–1.2%. A disabled cache reads exactly zero forever; this one hits and then loses
+  the blocks.
+- **Its hash unit is 1,600, not 816** (it tracks the GDN mamba page, which moves with
+  quantization). So the zero-reuse threshold is 3,200 tokens and the 1,222- and 2,422-token
+  probes were expected to return zero regardless. Only the three long points are evidence.
 
-| call | prompt_tokens | cached | wall |
-|---|---|---|---|
-| 1 (cold) | 1251 | 0 | 46.6 s |
-| 2 (exact repeat) | 1251 | **1088 (87%)** | 8.2 s |
-| 3 (exact repeat) | 1251 | **1088 (87%)** | 40.2 s |
+**Correction:** an earlier revision of this document and of the recipe read this as a v0.28.0
+regression bracketed against the BF16 sibling. That was wrong. The two deployments differ in
+six ways at once — version, quantization, GPU, container, window, `nst` — and the confound
+that explains the gap is **pool headroom × load**. Nothing measured here says whether
+[#54360](https://github.com/vllm-project/vllm/issues/54360) affects us, and nothing here
+justifies pinning or bumping the BF16 image either way.
 
-Wall times are **confounded** — a benchmark was running at 8 concurrent, so these are
-queueing times, not prefill times. Do not quote them. The hit counts are sound.
-
-The 163 unreused tokens are consistent with the documented `prompt_len - 1` cap plus the
-Eagle-family one-unit drop plus block alignment — i.e. correct behaviour, not a defect.
-
-**Two measurement traps found the hard way:**
-
-- **The counter lags the response.** Call 3's hit did not appear in `/metrics` until after the
-  HTTP response returned; scraping immediately made it look like a miss. Scrape a few seconds
-  late.
-- **`prompt_tokens_details` was `null`.** vLLM *does* populate `cached_tokens`, but it is
-  gated behind **`--enable-prompt-tokens-details`**, off by default
-  (`vllm/entrypoints/launchers/cli_args.py`). No recipe of ours sets it.
-
-Note this is a *third* config with a speculative drafter, and it hits. Combined with
-GLM-5.3-Flash, the split is not "spec decode kills APC" — it is the hybrid-GDN interaction
-above.
+**What would help, cheapest first:** lower `max_num_seqs` from 8 (at 1.12x concurrency it is
+oversubscribed, and the preemption count is the receipt); then re-probe **while idle**, which
+is the clean discriminator between starvation and a real bug. Only a zero at >3,200 tokens on
+an idle endpoint implicates #54360 and makes #50897 / #53802 / #48375 relevant.
 
 ### GLM-5.3-Flash — hits, then evicts almost immediately
 
@@ -359,11 +349,14 @@ matrix. This is why the above came from source.
    shape. Counter-evidence: those recipes have served real agentic sessions and scored
    normally on benchmarks, which argues against gross corruption — so this is a check to
    close the question, not an alarm. Our DCP4 recipes already use PIECEWISE.
-4. **DONE 2026-08-31 for BF16 — repeat it for the NVFP4/v0.28.0 endpoint.** The sweep must
-   vary total prompt *length* (not just the remainder) and cross 2U, or it reports zero for
-   reasons that have nothing to do with the bug. `scripts/`-able version of the probe is in
-   the session scratchpad; the shape is: shared prefix, divergent tail, exact repeat, at
-   ~1k/2.5k/5k/19k/48k tokens, scraping `/metrics` ~4 s *after* each response.
+4. **DONE 2026-08-31, both endpoints — with one lesson about method.** BF16 follows the
+   816-token law (96.8% at 48K). NVFP4 reads ~0, but because its pool holds 1.12 requests
+   under saturating load, not because caching is broken. Any prefix-cache measurement must
+   (a) vary total prompt *length* and cross 2U for that engine's own hash unit, and (b) run
+   against an **idle** endpoint — otherwise it measures pool pressure and reports it as a bug.
+   Read the engine's `Maximum concurrency` line before drawing any conclusion. Probe shape:
+   shared prefix, divergent tail, exact repeat, scraping `/metrics` ~4 s *after* each
+   response.
 5. **Prefix-aware routing in the gateway** — only worth it once we routinely run ≥2 replicas
    of one published name. Until then it is speculative complexity. The seam is identified in
    §6 if and when it is.

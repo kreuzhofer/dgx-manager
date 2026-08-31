@@ -307,6 +307,54 @@ command: |
 #       overrun are harder than average, not representative. Prefer a measured
 #       number over an adjusted one.
 #
+# PREFIX CACHING IS ON BY DEFAULT HERE, AND IT IS STARVED, NOT BROKEN. MEASURED 2026-08-31.
+#
+#   This recipe passes no caching flag either way. On v0.28.0 that means ENABLED:
+#   vllm#50991 shipped in this release under "New defaults — prefix caching enabled by
+#   default for Mamba models". Startup confirms it:
+#       Mamba cache mode is set to 'align' ... by default when prefix caching is enabled
+#       enable_prefix_caching=True
+#
+#   THE POOL CANNOT HOLD A CACHE. From the same startup log:
+#       Setting attention block size to 1600 tokens (attention page >= mamba page)
+#       GPU KV cache size: 109,794 tokens
+#       Maximum concurrency for 98,304 tokens per request: 1.12x
+#   109,794 KV tokens against a 98,304-token window is ONE request's worth. Under the
+#   sustained load this endpoint actually sees (2-3 running, 4-7 queued, KV usage
+#   oscillating 47-97%, 11,466 preemptions) every completed request's blocks must be
+#   evicted immediately to admit the next. There is no headroom to retain a prefix in.
+#
+#   MEASURED: lifetime 53,458,391 queried tokens, ~0 hits; a controlled sweep (shared
+#   prefix, divergent tail, exact repeat) at 1222 / 2422 / 4822 / 19222 / 48022 prompt
+#   tokens returned 0 hits at every length, while the endpoint was serving other traffic.
+#
+#   BUT IT IS NOT STRUCTURALLY DEAD. Across 3,500 logged intervals the rate is mostly
+#   0.0% yet reaches 0.1-1.2% at times. A structurally disabled cache reads exactly zero
+#   forever. This one hits occasionally and then loses the blocks.
+#
+#   NOTE THE HASH UNIT IS 1600 HERE (vs 816 on the BF16 Spark recipe — it tracks the GDN
+#   mamba page, which differs with quantization). So the zero-reuse threshold is 2*1600 =
+#   3200 tokens, and the 1222- and 2422-token probes above were expected to return zero
+#   REGARDLESS. Only the 4822 / 19222 / 48022 points are evidence of anything.
+#
+#   ⚠ THIS IS THEREFORE **NOT** EVIDENCE OF A v0.28.0 REGRESSION, and an earlier revision
+#   of this comment wrongly said so. The BF16 sibling's 96.8% and this endpoint's ~0%
+#   differ in six ways at once (version, quantization, GPU, container, window, nst) and
+#   the confound that actually explains it is POOL HEADROOM x LOAD, not vLLM version.
+#   Nothing here says whether vllm#54360 affects us.
+#
+#   WHAT WOULD ACTUALLY HELP, in order of cheapness:
+#     - Lower max_num_seqs (8 -> 3 or 4). At 1.12x concurrency, 8 is oversubscribed; the
+#       11,466 preemptions are the receipt. Fewer live requests leaves pool for reuse.
+#     - Re-probe when the endpoint is IDLE. That is the clean discriminator between
+#       starvation and a real bug, and it costs nothing but a quiet window.
+#     - Only if it still reads zero idle at >3200 tokens is this vllm#54360, and only then
+#       are #50897 / #53802 / #48375 relevant.
+#
+#   Unrelated but free, same hardware: vllm#54225 (FlashInfer IMA on sm_120 with NVFP4 +
+#   fp8 KV) is mitigated by FLASHINFER_CUDA_ARCH_LIST=12.0f, reported at no throughput
+#   cost. This deployment does select FLASHINFER (startup log), so it is in scope.
+#
 # COMPARISON TO THE SPARKS — read carefully, it is NOT apples to apples.
 #
 #   qwen3.8-27b-bf16.yaml measured 9–12 tok/s for the same model on one Spark; this is
