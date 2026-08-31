@@ -353,6 +353,24 @@ command: |
 #                           axis if you want them — but do NOT read the gap as a quality
 #                           difference, and do not run it AS a quantization test.
 #
+#                           DECIDED 2026-08-31: SKIPPED on this side. Measured cost was ~1.5-2
+#                           DAYS of one Spark (the NVFP4 500-run managed 98 instances/hour on
+#                           the RTX; BF16 is 7-10x slower in aggregate at concurrency 8), for
+#                           a result the token-agreement test already predicts is
+#                           indistinguishable. The NVFP4 verified500 number stands alone.
+#
+#                           ⚠ IF YOU EVER DO RUN IT HERE, DO NOT COPY THE RTX FLAGS VERBATIM.
+#                           `model.model_kwargs.timeout=1800` is comfortable at the RTX's
+#                           115 tok/s and MARGINAL at this endpoint's 10.75 — the same bug
+#                           class as the lm-eval longgen timeout, and the documented route to
+#                           the death spiral (request exceeds timeout -> retry -> vLLM
+#                           re-prefills from scratch -> ~1 tok/s), which is worse here because
+#                           prefix caching serves zero hits under MTP so every agent turn
+#                           re-prefills its whole context. Use timeout=7200. That is safe for
+#                           reproducibility: the seeded --shuffle only determines WHICH
+#                           instances a --slice picks, and a full 500-run has no slice.
+#                           Keep -w 8 equal to max_num_seqs.
+#
 #   Loads and serves.       vramActual 103,778 MiB; graph capture 5 s / 0.13 GiB.
 #   Context.                KV cache 716,119 tokens at max_model_len 262144
 #                           (2.73x concurrency). The full native window is affordable —
