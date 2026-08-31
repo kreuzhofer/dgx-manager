@@ -61,9 +61,17 @@ defaults:
   # (sglang#34872, FP8) also ran concurrency 8.
   max_num_seqs: 8
 
-  # 2048: muse-glimmer measured 2048 FASTER than 8192 under speculative decoding on this
-  # hardware (block alignment), and vLLM clamps to 2048 on its own when spec decoding is on.
-  # The @official FP8 recipe uses 16384, but that recipe is not spec-decode-tuned for GB10.
+  # 2048: muse-glimmer measured 2048 faster than 8192 under speculative decoding on this
+  # hardware (17.56 vs 17.09 tok/s). The @official FP8 recipe uses 16384, but that recipe
+  # is not spec-decode-tuned for GB10.
+  #
+  # CORRECTED 2026-08-31: this line previously also claimed "vLLM clamps to 2048 on its own
+  # when spec decoding is on", copied from muse-glimmer-30b.yaml without checking. It is
+  # false. vllm/config/vllm.py::_set_max_num_scheduled_tokens does
+  # `max_num_scheduled_tokens = max_num_batched_tokens` with no clamp, and warns when the
+  # result is < 8192 — so 2048 is what TRIGGERS the warning this deployment logs, not what
+  # avoids it. The remaining justification is the measurement alone, which is 2.7% from
+  # 3 runs with no stddev: weak evidence, worth re-measuring.
   max_num_batched_tokens: 2048
 
   # MTP weights ship INSIDE the checkpoint — 15 `mtp.*` keys in the BF16 safetensors index,

@@ -55,9 +55,26 @@ defaults:
   #     nst=15, mnbt=8192  -> 17.09 tok/s
   #     nst=6,  mnbt=8192  -> 13.70 tok/s   (block alignment broken)
   num_speculative_tokens: 15
-  # 2048 is what vLLM clamps to on its own when speculative decoding is on; setting it
-  # explicitly silences the "suboptimal performance" warning without changing anything.
-  # Raising it to 8192 was measured SLOWER (above) — the warning is misleading here.
+  # 2048 rests on the measurement above and nothing else.
+  #
+  # CORRECTED 2026-08-31: this previously claimed vLLM clamps to 2048 under speculative
+  # decoding, and that setting it explicitly silences the "suboptimal performance"
+  # warning without changing anything. Both are false, and the second is backwards.
+  # vllm/config/vllm.py::_set_max_num_scheduled_tokens assigns directly:
+  #
+  #     max_num_scheduled_tokens = max_num_batched_tokens      # no min(), no clamp
+  #     if max_num_scheduled_tokens < 8192: warn(...)
+  #
+  # So 8192 really would be 8192, and the warning fires precisely BECAUSE this is 2048.
+  # Setting 2048 causes the warning; 8192 is what silences it. (Confirmed independently
+  # by the Qwen3.8 deploy of 2026-08-28, which ran mnbt=2048 and logged the warning.)
+  # `scheduled_token_delta` only feeds a guard that raises when mnbt is too small; it
+  # never reduces the scheduled total.
+  #
+  # The measurement therefore compared two genuinely different configs and stands — but
+  # it is now the ONLY argument for 2048, and it is thin: 17.56 vs 17.09 is 2.7% from
+  # 3 runs with no variance reported. Treat it as weak evidence, not a settled result,
+  # and re-measure with stddev before relying on it.
   max_num_batched_tokens: 2048
   served_model_name: muse-glimmer
 
