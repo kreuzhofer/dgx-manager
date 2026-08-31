@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   deleteBenchmark, listBenchmarks, type BenchmarkRun,
 } from "@/lib/benchmarks";
+import { presetOptions } from "@/lib/preset-options";
 import { useSSE, type SseEvent } from "@/lib/sse";
 
 function fmtAgo(iso: string | null): string {
@@ -115,27 +116,9 @@ export default function BenchmarksPage() {
           className="bg-gray-950 border border-gray-800 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-gray-600"
         >
           <option value="">All presets</option>
-          <option value="quick-smoke">quick-smoke</option>
-          <option value="chat-short">chat-short</option>
-          <option value="chat-long">chat-long</option>
-          <option value="code-32k">code-32k</option>
-          <option value="throughput">throughput</option>
-          <option value="tool-eval-quick">tool-eval-quick</option>
-          <option value="tool-eval-full">tool-eval-full</option>
-          <option value="tool-eval-hardmode">tool-eval-hardmode</option>
-          <option value="tool-eval-pressure">tool-eval-pressure</option>
-          <option value="acc-ifeval-quick">acc-ifeval-quick</option>
-          <option value="acc-ifeval-full">acc-ifeval-full</option>
-          <option value="acc-mmlu-pro-quick">acc-mmlu-pro-quick</option>
-          <option value="acc-mmlu-pro-full">acc-mmlu-pro-full</option>
-          <option value="acc-gpqa-diamond-quick">acc-gpqa-diamond-quick</option>
-          <option value="acc-gpqa-diamond-full">acc-gpqa-diamond-full</option>
-          <option value="acc-gsm8k-quick">acc-gsm8k-quick</option>
-          <option value="acc-gsm8k-full">acc-gsm8k-full</option>
-          <option value="acc-bbh-quick">acc-bbh-quick</option>
-          <option value="acc-bbh-full">acc-bbh-full</option>
-          <option value="acc-math-hard-quick">acc-math-hard-quick</option>
-          <option value="acc-math-hard-full">acc-math-hard-full</option>
+          {presetOptions(runs).map((id) => (
+            <option key={id} value={id}>{id}</option>
+          ))}
         </select>
         <select
           value={filter.status}
