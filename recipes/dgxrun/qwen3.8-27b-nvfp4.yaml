@@ -128,6 +128,23 @@ command: |
 #   the model reasons past even a 32768-token cap and returns EMPTY content, which lm-eval
 #   scores WRONG in silence. See 60e662d.
 #
+#
+#   ⚠ NO REASONING-TOKEN ACCOUNTING ON THIS IMAGE. Measured 2026-08-31 across all three
+#   Qwen3.8 deployments with an identical greedy prompt:
+#       BF16  spark-01  (eugr-nightly:2026081501)  usage.completion_tokens_details ABSENT
+#       NVFP4 spark-04  (eugr-nightly:2026081501)  ABSENT
+#       NVFP4 aihost01  (rtx-vllm:v0.28.0)         {"reasoning_tokens": 67}
+#   It is the vLLM VERSION, not the quantization: the two Spark endpoints run the same image
+#   and behave identically; only the v0.28.0 box reports a count. Clients that display or
+#   bill reasoning tokens will show ZERO here, exactly as they do for GLM-5.2.
+#   `reasoning_content` is absent on ALL THREE even on v0.28.0 — the qwen3 parser never
+#   separates the reasoning text, it simply goes silent during thinking. So v0.28.0 buys a
+#   COUNT, not the text.
+#   (All three returned completion_tokens=115 on the same prompt, which is an incidental
+#   cross-check that they are otherwise behaving identically.)
+#   FIX: eugr-nightly has dated tags up to 2026082701, which postdates the v0.28.0 release
+#   (2026-08-26). Bumping should restore the count — UNVERIFIED until someone boots it, and
+#   it carries the vllm#52434 ParallelLMHead risk this file already warns about.
 #   The qwen3 parser emits NOTHING during the reasoning phase, so expect tens of seconds of
 #   dead air before the first token, and NEVER measure throughput as
 #   tokens/(wall - time-to-first-token) — that counts thinking as prefill and inflated a
