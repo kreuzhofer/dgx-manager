@@ -59,7 +59,11 @@ const UPSTREAM_ENV: Record<string, string> = {
 };
 
 /** Flags dgxrun adds that upstream's launcher did not, each with its reason. */
-const DELIBERATE_EXTRA_FLAGS: Record<string, string> = {};
+const DELIBERATE_EXTRA_FLAGS: Record<string, string> = {
+  "--default-chat-template-kwargs":
+    "pins reasoning_effort — upstream leaves it unset and therefore at the " +
+    "template's `max` fallback, which nobody chose. See the recipe.",
+};
 
 /**
  * Flags we deliberately set to a DIFFERENT value than upstream's launcher.
@@ -190,6 +194,31 @@ describe("@dgxrun/glm-5.3-flash-libertai-nvfp4-2x vs the validated 2x-Spark laun
    * with a GB10 indexer top-k kernel limit. Nothing short of a real long prompt
    * distinguishes a working window from a broken one. See issue #24.
    */
+  /**
+   * reasoning_effort must be PINNED, and to a value the template accepts.
+   *
+   * This checkpoint's chat_template.jinja opens with:
+   *
+   *   {%- set effective_reasoning_effort = reasoning_effort
+   *         if reasoning_effort is defined and reasoning_effort in ['low','high']
+   *         else 'max' -%}
+   *
+   * Two consequences, both traps. The default is `max` — the most expensive
+   * setting, reachable only as a fallback and never chosen. And the accepted
+   * set is ONLY {low, high}: unlike Qwen, whose template raise_exception()s on
+   * an unknown value, this one SILENTLY falls back to `max`. So "medium" — the
+   * value both qwen3.8 recipes pin — would look applied here and give you max.
+   *
+   * That is why this asserts membership in the accepted set rather than just
+   * "is set": a typo or a copied-across "medium" is invisible at runtime.
+   */
+  it("pins reasoning_effort to a value this template actually accepts", () => {
+    const raw = ours.get("--default-chat-template-kwargs");
+    expect(raw, "--default-chat-template-kwargs must be set").toBeDefined();
+    const kw = JSON.parse(raw as string);
+    expect(["low", "high"]).toContain(kw.reasoning_effort);
+  });
+
   it("pins the empirically validated memory and window settings", () => {
     expect(ours.get("--gpu-memory-utilization")).toBe("0.87");
     expect(ours.get("--max-model-len")).toBe("327680");

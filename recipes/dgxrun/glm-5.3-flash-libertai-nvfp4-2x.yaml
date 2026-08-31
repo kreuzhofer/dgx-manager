@@ -262,6 +262,7 @@ command: |
       --tool-call-parser glm47 \
       --enable-auto-tool-choice \
       --reasoning-parser glm45 \
+      --default-chat-template-kwargs '{"reasoning_effort":"high"}' \
       --speculative-config '{"method":"mtp","num_speculative_tokens":{num_speculative_tokens}}'
 #
 # ------------------------------- LOAD-BEARING ---------------------------------
@@ -283,6 +284,14 @@ command: |
 #   Requires overlay layer v8 (EFF_CTA_TILE_KV capped at 32 for GB10's ~101 KB
 #   opt-in smem). Without v8 this dies in warmup with cudaFuncSetAttribute
 #   "invalid argument". Do not enable fp8 KV against a partially-built overlay.
+#
+# --default-chat-template-kwargs '{"reasoning_effort":"high"}'
+#   Pinned because the template's own fallback is `max`, the most expensive
+#   setting, which nobody chose. ACCEPTED VALUES ARE ONLY {low, high} — there is
+#   no "medium" here, and an unrecognised value does NOT error, it silently
+#   becomes `max`. Full derivation, the template source, and what `max` cost us
+#   are under CHAT TEMPLATE at the foot of this file. Read that before changing
+#   this value, and do not copy the qwen3.8 recipes' "medium" across.
 #
 # Deliberately NOT set: --kv-cache-memory-bytes. Every GLM-5.2 recipe here pins
 # it, which makes omitting it look like an oversight. It is not — upstream is
@@ -318,9 +327,66 @@ command: |
 #
 # ------------------------------- CHAT TEMPLATE --------------------------------
 #
-# GLM-5.3 defaults `clear_thinking` to FALSE and adds `reasoning_effort`
-# (low|high|max, defaulting to max). Neither is pinned here because neither is
-# validated against this quant's template yet.
+# GLM-5.3 defaults `clear_thinking` to FALSE. That is not pinned here — it has
+# not been validated against this quant's template.
+#
+# =================== reasoning_effort IS PINNED, TO "high" ====================
+# Read straight off this checkpoint's chat_template.jinja, line 2, which is the
+# authoritative source and disagrees with the vendor blog posts:
+#
+#   {%- set effective_reasoning_effort = reasoning_effort
+#         if reasoning_effort is defined and reasoning_effort in ['low','high']
+#         else 'max' -%}
+#
+# TWO TRAPS LIVE IN THAT ONE LINE.
+#
+# 1. The default is `max` — the most expensive setting there is, reachable only
+#    as a FALLBACK. Nobody chose it; it is what you get by not deciding.
+#
+# 2. The accepted set is ONLY {low, high}. `max` is not even in it. And unlike
+#    Qwen — whose template raise_exception()s on an unrecognised value, so a
+#    mistake is loud — this template SILENTLY falls back to max. So passing
+#    "medium", which is what BOTH qwen3.8 recipes here pin, would look applied
+#    and give you the maximum. Do not copy that value across.
+#
+# WHAT EACH INPUT ACTUALLY DOES, exhaustively — there is no other branch:
+#
+#     caller sends            effective_reasoning_effort   system line emitted
+#     --------------------    --------------------------   -------------------
+#     "low"                   low                          Reasoning Effort: Low
+#     "high"                  high                         Reasoning Effort: High
+#     "medium"                max      <- SILENT           Reasoning Effort: Max
+#     "max"                   max      <- SILENT           Reasoning Effort: Max
+#     "xhigh" / anything      max      <- SILENT           Reasoning Effort: Max
+#     (not sent at all)       max                          Reasoning Effort: Max
+#
+# The template then emits, at line 3, a system turn:
+#     <|system|>Reasoning Effort: {{ effective_reasoning_effort | capitalize }}
+# so the level is steered by a system message, not a sampling parameter. That is
+# why it can only be set through the chat template and not through the OpenAI
+# request body directly.
+#
+# Every row that lands on `max` is indistinguishable at the API from a correct
+# request. There is no error, no warning, and no field in the response that
+# reports the level in force — which is the whole reason this is pinned at the
+# server rather than left to callers, and why issue #57 exists.
+#
+# What max was costing us, measured on this deployment before pinning:
+#     GPQA-Diamond   23 of 198 items (11.6%) returned null content, having blown
+#                    past even the 32k cap. qwen3.8 at its pinned medium: 2/198.
+#     mean generation ~8,874 tokens per GPQA item
+#     tool-eval-full  responsiveness 28 of 100, mean 19.3 s per scenario, one at
+#                    100 s — near GLM-5.2's 32, and far below the small models
+#                    (Qwen3.5-9B 86, Mistral-Small-24B 93). MTP did not fix this
+#                    because the cost is tokens generated, not tokens per second.
+#
+# "high", not "low", because high is the sane middle of an accepted set of two —
+# the analogue of qwen's medium. `low` remains available per request.
+#
+# Per-request override: chat_template_kwargs={"reasoning_effort":"low"|"high"}.
+# --default-chat-template-kwargs is the only way to reach lm-eval, which cannot
+# send chat_template_kwargs — the same reason the qwen3.8 recipes use it.
+# =============================================================================
 #
 # --reasoning-parser stays glm45, matching upstream. Do NOT "fix" this to
 # deepseek_r1 — that was tried and measured, and it changes nothing. See #25.
