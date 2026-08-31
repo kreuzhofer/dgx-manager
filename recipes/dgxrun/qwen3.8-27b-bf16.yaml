@@ -276,7 +276,34 @@ command: |
 # MEASURED ON HARDWARE — dgx-spark-01, first boot 2026-08-28; MTP sweep 2026-08-29;
 #                         GPQA-Diamond 2026-08-30
 #
-#   ★ GPQA-Diamond.         76.77% (+/- 3.01), 152/198, flexible-extract / exact_match.
+#   ★★ GPQA-Diamond,        83.84% (+/- 2.62), 198/198, 2 nulls — preset
+#      INSTRUCTED.          acc-gpqa-diamond-full-longgen-formatted, which adds a system
+#                           instruction requiring the reply to end "The answer is (X)".
+#                           MEASURED 2026-08-31. THIS IS THE NUMBER TO QUOTE.
+#
+#                           flexible-extract 0.8384 AND strict-match 0.8384 — identical,
+#                           where the uninstructed run scored strict-match 0.0202.
+#
+#                           ⚠ THE UNINSTRUCTED NUMBER WAS LOW FOR A SECOND, INDEPENDENT
+#                           REASON. The expectation was that the instruction would only fix
+#                           strict-match while flexible-extract held near 76.77. It did not:
+#                           flexible-extract rose +7.1 points, 76.77 -> 83.84. So
+#                           flexible-extract was ITSELF failing to pull an answer out of
+#                           free-form CoT on ~7% of items and scoring them wrong — a
+#                           different failure from the empty-response nulls, and one that
+#                           survives even after the nulls are fixed.
+#                           CONSEQUENCE: every UNINSTRUCTED GPQA number on this fleet is a
+#                           floor, including GLM-5.2's 69.2 and the BF16-vs-NVFP4 tie below.
+#                           Do not compare an instructed score against an uninstructed one.
+#
+#                           Against Qwen's official 89.2 the gap narrows from 12.4 to 5.4
+#                           points, which is far more plausible as pure harness difference.
+#                           Against GLM-5.3-Flash's instructed 82.83 (+/- 2.69): +1.01 with
+#                           +/-2.6 error bars on each — NO DETECTABLE DIFFERENCE, not a win.
+#
+#   ★ GPQA-Diamond,         76.77% (+/- 3.01), 152/198, flexible-extract / exact_match.
+#      uninstructed.        SUPERSEDED by the instructed run above — kept because the
+#                           BF16-vs-NVFP4 comparison below was measured with it.
 #                           THE NUMBER THIS RECIPE EXISTS FOR: the unquantized reference
 #                           measured against the NVFP4 quant with no precision confound.
 #                             BF16  (this recipe, spark-01, nc=8)   76.77% +/- 3.01, 2 nulls
@@ -318,6 +345,14 @@ command: |
 #                           strict-match reads ~0.02-0.04 for both. That is the strict
 #                           answer-format filter failing on CoT prose, not a 2-4% score.
 #                           flexible-extract is the metric.
+#
+#                           ⚠ AND BOTH SIDES OF THIS TIE ARE UNINSTRUCTED, so both are
+#                           ~7 points low (see the instructed run above, which moved this
+#                           recipe 76.77 -> 83.84). The TIE itself should survive — the
+#                           extraction failure is a property of the harness, not of the
+#                           quantization, and the token-agreement result says the two models
+#                           make identical confident predictions. But if you need instructed
+#                           numbers for both, re-run both; do not add 7 points by hand.
 #
 #   ★ WHY they tied.        Measured directly 2026-08-31, and it explains the GPQA result far
 #                           better than the score alone does. TEACHER-FORCED greedy agreement:
