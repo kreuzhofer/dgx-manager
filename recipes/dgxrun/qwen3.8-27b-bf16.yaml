@@ -357,6 +357,30 @@ command: |
 #   Context.                KV cache 716,119 tokens at max_model_len 262144
 #                           (2.73x concurrency). The full native window is affordable —
 #                           only 16 of 64 layers hold a KV cache.
+#   Long context WORKS.     VERIFIED 2026-08-31, and it had never been exercised before —
+#                           every prompt this deployment had served was short, so the 262144
+#                           claim rested on nothing. Needle-in-a-haystack at 252,341 prompt
+#                           tokens (96% of the window), an unguessable constant buried in
+#                           homogeneous telemetry filler so it cannot be found by spotting a
+#                           formatting anomaly:
+#                               depth 10%  FOUND   406 s   622 tok/s prefill
+#                               depth 50%  FOUND   401 s   630 tok/s prefill
+#                               depth 90%  FOUND   267 s   946 tok/s prefill
+#                           Exact retrieval at all three, including the MIDDLE, which is the
+#                           classic failure position. The window is real.
+#   Prefill barely decays.  874 tok/s at 32K against 622-946 at 252K — essentially flat over
+#                           an 8x length increase. Quadratic attention never dominates here,
+#                           which is the hybrid design (16 of 64 layers) paying off on the
+#                           prefill side as well as the KV side.
+#   ⚠ But long context is   COMBINE THIS WITH THE PREFIX-CACHE FINDING BELOW BEFORE PLANNING
+#     impractical per-turn. ANY LONG-CONTEXT AGENTIC WORKLOAD. A full-window prompt costs
+#                           ~400 s of prefill, and prefix caching serves ZERO hits under MTP,
+#                           so that cost is paid IN FULL ON EVERY TURN — it is never amortised
+#                           across a conversation. A 250K agent context is therefore ~7 minutes
+#                           per turn before a single token is generated. The window is usable
+#                           for one-shot analysis of a large document; it is NOT usable for
+#                           multi-turn work at anything near full length until prefix caching
+#                           works (i.e. without MTP, or once vllm#52244 is fixed).
 #   MTP works, no drafter.  SpeculativeConfig(method='mtp', num_spec_tokens=5);
 #                           "Detected MTP model. Sharing target model embedding weights".
 #                           Over 8 diverse prompts: nst=5 accepts 47.4% of drafted tokens
