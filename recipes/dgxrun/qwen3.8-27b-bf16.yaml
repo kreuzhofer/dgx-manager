@@ -350,10 +350,49 @@ command: |
 #                           where MTP pays 5 sequential ones. Against Glimmer's larger
 #                           weights (59.6 vs 55.5 GB) the roofline puts that at ~1.12x; the
 #                           measured median is 1.11x. Both are bandwidth-bound at 273 GB/s.
-#   Vision.                 Works and is accurate. A 768x768 synthetic render of a bracket
-#                           with a hairline crack was described correctly, including the
-#                           defect's location between the two bores and its zigzag path.
-#                           Cost: 677 prompt tokens for one 768x768 image.
+#   Vision.                 ⚠ "Works and is accurate" WAS OVERSTATED, and the evidence for it
+#                           could not have shown otherwise: one image, containing a crack,
+#                           described correctly. A model that always reports a crack scores
+#                           100% on that test. Re-measured 2026-08-31 WITH NEGATIVE CONTROLS
+#                           — 4 synthetic bracket parts x 4 camera views, half defect-free,
+#                           on a prompt that does NOT presuppose a defect:
+#
+#                             single image @768px   cracks 4/4 | pits 1/4 | clean 4 ok,
+#                                                   3 FALSE POSITIVES, 1 empty reply
+#                             single image @1536px  pits 4/4   | clean 1 ok, 3 false positives
+#                             all 4 views, 1 request, @768px   3/4 — and BOTH clean parts
+#                                                   correctly passed
+#
+#                           TWO DIFFERENT FAILURES WITH TWO DIFFERENT CURES:
+#                           (1) MISSES are a resolution problem. 3-7px pits went 1/4 -> 4/4
+#                               by rendering at 1536 instead of 768. This is exactly what the
+#                               --mm-processor-kwargs note below predicts: fine surface
+#                               artifacts are resampled away before the model ever sees them.
+#                               Resolution is the sensitivity dial, and it works.
+#                           (2) FALSE POSITIVES are NOT. 3/4 at 768px, still 3/4 at 1536px —
+#                               resolution changes nothing, because the thing being misread
+#                               is plainly visible at both. The model calls the part's
+#                               MACHINING STEP LINE "a thin horizontal scratch". That is a
+#                               semantic error, not a perceptual one. In production it is a
+#                               reproducible FALSE REJECT ON EVERY PART, which is worse than
+#                               a miss — and single-defect-image testing cannot detect it.
+#
+#                           WHAT TO ACTUALLY DO: render at >=1536 (or raise max_pixels),
+#                           send all 4 views in ONE request (it suppressed both false
+#                           positives), and NAME THE PART'S LEGITIMATE FEATURES IN THE PROMPT
+#                           so the step line is not read as damage. The first two are
+#                           measured; the third follows from the failure mode and is untested.
+#
+#                           Cost: 594 prompt_tokens for one 768px image, 2364 at 1536px.
+#                           Four 1536px views is ~9.5K tokens — nothing against a 262K window.
+#
+#                           CAVEATS: synthetic renders, not real 3D output, and n is small
+#                           (16 single-view + 4 multi-view prompts). Treat the direction as
+#                           solid and the exact rates as indicative. Re-run against real
+#                           renders before trusting this for production inspection.
+#                           Harness note: an empty reply must NOT be scored as a defect
+#                           claim — the first version of this test did exactly that, the
+#                           same null-scoring bug that corrupts GPQA at a low token cap.
 #
 # ⚠ REASONING EFFORT — READ BEFORE BENCHMARKING
 #
