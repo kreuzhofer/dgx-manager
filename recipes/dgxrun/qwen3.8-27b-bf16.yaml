@@ -146,31 +146,50 @@ command: |
 #       does NOT disable it — the running engine reports enable_prefix_caching=True. To
 #       actually turn it off the flag is --no-enable-prefix-caching.
 #
-#       ⚠ IT IS ENABLED AND IT DOES NOTHING. MEASURED 2026-08-30: with MTP on, this engine
-#       serves ZERO prefix-cache hits. Not degraded — zero, on 1630+ queries, and a repeated
-#       1342-token prompt got no speedup (1.84 s both times). Verified against the flag, not
-#       assumed: the log says enable_prefix_caching=True and prefix_cache_queries_total
-#       increments while prefix_cache_hits_total stays at 0.
+#       ⚠ THE 2026-08-30 "ZERO HITS" FINDING WAS A PROMPT-LENGTH ARTIFACT. RETRACTED
+#       2026-08-31. That measurement used a 1342-token prompt and swept only the remainder
+#       (prompt_tokens % 16). It never crossed the reuse threshold, so it could only ever
+#       report zero. MTP and prefix caching are NOT mutually exclusive on this stack.
 #
-#       MTP IS THE CAUSE, proven by removing it. An otherwise identical deployment with
-#       --speculative-config dropped (speculative_config=None) hit the cache immediately:
-#       784 blocks on the first repeat, 1568 per pair after, and the repeat cost 1.12 s
-#       against 1.84 s with MTP. Nothing else changed.
+#       WHAT ACTUALLY HAPPENS (measured 2026-08-31 on this exact recipe, spark-01, MTP
+#       active at nst=5, image 2026081501). Hits follow an exact law with a hash unit of
+#       U = 816 tokens, losing exactly ONE unit to the MTP/EAGLE last-block drop:
 #
-#       This is BROADER than vllm#52244, which reports the collapse only for prompts that
-#       are a multiple of the hash unit. Tested at prompt_tokens % 16 = 14, 15, 0, 1, 2 —
-#       zero hits at every one. So on this stack MTP and prefix caching are MUTUALLY
-#       EXCLUSIVE; you get one or the other.
+#           hits(L) = max(0, floor((L-1)/U) - 1) * U        U = 816
 #
-#       KEEPING MTP ANYWAY, and here is the arithmetic. With P reused prompt tokens and G
-#       generated tokens, at the measured ~980 tok/s prefill:
-#           MTP on   =  P/980 + G/10.75      (full prefill every turn, no reuse)
-#           MTP off  =  ~0    + G/4.61       (prefix free, but decode is 2.33x slower)
-#       Break-even at P ~= 121 x G. Typical agentic turns sit far below that — 20K context
-#       generating 500 tokens is 67 s with MTP against 109 s without. MTP off only wins on
-#       very long contexts with very short replies (100K in / 200 out: 121 s vs 43 s).
-#       It also makes the silent-thinking wait far worse: first visible token at 34.7-260.2 s
-#       without MTP against 14.8-39.4 s with it.
+#       Every measured point fits it exactly:
+#           L =    166 /   322 /   622 / 1222  ->      0 hits   (below the cliff)
+#           L =   2422                          ->    816 hits  (33.7%)
+#           L =   4822                          ->   3264 hits  (67.7%)
+#           L =  19222                          ->  17952 hits  (93.4%)
+#           L =  48022                          ->  46512 hits  (96.8%)
+#
+#       So the zero-reuse threshold is 2*U = 1632 tokens. Below it you get nothing; above
+#       it the unreused remainder is bounded between U and 2*U REGARDLESS of context length.
+#       Measured TTFT, cold vs cached:  19K prompt 15.56 s -> 2.10 s ;  48K 33.01 s -> 2.62 s.
+#
+#       The 816-token unit is the inflated attention block that covers the GDN mamba page —
+#       the same mechanism as vllm#53749. It is not tunable from this recipe.
+#
+#       CONSEQUENCE — THE OLD BREAK-EVEN ARITHMETIC WAS WRONG AND IS WITHDRAWN. It assumed
+#       a full re-prefill every turn:
+#           OLD (wrong):  MTP on = P/980 + G/10.75      "full prefill every turn, no reuse"
+#       With caching working, the prefill term is bounded by 2*U/980 ~= 1.7 s at any context
+#       length, so:
+#           MTP on   =  ~1.7 s + G/10.75
+#           MTP off  =  ~0     + G/4.61
+#       MTP now wins at every context length, including the case the old comment carved out
+#       as its exception: 100K in / 200 out is ~20 s with MTP against ~43 s without, not
+#       "121 s vs 43 s". There is no prefix-heavy/reply-light regime where dropping MTP wins.
+#
+#       STILL TRUE, AND STILL WORTH WATCHING: the NVFP4 sibling deployment
+#       (qwen3.8-27b-nvfp4-rtx, vLLM v0.28.0, aihost01) shows 0 hits over 49M queried
+#       tokens with MTP active. Same model family, different image and quantization, and
+#       NOT explained by the law above. See vllm#54360 (spec decode zeroes hybrid-GDN hits
+#       on nightly, regression from v0.24.0) and vllm#53670 (the last-block drop costs a
+#       whole block per hit). The open fixes are #50897 (a committer's, "more proper", no
+#       review) and #53802 (3 files; measured on 2x DGX Spark + Qwen3.8-27B: ~0% -> 98%).
+#       Neither is merged as of 2026-08-31.
 #
 #       If your workload is genuinely prefix-heavy and reply-light, drop --speculative-config
 #       (nst=0 is REJECTED at config validation — the flag has to go entirely, which means a
