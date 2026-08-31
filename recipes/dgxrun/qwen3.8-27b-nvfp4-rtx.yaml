@@ -355,6 +355,28 @@ command: |
 #   fp8 KV) is mitigated by FLASHINFER_CUDA_ARCH_LIST=12.0f, reported at no throughput
 #   cost. This deployment does select FLASHINFER (startup log), so it is in scope.
 #
+#   SWE-bench Verified, FULL 500 (mini-SWE-agent 2.4.5, -w 8, swebench.yaml,
+#   model timeout 1800s, harness 4.1.0, reasoning_effort=medium):
+#       76.0% resolved (380/500), 95% CI +/- 3.7 pts (72.3-79.7%).
+#       488 completed / 108 unresolved / 12 empty patch / 0 errors.
+#       GLM-5.2 INT4 across FOUR Sparks scored 73.0% on the same harness. The
+#       intervals overlap, so this is COMPARABLE, not better — do not claim a win.
+#       (Two 50-instance pilots read 78.0% and 70.0%, straddling the true 76.0%,
+#        which is what a +/-12 pt interval at n=50 should do.)
+#
+#   ⚠ EFFECTIVE CONCURRENCY IS ~2, NOT 8 — for AGENTIC workloads.
+#       Measured during the 500 campaign: vLLM ran 1-4 requests (mean ~2.3) with
+#       4-7 queued, and EVERY queued request was reason="capacity" — KV capacity,
+#       never sequence slots. So max_num_seqs=8 is not the binding constraint
+#       here; the 111,070-token KV pool is, because agent conversations grow to
+#       tens of thousands of tokens and only ~2 fit resident.
+#       Consequence: pointing more client workers at this endpoint buys nothing.
+#       -w 8 and -w 4 would deliver near-identical throughput; the extra workers
+#       just queue. The only real lever is a smaller window (65,536 measured
+#       1.55x concurrency vs 1.13x), traded against context-exceeded failures.
+#       NOTE this is invisible in the throughput sweep, which uses fixed 512-token
+#       prompts where sequence slots DO bind and aggregate hits ~400 tok/s.
+#
 # COMPARISON TO THE SPARKS — read carefully, it is NOT apples to apples.
 #
 #   qwen3.8-27b-bf16.yaml measured 9–12 tok/s for the same model on one Spark; this is
