@@ -26,6 +26,25 @@
 # these nodes. We measured 0.90 failing by 0.05 GiB on this fleet (2026-07-10). 0.88 is
 # the value every GLM-5.2 recipe here uses and it clears reliably; it does not cap KV,
 # which is bounded by max_model_len and max_num_seqs.
+# REASONING STRENGTH IS PINNED TO "medium" - AND THE KNOB IS NOT CALLED WHAT YOU THINK.
+#
+# Glimmer's chat template reads `reasoning_strength`, NOT the `reasoning_effort` that
+# the Qwen3.8 recipes pin. Copying that line across would be accepted silently and do
+# nothing, leaving the model at its default:
+#
+#   {%- set rs = reasoning_strength if reasoning_strength is defined and reasoning_strength
+#                else 'high' -%}
+#   {{- 'Reasoning strength: ' + rs + '.' -}}
+#
+# The default is HIGH, i.e. maximum. Unpinned, the GPQA-Diamond run of 2026-08-30 spent
+# 3h18m at 60 s/item and still returned 7 null answers (3.5%) where thinking outran even
+# the 32768-token cap - each of which lm-eval scores WRONG. medium matches what the
+# Qwen3.8 recipes use, so the two are measured at comparable effort.
+#
+# The template only injects its default when the system prompt does not already mention
+# "reasoning strength" (it normalises "Reasoning effort" to "Reasoning strength" first),
+# so a benchmark run can override this per-run by saying so in its system instruction.
+# Pinning here makes the deployment's default explicit rather than inherited.
 recipe_version: "2"
 runner: dgxrun
 model: meta-models/Muse-Glimmer-30B
@@ -93,5 +112,6 @@ command: |
       --enable-auto-tool-choice \
       --tool-call-parser muse_glimmer \
       --reasoning-parser muse_glimmer \
+      --default-chat-template-kwargs '{"reasoning_strength":"medium"}' \
       --generation-config auto \
       --speculative-config '{"method":"dflash","model":"meta-models/Muse-Glimmer-30B-assistant","num_speculative_tokens":{num_speculative_tokens}}'
