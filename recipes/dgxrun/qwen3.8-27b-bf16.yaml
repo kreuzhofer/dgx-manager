@@ -319,6 +319,40 @@ command: |
 #                           answer-format filter failing on CoT prose, not a 2-4% score.
 #                           flexible-extract is the metric.
 #
+#   ★ WHY they tied.        Measured directly 2026-08-31, and it explains the GPQA result far
+#                           better than the score alone does. TEACHER-FORCED greedy agreement:
+#                           feed BOTH endpoints the identical text via /v1/completions with
+#                           echo + logprobs, and compare each model's argmax at every position.
+#                           No free-running generation, so nothing compounds.
+#
+#                             CONTROL, BF16 vs ITSELF   291/291 = 100.00%, |dlogprob| 0.0000
+#                             BF16 vs NVFP4             282/291 =  96.91%
+#                             ...confident positions    188/188 = 100.00%  (BF16 p>0.5)
+#                             ...structured code        112/112 = 100.00%
+#                             median |dlogprob| on the same token: 0.018 nats (p95 0.41)
+#
+#                           The control matters: teacher-forced prefill is bit-deterministic
+#                           here, so the metric's floor is exactly 100% and the whole 3.09%
+#                           gap is QUANTIZATION, with no nondeterminism to subtract.
+#
+#                           NVFP4 only perturbs decisions the model does not care about. Zero
+#                           disagreements at confident positions; every one was a near-tie
+#                           between equivalent choices (',' vs ' and', ',' vs ' rather',
+#                           ' \(' vs ' $'). That is why the two GPQA scores are identical —
+#                           an answer that hinges on a confident prediction cannot move.
+#
+#   ⚠ Before spending a     THIS TEST COSTS 10 MINUTES and 8 requests. Run it BEFORE any
+#     night on SWE-bench.   expensive quant comparison. At 3.09% per-token divergence the
+#                           expected distance to first divergence is ~32 tokens, so any long
+#                           agentic trajectory WILL diverge — but it diverges the way two coin
+#                           flips diverge, not the way a worse model does, and those near-tie
+#                           flips are the same class that already makes 20% of SWE-bench
+#                           instances flip between IDENTICAL runs. With ~6-point resolution at
+#                           n=500 against an effect this small, SWE-bench would measure its
+#                           own noise. Run it for the standalone BF16 number and the agentic
+#                           axis if you want them — but do NOT read the gap as a quality
+#                           difference, and do not run it AS a quantization test.
+#
 #   Loads and serves.       vramActual 103,778 MiB; graph capture 5 s / 0.13 GiB.
 #   Context.                KV cache 716,119 tokens at max_model_len 262144
 #                           (2.73x concurrency). The full native window is affordable —
