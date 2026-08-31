@@ -193,18 +193,42 @@ command: |
 #       not confirmed present in this pinned tag.
 #
 # VISION TUNING — the knobs that matter for inspecting 3D renders. All verified present in
-# this pinned image via `vllm serve --help=all`. Left at defaults for the first boot so a
-# syntax error cannot masquerade as a load failure; tune against the live endpoint.
+# this pinned image via `vllm serve --help=all`. Still at defaults, and after measuring
+# against the live endpoint (2026-08-31) that is the right place for them: the one flag this
+# block used to say was MANDATORY for multi-view turns out not to be needed at all.
 #
 #   --limit-mm-per-prompt
-#       DEFAULT IS 1 IMAGE PER REQUEST. Raise before sending multi-view prompts (e.g. four
-#       camera angles of one part in one request), or those requests are rejected.
+#       ⚠ CORRECTED 2026-08-31 — the previous note here was WRONG. It claimed "DEFAULT IS 1
+#       IMAGE PER REQUEST... or those requests are rejected". Not on this build. MEASURED
+#       against the live endpoint: a 2-image request succeeded (prompt_tokens 1173) and a
+#       4-image request succeeded (prompt_tokens 2337, and the model correctly answered "4"
+#       when asked how many images it received). The engine never logs an mm limit at all.
+#       So MULTI-VIEW NEEDS NO FLAG — do not add one on the strength of a comment.
+#
+#       And the images are genuinely USED, not merely tokenized: in a forced-choice between
+#       one clean and one cracked part, the model picked the defective image correctly in
+#       BOTH orders (clean,crack -> "Image 2"; crack,clean -> "Image 1"), so it discriminates
+#       on content rather than position.
+#
+#       COST, measured marginally rather than from a single total: a second 768x768 image
+#       adds 579 tokens (1173-594), and the 4-image case works out at 581 each. Call it
+#       ~580 tokens per 768px view. Four camera angles is ~2.4K tokens against a 262K
+#       window — multi-view is effectively free, so budget is not the constraint here.
 #
 #   --mm-processor-kwargs
 #       Qwen-VL dynamic resolution: min_pixels / max_pixels. This is the real quality lever
 #       for defect inspection — too low and fine surface artifacts are resampled away before
 #       the model ever sees them; too high and a single render eats the token budget. Tune
 #       against actual renders, not a benchmark.
+#
+#       MEASURED token cost vs square resolution (same image, one per request, prompt_tokens
+#       including ~15 tokens of prompt/template overhead):
+#           256px ->    82     512px ->   274     768px ->   594
+#          1024px ->  1042    1536px ->  2322
+#       Cost tracks PIXEL AREA, near-linearly (768->1536 is 4x the pixels and 3.9x the
+#       tokens). So max_pixels is a direct token dial: doubling the edge quadruples the bill.
+#       Nothing here is expensive at a 262K window — pick resolution on whether the defect
+#       survives resampling, not on token budget.
 #
 #   --mm-processor-cache-gb
 #       Caches processed images; worth setting if the same render is queried repeatedly.
