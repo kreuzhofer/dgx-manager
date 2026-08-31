@@ -8,6 +8,7 @@ describe("BENCHMARK_PRESETS", () => {
       "acc-bbh-quick",
       "acc-gpqa-diamond-full",
       "acc-gpqa-diamond-full-longgen",
+      "acc-gpqa-diamond-full-longgen-formatted",
       "acc-gpqa-diamond-quick",
       "acc-gsm8k-full",
       "acc-gsm8k-quick",
@@ -182,3 +183,45 @@ describe("long-generation accuracy variants", () => {
     expect((getPreset("acc-gpqa-diamond-full")!.config as AccuracyConfig).maxGenToks).toBe(4096);
   });
 });
+
+describe("answer-format preset variant", () => {
+  // GPQA's prompt never states an answer format: doc_to_text ends "Let's think
+  // step by step: " and the filters then demand either "The answer is " or a
+  // parenthesised capital. Muse Glimmer reasoned correctly, wrote "This is
+  // choice B", matched neither, and scored 22.73 against a published 83.5.
+  // Instructing the format lifted the same model to 82.83 on the same 198 items.
+  //
+  // ADDITIVE, exactly as longGenToks is: an instruction changes what the number
+  // MEANS, so it must never appear on the presets whose values are already
+  // baselines (GLM-5.2 67.68, DeepSeek 55.05, Qwen 76.77, GLM-5.3 81.31 were all
+  // measured WITHOUT one). A separate id is also what makes an instructed number
+  // reproducible from the dashboard instead of requiring a remembered string.
+  it("emits a formatted variant alongside the plain longgen preset", () => {
+    const ids = listPresets().map((p) => p.id);
+    expect(ids).toContain("acc-gpqa-diamond-full-longgen");
+    expect(ids).toContain("acc-gpqa-diamond-full-longgen-formatted");
+  });
+
+  it("carries an instruction that satisfies the strict-match filter", () => {
+    const p = getPreset("acc-gpqa-diamond-full-longgen-formatted")!;
+    const cfg = p.config as AccuracyConfig;
+    // strict-match is regex "(?<=The answer is )(.*)(?=.)" — the instruction is
+    // worthless unless it asks for that literal phrasing.
+    expect(cfg.systemInstruction).toContain("The answer is");
+    expect(cfg.maxGenToks).toBe(32768);
+  });
+
+  it("leaves the baseline presets free of any instruction", () => {
+    for (const id of ["acc-gpqa-diamond-quick", "acc-gpqa-diamond-full", "acc-gpqa-diamond-full-longgen"]) {
+      const p = getPreset(id)!;
+      expect((p.config as AccuracyConfig).systemInstruction).toBeUndefined();
+    }
+  });
+
+  it("adds no formatted variant for benches without an instruction", () => {
+    const ids = listPresets().map((p) => p.id);
+    expect(ids).not.toContain("acc-ifeval-full-longgen-formatted");
+    expect(ids).not.toContain("acc-gsm8k-full-longgen-formatted");
+  });
+});
+

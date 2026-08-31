@@ -83,6 +83,27 @@ type AccuracyBench = {
    * invalidate every number already measured with it.
    */
   longGenToks?: number;
+  /**
+   * When set (alongside {@link longGenToks}), also emit an
+   * `acc-<idBase>-full-longgen-formatted` preset carrying this as a system
+   * instruction.
+   *
+   * Exists because this task's prompt never states an answer format while its
+   * filters demand one. GPQA's doc_to_text ends "Let's think step by step: " and
+   * strict-match then requires the literal "The answer is ". Muse Glimmer
+   * reasoned correctly, wrote "This is choice B", matched neither filter and
+   * scored 22.73 against a published 83.5; instructing the format lifted the
+   * same model to 82.83 on the same 198 items (2026-08-31).
+   *
+   * ADDITIVE for the same reason longGenToks is. An instruction changes what the
+   * number MEANS, so it must never reach the presets whose values are already
+   * baselines - GLM-5.2 67.68, DeepSeek 55.05, Qwen3.8 76.77 and GLM-5.3 81.31
+   * were all measured without one, and are not comparable with a run that has
+   * one. A distinct preset id is also what makes an instructed number
+   * reproducible from the dashboard rather than requiring someone to remember
+   * the exact wording.
+   */
+  answerFormatInstruction?: string;
 };
 
 // The v1 lineup: HF Open LLM Leaderboard v2 minus MuSR, all generative/CoT so
@@ -91,7 +112,7 @@ type AccuracyBench = {
 const ACCURACY_BENCHES: AccuracyBench[] = [
   { idBase: "ifeval", label: "IFEval", task: "ifeval", primaryMetric: "prompt_level_strict_acc", quickLimit: 100, maxGenToks: 2048, blurb: "Instruction-following adherence." },
   { idBase: "mmlu-pro", label: "MMLU-Pro (CoT)", task: "mmlu_pro", primaryMetric: "exact_match", quickLimit: 200, maxGenToks: 4096, blurb: "Knowledge/reasoning tail, chain-of-thought." },
-  { idBase: "gpqa-diamond", label: "GPQA-Diamond (CoT)", task: "gpqa_diamond_cot_zeroshot", primaryMetric: "exact_match", quickLimit: 50, maxGenToks: 4096, longGenToks: 32768, blurb: "Hard graduate-level Q&A, chain-of-thought." },
+  { idBase: "gpqa-diamond", label: "GPQA-Diamond (CoT)", task: "gpqa_diamond_cot_zeroshot", primaryMetric: "exact_match", quickLimit: 50, maxGenToks: 4096, longGenToks: 32768, blurb: "Hard graduate-level Q&A, chain-of-thought.", answerFormatInstruction: "After your reasoning, end your reply with a final line in exactly this form: The answer is (X) - where X is the letter A, B, C or D of the correct choice. This exact wording is required." },
   { idBase: "gsm8k", label: "GSM8K", task: "gsm8k_cot", primaryMetric: "exact_match", quickLimit: 200, maxGenToks: 2048, blurb: "Grade-school math word problems." },
   { idBase: "bbh", label: "BBH", task: "bbh_cot_zeroshot", primaryMetric: "exact_match", quickLimit: 40, maxGenToks: 4096, blurb: "Big-Bench-Hard reasoning suite, chain-of-thought." },
   { idBase: "math-hard", label: "MATH-hard", task: "leaderboard_math_hard", primaryMetric: "exact_match", quickLimit: 100, maxGenToks: 4096, blurb: "Competition-level MATH (level-5)." },
@@ -156,6 +177,27 @@ function accuracyPresets(): BenchmarkPreset[] {
           timeout: Math.ceil(b.longGenToks / SLOWEST_PER_REQUEST_TOKS_PER_SEC),
         },
       });
+
+      if (b.answerFormatInstruction) {
+        out.push({
+          id: `acc-${b.idBase}-full-longgen-formatted`,
+          label: `${b.label} \u2014 full, long generation, answer format instructed`,
+          description:
+            `${b.blurb} As the long-generation preset, plus a system instruction telling the ` +
+            `model how to phrase its final answer. Use it for a model whose answers the ` +
+            `extraction filters cannot find \u2014 Muse Glimmer scored 22.73 here and 82.83 with ` +
+            `the instruction, on the same 198 items. NOT comparable with runs from the other ` +
+            `presets: instructing the format changes what the score means, so compare instructed ` +
+            `runs only with instructed runs.`,
+          kind: "accuracy",
+          config: {
+            ...base,
+            maxGenToks: b.longGenToks,
+            timeout: Math.ceil(b.longGenToks / SLOWEST_PER_REQUEST_TOKS_PER_SEC),
+            systemInstruction: b.answerFormatInstruction,
+          },
+        });
+      }
     }
   }
   return out;
