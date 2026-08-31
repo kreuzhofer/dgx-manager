@@ -1,0 +1,200 @@
+# @dgxrun/qwen3.8-27b-nvfp4 — Qwen3.8-27B at NVFP4, on ONE DGX Spark.
+#
+# THE SERVING COUNTERPART to qwen3.8-27b-bf16.yaml, which is the MEASUREMENT recipe.
+# Same model, same hardware, same window — the only difference is precision, and as of
+# 2026-08-31 we have the evidence that precision is free here:
+#
+#   GPQA-Diamond      BF16 76.77% +/- 3.01   vs   NVFP4 76.77% +/- 3.01   (identical)
+#   token agreement   100% at every position where the model is confident (188/188);
+#                     the 3.09% that differs is all near-ties (',' vs ' and')
+#
+# So the survey's "use FP8 for serving, BF16 for measuring" split now has a third, better
+# option on this fleet: NVFP4 for serving. It is ~2.4x fewer weight bytes than BF16 (21.8
+# vs 51.7 GiB) on a bandwidth-bound decode, so expect roughly 2x the tok/s, plus ~30 GiB
+# more room for KV. BF16 stays the recipe you benchmark against, because a measurement
+# wants reference weights.
+#
+# ⚠ THE UNVALIDATED PART, AND THE WHOLE REASON TO SMOKE TEST: the NVFP4 kernel path on
+# sm_121. The RTX sibling runs this checkpoint on sm_120, which has native FP4 tensor
+# cores. GB10 is sm_121a and the survey records that W4A16_NVFP4 falls back to FP4 MARLIN
+# off SM100 — not capability-gated out (compressed_tensors_w4a4_nvfp4.py has
+# get_min_capability 75), but a fallback path nobody on this fleet has exercised. It may
+# load and be slower than the arithmetic suggests. Measure before believing.
+#
+# THE CHECKPOINT IS MIXED-PRECISION, NOT UNIFORM NVFP4. Read from its own config.json:
+#   NVFP4 (4-bit, tensor_group, group_size 16)   mlp.gate/up/down_proj, layers 0-55
+#   FP8   (8-bit float, CHANNEL-wise weights)    all self_attn q/k/v/o_proj,
+#                                                linear_attn in_proj_qkv/z/out_proj,
+#                                                lm_head, and layers 56-63 MLPs
+#   UNQUANTIZED (303 modules in `ignore`)        110 vision-tower modules, the GDN
+#                                                norm/in_proj_a/in_proj_b, and `re:^mtp.*`
+# Two consequences worth knowing. The VISION TOWER IS BIT-IDENTICAL to BF16, so nothing in
+# the vision findings recorded in the BF16 recipe changes here. And the MTP head is
+# unquantized, which is why its acceptance tracks BF16's so closely.
+#
+# WHY vllm#51884 SHOULD NOT BITE. That issue is blockwise-FP8 weights failing in
+# process_weights_after_loading on capability family 12 ("Unknown SF transformation") —
+# which is this card family. But this checkpoint's FP8 group is `strategy: channel`, NOT
+# blockwise (no block_structure), so it should take a different kernel path. If load fails
+# there anyway, the documented escape hatch is in the env block below.
+recipe_version: "2"
+runner: dgxrun
+model: unsloth/Qwen3.8-27B-NVFP4
+runtime: vllm
+container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:2026081501
+description: Qwen3.8-27B NVFP4 on one Spark — the serving recipe, BF16 is the measurement one
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+
+  # 0.88, the Spark value — NOT the RTX recipe's 0.94. That 0.94 exists because aihost01 has
+  # discrete VRAM and no unified-memory guard; here vLLM's startup guard compares gmu*total
+  # against CUDA-VISIBLE free, which runs ~7 GiB below MemFree, and 0.90 was measured failing
+  # by 0.05 GiB on this fleet (2026-07-10). Copying 0.94 across would fail to boot.
+  gpu_memory_utilization: 0.88
+
+  # Full native window, as in the BF16 recipe. Affordable for the same reason — only 16 of
+  # 64 layers hold a KV cache — and MORE affordable here, since the weights free ~30 GiB.
+  # BF16 measured a 716,119-token pool at this window; expect comfortably more.
+  max_model_len: 262144
+
+  # Matches the benchmark harness (-w 8 for mini-SWE-agent, num_concurrent 8 for lm-eval)
+  # and the BF16 recipe, so the two are comparable without a batching confound.
+  max_num_seqs: 8
+
+  # 2048, INHERITED from the BF16 recipe and NOT independently justified here. Note the
+  # rationale printed in older recipes — "vLLM clamps to 2048 under speculative decoding
+  # anyway" — was DISPROVEN in b081143. So this value is a copied default, not a measured
+  # one. Worth a paired sweep against 8192 if anyone cares.
+  max_num_batched_tokens: 2048
+
+  # 5, inherited from the BF16 sweep (10.99 -> 11.38 tok/s going 3 -> 5; nst=7 was worse).
+  #
+  # ⚠ EXPECT THE OPTIMUM TO BE LOWER HERE, and re-sweep before trusting 5. MTP drafts
+  # autoregressively, so each speculative token costs a pass over the MTP layer plus the
+  # lm_head. Quantization shrinks the TARGET far more than it shrinks the draft step: the
+  # MTP head is unquantized and lm_head is only FP8, so drafting overhead goes from roughly
+  # 29% of the target read at BF16 to roughly 43% here. Relatively more expensive drafting
+  # usually means a lower optimum. Sweep 3 vs 5 with the paired 8-prompt method before
+  # quoting anything.
+  num_speculative_tokens: 5
+
+  # No platform suffix: a Spark is the DEFAULT target in this catalog (every recipe here
+  # except *-rtx runs on one), which is why the BF16 sibling is `qwen3.8-27b-bf16` and not
+  # `-spark` either. The RTX recipe carries `-rtx` because it is the exception.
+  #
+  # NOTE this is the same string the RTX recipe publishes. If you ever run BOTH at once,
+  # disambiguate with a per-deploy `displayName` rather than editing this — that is how the
+  # fleet already does it (the BF16 recipe declares `qwen3.8-27b` and its live deployment
+  # publishes `qwen3.8-27b-bf16`). Do NOT let the two pool under one published name: they
+  # differ by ~5x in speed, so round-robin between them would make latency unpredictable.
+  served_model_name: qwen3.8-27b-nvfp4
+
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      --tensor-parallel-size {tensor_parallel} \
+      --max-model-len {max_model_len} \
+      --max-num-seqs {max_num_seqs} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --enable-auto-tool-choice \
+      --tool-call-parser qwen3_coder \
+      --reasoning-parser qwen3 \
+      --generation-config auto \
+      --default-chat-template-kwargs '{"reasoning_effort":"medium"}' \
+      --speculative-config '{"method":"mtp","num_speculative_tokens":{num_speculative_tokens}}'
+
+# ---------------------------------------------------------------------------------------
+# CARRIED OVER FROM THE BF16 RECIPE — same model family, same hardware, so these hold:
+#
+#   reasoning_effort=medium is PINNED, and that is not cosmetic. The template default is
+#   xhigh (the maximum, and nobody chose it — it ships in the checkpoint). On GPQA, medium
+#   took the null rate from 13.5% to 1% and ran 5x faster (52 s/item against 352). At xhigh
+#   the model reasons past even a 32768-token cap and returns EMPTY content, which lm-eval
+#   scores WRONG in silence. See 60e662d.
+#
+#   The qwen3 parser emits NOTHING during the reasoning phase, so expect tens of seconds of
+#   dead air before the first token, and NEVER measure throughput as
+#   tokens/(wall - time-to-first-token) — that counts thinking as prefill and inflated a
+#   real 10.75 tok/s to 14.66. Use tokens/wall.
+#
+#   Vision: the tower is unquantized in this checkpoint, so the BF16 recipe's measured
+#   vision findings apply unchanged — multi-view needs no flag, ~580 tokens per 768px view,
+#   render at >=1536 or fine defects are resampled away, and send 4 views in one request to
+#   suppress the machining-feature false positives.
+#
+# ⚠ MANDATORY FIRST-BOOT CHECK — sglang#34895 reports a dropped `lm_head weight_scale` on
+# THIS EXACT REPO producing degenerate repetition. That is a SILENT failure: the server
+# comes up healthy and serves garbage. Do not skip the coherence check; a load success
+# proves nothing. The RTX sibling ran it and the failure did not materialise there
+# (4 prompts at temperature 0, 6-gram repetition 0.00), and vLLM logs that it shares the
+# TARGET model's lm_head with the draft, so a bad scale in the MTP weights is never used.
+#
+# env:
+#   VLLM_USE_DEEP_GEMM: "0"
+#   VLLM_MOE_USE_DEEP_GEMM: "0"
+#       THE ESCAPE HATCH for vllm#51884, if the FP8 half of this mixed-precision checkpoint
+#       trips the family-12 DeepGEMM gate at load. Expected NOT to be needed (this
+#       checkpoint's FP8 is channel-wise, not blockwise) — but if load dies in
+#       process_weights_after_loading with "Unknown SF transformation", set both.
+# ---------------------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------------------
+# MEASURED ON HARDWARE — dgx-spark-04, 2026-08-31, first boot of this recipe
+#
+#   ★ THE FP4 PATH IS REAL ON sm_121. The open question this recipe was written around —
+#     whether GB10 falls back to FP4 Marlin — is answered: the engine selects
+#     NvFp4LinearKernel / fp4_gemm, not Marlin. And the FP8 half loads through
+#     CompressedTensorsW8A8Fp8, confirming the channel-wise prediction: vllm#51884's
+#     blockwise family-12 DeepGEMM gate never fired and the escape-hatch env vars are
+#     NOT needed.
+#
+#   Loads and serves.       vramActual 102,892 MiB.
+#   Context.                KV cache 2,091,453 tokens at max_model_len 262144 — 7.98x
+#                           concurrency, and 2.9x the BF16 sibling's 716,119. Quantizing
+#                           buys context headroom as well as speed.
+#   MTP.                    Engaged at nst=5; "Detected MTP model", sharing the target's
+#                           embedding AND lm_head with the draft.
+#   Coherence.              PASS — worst 6-gram repetition 0.109 over 4 prompts at
+#                           temperature 0, and that value comes from the code prompt where
+#                           Python boilerplate repeats legitimately. sglang#34895 did NOT
+#                           materialise here. This check is not optional: the failure it
+#                           guards against is silent, so "it loaded" proves nothing.
+#
+#   THROUGHPUT — preset `throughput` (llama-benchy, pp 512 / tg 128, 2 runs), persisted in
+#   the manager as run cmtherrqp0l9j2auhv15klpag. Measured on an IDLE node; a first attempt
+#   was cancelled because an ad-hoc sweep was still running against it, and a contended
+#   throughput number looks entirely plausible while being wrong.
+#
+#     concurrency        1        4       16       32       64
+#     decode tok/s   21.25    70.92    98.33   104.75   104.91
+#     peak              29      103    154.5    164.5      164
+#     prefill tok/s   1240     1503      591      460      418
+#     TTFR           392 ms    1.2 s    6.2 s   15.2 s   35.0 s
+#
+#   ~2x THE BF16 SIBLING at concurrency 1: 21.25 against 10.75 tok/s. That is the
+#   bandwidth-bound prediction landing almost exactly — 2.4x fewer weight bytes, minus
+#   drafting overhead that does not shrink with them.
+#
+#   DECODE SATURATES AT ~105 tok/s FROM CONCURRENCY 32, which is the max_num_seqs: 8 cap.
+#   Past it nothing improves and latency doubles: c32 and c64 return the same decode while
+#   TTFR goes 15.2 s -> 35.0 s. Do not raise concurrency past 8 expecting throughput.
+#   PREFILL PEAKS AT CONCURRENCY 4 (1503 tok/s) then collapses to 418 as prefill and decode
+#   contend for a queued batch — so a prefill-heavy workload wants LOW concurrency, which is
+#   the opposite of the usual intuition.
+#
+#   ⚠ NOT YET MEASURED: the BF16 sibling has no `throughput` preset run, so the 2x above
+#   compares this preset against an 8-prompt ad-hoc sweep. Run `throughput` on
+#   qwen3.8-27b-bf16 for a like-for-like persisted pair. And nst=5 is still INHERITED here —
+#   see the num_speculative_tokens comment for why the optimum is expected to be LOWER at
+#   NVFP4 than the 5 measured at BF16.
+#
+#   Do not quote decode numbers from the RTX sibling: that card has ~6.6x the memory
+#   bandwidth. For reference it reaches 115.4 / 228.0 / 397.3 / 401.6 / 400.8 at the same
+#   concurrencies, i.e. 3-5x this — hardware, not precision.
+# ---------------------------------------------------------------------------------------
