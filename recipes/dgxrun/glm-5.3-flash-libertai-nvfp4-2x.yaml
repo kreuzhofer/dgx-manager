@@ -441,6 +441,39 @@ command: |
 #   returning nothing. Pick max only if a headline benchmark number is the
 #   goal — and note that 81.31 was itself depressed by its own nulls.
 #
+# INSTRUCTED RUN — A DIFFERENT MEASUREMENT, NOT A BETTER BASELINE.
+#
+#     preset acc-gpqa-diamond-full-longgen-formatted, reasoning_effort=high,
+#     198/198, seed 42, numConcurrent 16, timeout 7200s   [2026-08-31]
+#
+#                          flexible-extract   strict-match   nulls    duration
+#     instructed           82.83 +/- 2.69     0.8182         9/198    2.53h
+#     un-instructed (high) 77.27 +/- 2.99     0.0354         7/198    1.79h
+#
+#   STRICT-MATCH ROSE 23x. The model could always produce the expected envelope;
+#   nobody had asked it to. And the two filters now AGREE (0.8182 vs 0.8283)
+#   where they previously differed by a factor of 23 — that convergence is the
+#   real result, because it means the score is no longer an artifact of which
+#   regex you trust.
+#
+#   flexible-extract gained +5.56. So the looser filter was catching most but
+#   not all correct answers: real upside, and nowhere near Muse Glimmer's
+#   60-point swing, exactly because our flexible filter was already working.
+#
+#   COMPARE IT ONLY WITH OTHER INSTRUCTED RUNS. Muse Glimmer instructed scored
+#   82.83 on the same 198 items — identical to two decimals, which is a
+#   coincidence and should not be read as the models being equivalent. It is NOT
+#   comparable with GLM-5.2 67.68, DeepSeek 55.05 or Qwen3.8 76.77, all of which
+#   are un-instructed.
+#
+#   CAVEAT: two variables moved. The manager was rebuilt between the
+#   un-instructed and instructed runs, so this used a newer harness (extraction
+#   findings + derived longgen timeout). The 23x strict-match jump is plainly the
+#   instruction; the +5.56 on flexible-extract cannot be cleanly attributed.
+#
+#   Nulls are unchanged (7 -> 9). The instruction fixes EXTRACTION, not
+#   generation length — the 32k-cap problem below is untouched by it.
+#
 # THIRD REASON BOTH NUMBERS ARE FLOORS: no answer-format instruction.
 #
 #   GPQA's prompt never states an answer format — doc_to_text ends "Let's think
