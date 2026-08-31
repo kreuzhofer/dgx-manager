@@ -414,10 +414,40 @@ command: |
 #
 # ------------------------------- BENCHMARKS -----------------------------------
 #
-# GPQA-Diamond (CoT, zero-shot): 81.31 +/- 2.78   [2026-08-30]
-#     preset acc-gpqa-diamond-full-longgen, 198/198 items, seed 42,
-#     maxGenToks 32768, numConcurrent 16, timeout 7200s, 5h37m,
-#     0 timeouts / 0 retries.
+# GPQA-Diamond (CoT, zero-shot) — MEASURED AT BOTH EFFORT LEVELS.
+# Same harness, same seed, same caps; ONLY --default-chat-template-kwargs changed.
+#
+#     reasoning_effort   score            nulls          duration
+#     high (SHIPPED)     77.27 +/- 2.99   7/198  (3.5%)  1.79h   [2026-08-31]
+#     max  (old default) 81.31 +/- 2.78   23/198 (11.6%) 5.60h   [2026-08-30]
+#
+#   preset acc-gpqa-diamond-full-longgen, 198/198, seed 42, maxGenToks 32768,
+#   numConcurrent 16, timeout 7200s, 0 timeouts on both runs.
+#
+# THE TRADE, stated honestly: 4.04 points for 3.1x the speed.
+#
+#   The drop is NOT statistically established. 81.31 +/- 2.78 and 77.27 +/- 2.99
+#   overlap across 78.5-80.1; 4.04 points against ~2.9-point standard errors is
+#   about 1 sigma on 198 items. Do not quote "max is 4 points better" as fact.
+#
+#   And part of the gap is mechanical rather than capability: every null scores
+#   WRONG, and max carried 16 more of them. So max's 81.31 was measured while
+#   auto-failing 11.6% of items, and high's true capability deficit is probably
+#   smaller than 4.04. BOTH numbers remain floors.
+#
+#   high is shipped because 3.1x faster at ~1 sigma is the right trade for
+#   interactive use, and because it fixes the failures that actually bite:
+#   tool-eval responsiveness 28/100, and 11.6% of long answers silently
+#   returning nothing. Pick max only if a headline benchmark number is the
+#   goal — and note that 81.31 was itself depressed by its own nulls.
+#
+# WANTED: a clean `max` measurement. Both runs were capped at maxGenToks 32768,
+# which is what generates the nulls — at reasoning_effort=max this model needs
+# more than that for ~12% of GPQA. At TP4 the context ceiling rises far above
+# 320K (see #58), so the generation cap could be raised well past 32k and a max
+# run would lose most of its auto-failures. That is the measurement that would
+# settle whether max is genuinely better or merely less penalised. Until then,
+# treat the 4-point gap as unresolved.
 #
 # For context, measured on this same cluster:
 #     qwen3.8-27b (bf16 and nvfp4)   76.77   longgen 32k
