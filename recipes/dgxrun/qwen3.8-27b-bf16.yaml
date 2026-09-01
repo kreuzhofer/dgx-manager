@@ -388,11 +388,15 @@ command: |
 #                           axis if you want them — but do NOT read the gap as a quality
 #                           difference, and do not run it AS a quantization test.
 #
-#                           DECIDED 2026-08-31: SKIPPED on this side. Measured cost was ~1.5-2
-#                           DAYS of one Spark (the NVFP4 500-run managed 98 instances/hour on
-#                           the RTX; BF16 is 7-10x slower in aggregate at concurrency 8), for
-#                           a result the token-agreement test already predicts is
-#                           indistinguishable. The NVFP4 verified500 number stands alone.
+#                           DECIDED 2026-08-31: skipped — then REVERSED 2026-09-01 and it is
+#                           RUNNING. The cost estimate stands (~1.5-2 days of one Spark; the
+#                           NVFP4 500-run managed 98 instances/hour on the RTX and BF16 is
+#                           7-10x slower in aggregate at concurrency 8), and so does the
+#                           prediction that the BF16-vs-NVFP4 delta will be indistinguishable.
+#                           It is being run for the STANDALONE reference-weights number and
+#                           the agentic axis, NOT as a quantization test — read the result
+#                           that way. Script: ~/swebench/run_qwen38_bf16_swe500.sh on
+#                           agenthost, output qwen38_bf16_verified500.
 #
 #                           ⚠ IF YOU EVER DO RUN IT HERE, DO NOT COPY THE RTX FLAGS VERBATIM.
 #                           `model.model_kwargs.timeout=1800` is comfortable at the RTX's
@@ -408,6 +412,10 @@ command: |
 #                           reproducibility: the seeded --shuffle only determines WHICH
 #                           instances a --slice picks, and a full 500-run has no slice.
 #                           Keep -w 8 equal to max_num_seqs.
+#                           APPLIED in run_qwen38_bf16_swe500.sh, which is the NVFP4 script
+#                           with exactly two changes: the endpoint (spark-01) and
+#                           timeout 1800 -> 7200. Everything else is byte-identical so the
+#                           two runs stay comparable.
 #
 #   Loads and serves.       vramActual 103,778 MiB; graph capture 5 s / 0.13 GiB.
 #   Context.                KV cache 716,119 tokens at max_model_len 262144
