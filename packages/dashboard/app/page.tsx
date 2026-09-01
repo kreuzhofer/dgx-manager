@@ -42,6 +42,7 @@ interface Node {
   ipAddress: string;
   status: string;
   powerState?: string;
+  macAddress?: string | null;
   gpuModel: string | null;
   vramTotal: number | null;
   agentVersion?: string | null;
