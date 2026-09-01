@@ -307,7 +307,8 @@ command: |
 #       overrun are harder than average, not representative. Prefer a measured
 #       number over an adjusted one.
 #
-# PREFIX CACHING IS ON BY DEFAULT HERE, AND IT IS STARVED, NOT BROKEN. MEASURED 2026-08-31.
+# PREFIX CACHING IS ON BY DEFAULT HERE, AND IT IS STARVED, NOT BROKEN. MEASURED 2026-08-31,
+# CONFIRMED BY AN IDLE RE-PROBE 2026-09-01 (the discriminator this block asked for).
 #
 #   This recipe passes no caching flag either way. On v0.28.0 that means ENABLED:
 #   vllm#50991 shipped in this release under "New defaults — prefix caching enabled by
@@ -343,13 +344,40 @@ command: |
 #   the confound that actually explains it is POOL HEADROOM x LOAD, not vLLM version.
 #   Nothing here says whether vllm#54360 affects us.
 #
-#   WHAT WOULD ACTUALLY HELP, in order of cheapness:
+#   ✅ IDLE RE-PROBE, 2026-09-01 — THE CACHE WORKS. STARVATION CONFIRMED.
+#   Endpoint verified quiet first (GPU util 0%, nothing running or waiting), then one
+#   14,067-token prompt (well past the 3200 threshold) sent three times:
+#
+#       A  cold                        prompt_tokens 14067   hits     0    0.0%
+#       B  same prefix, divergent tail prompt_tokens 14067   hits 11200   79.6%
+#       A' exact repeat                prompt_tokens 14067   hits 11200   79.6%
+#
+#   Cold miss then immediate reuse is a healthy cache. So the lifetime ~0% under load was
+#   POOL HEADROOM x LOAD, exactly as suspected above — NOT a defect.
+#
+#   ⛔ vllm#54360 IS RULED OUT, and with it #50897 / #53802 / #48375. The condition this
+#   block set ("only if it still reads zero idle at >3200 tokens") was tested and failed.
+#
+#   HASH UNIT 1600 CONFIRMED FROM THE HIT COUNTER, not just the startup log: 11,200 is
+#   exactly 7 x 1600.
+#
+#   ⚠ THERE IS A PERMANENT CEILING OF 7/8 BLOCKS HERE, NOT 8. 14,067 tokens spans 8 full
+#   1600-blocks (12,800) plus a 1,267 remainder, and the trailing block is never reused.
+#   A' was an EXACT repeat and still capped at 79.6%, identical to B — so this is ordinary
+#   last-block exclusion, nothing to do with the divergent tail. Practical consequence:
+#   ~1600 tokens of every request always re-prefills, so the achievable hit rate is
+#   1 - 1600/prompt_tokens. It improves as conversations lengthen.
+#
+#   ⚠ QUIET-ENDPOINT NUMBER. It proves the mechanism is sound; it does NOT predict the hit
+#   rate under concurrent load, which is the case that actually matters. That needs the
+#   tuning below and then a re-measure under realistic load.
+#
+#   WHAT WOULD ACTUALLY HELP — now worth doing, because the cache is known to work:
 #     - Lower max_num_seqs (8 -> 3 or 4). At 1.12x concurrency, 8 is oversubscribed; the
 #       11,466 preemptions are the receipt. Fewer live requests leaves pool for reuse.
-#     - Re-probe when the endpoint is IDLE. That is the clean discriminator between
-#       starvation and a real bug, and it costs nothing but a quiet window.
-#     - Only if it still reads zero idle at >3200 tokens is this vllm#54360, and only then
-#       are #50897 / #53802 / #48375 relevant.
+#     - Or shrink the window (98,304 -> 65,536), which buys pool headroom AND decode
+#       (101,814 KV / 124.9 tok/s vs 111,070 / 115.4). Trades context for both.
+#     - Then re-measure under load. Tracked in kreuzhofer/dgx-manager#75.
 #
 #   Unrelated but free, same hardware: vllm#54225 (FlashInfer IMA on sm_120 with NVFP4 +
 #   fp8 KV) is mitigated by FLASHINFER_CUDA_ARCH_LIST=12.0f, reported at no throughput
