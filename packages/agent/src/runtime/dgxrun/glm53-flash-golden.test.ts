@@ -7,7 +7,7 @@ import { buildDgxrunDockerArgs, tokenizeCommand, type DgxrunRecipe } from "./dgx
 /**
  * Equivalence gate for the GLM-5.3-Flash port.
  *
- * @dgxrun/glm-5.3-flash-libertai-nvfp4-2x claims to be a faithful port of
+ * @dgxrun/zai-glm-5.3-flash-libertai-nvfp4-2x claims to be a faithful port of
  * barrydeen/glm53-flash-dgx-spark @ c267f9f — the launcher that validated this
  * model on 2x GB10. The reference below is that repo's
  * `scripts/launch-glm53-vllm-dflash2-tp2.sh`, rank 0.
@@ -20,7 +20,7 @@ import { buildDgxrunDockerArgs, tokenizeCommand, type DgxrunRecipe } from "./dgx
  * every difference from the reference has to appear in an allowlist below.
  */
 
-const RECIPE = join(process.cwd(), "recipes/dgxrun/glm-5.3-flash-libertai-nvfp4-2x.yaml");
+const RECIPE = join(process.cwd(), "recipes/dgxrun/zai-glm-5.3-flash-libertai-nvfp4-2x.yaml");
 
 /**
  * Upstream's serve argv for rank 0, verbatim apart from the model path.
@@ -144,7 +144,7 @@ const dockerArgs = buildDgxrunDockerArgs(recipe, {
 const imageIdx = dockerArgs.lastIndexOf(recipe.container);
 const ourServe = dockerArgs.slice(imageIdx + 1);
 
-describe("@dgxrun/glm-5.3-flash-libertai-nvfp4-2x vs the validated 2x-Spark launcher", () => {
+describe("@dgxrun/zai-glm-5.3-flash-libertai-nvfp4-2x vs the validated 2x-Spark launcher", () => {
   const ours = flagMap(ourServe);
   const theirs = flagMap(tokenizeCommand(UPSTREAM_SERVE));
 

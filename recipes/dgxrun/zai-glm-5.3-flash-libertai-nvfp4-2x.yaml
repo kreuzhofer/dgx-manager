@@ -1,4 +1,4 @@
-# @dgxrun/glm-5.3-flash-libertai-nvfp4-2x — GLM-5.3-Flash (NVFP4) on TWO Sparks.
+# @dgxrun/zai-glm-5.3-flash-libertai-nvfp4-2x — GLM-5.3-Flash (NVFP4) on TWO Sparks.
 #
 # 320B total / 18B active, hybrid KDA + sparse-MLA, natively multimodal, 1M-token
 # native window. At NVFP4 the weights are ~182 GB, i.e. ~85 GiB per rank at TP2 —

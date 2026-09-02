@@ -16,7 +16,7 @@
 #
 # Usage:   ./scripts/build-glm53-flash-image.sh [node-ip ...]     (default: spark-02, spark-03)
 # Overlay: scripts/glm53-flash-overlay/  (provenance + per-layer notes in its README)
-# Recipe:  recipes/dgxrun/glm-5.3-flash-libertai-nvfp4-2x.yaml
+# Recipe:  recipes/dgxrun/zai-glm-5.3-flash-libertai-nvfp4-2x.yaml
 #
 # Builds INDEPENDENTLY on each node rather than building once and copying: every
 # pin in the stack is an exact version, so the builds are reproducible, and a
@@ -117,4 +117,4 @@ for ip in "${NODES[@]}"; do
 done
 
 say "Done -> $FINAL_TAG on ${NODES[*]}"
-echo "  Deploy with recipes/dgxrun/glm-5.3-flash-libertai-nvfp4-2x.yaml on exactly these nodes."
+echo "  Deploy with recipes/dgxrun/zai-glm-5.3-flash-libertai-nvfp4-2x.yaml on exactly these nodes."

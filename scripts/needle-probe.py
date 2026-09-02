@@ -2,7 +2,7 @@
 """Needle-in-a-haystack probe: does a deployment actually serve its window?
 
 Written for issue #24 and referenced by
-recipes/dgxrun/glm-5.3-flash-libertai-nvfp4-2x.yaml, which forbids raising
+recipes/dgxrun/zai-glm-5.3-flash-libertai-nvfp4-2x.yaml, which forbids raising
 `max_model_len` without evidence from this script.
 
 The reason it exists: a vLLM deployment can boot, size its KV cache, pass
