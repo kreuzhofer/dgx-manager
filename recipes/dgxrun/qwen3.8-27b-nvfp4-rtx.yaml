@@ -131,7 +131,7 @@ defaults:
   # 2048 because vLLM CLAMPS to it under speculative decoding anyway — it logs
   # "max_num_scheduled_tokens is set to 2048 based on the speculative decoding
   # settings" and suggests raising this to accommodate draft-token slots. Left at
-  # the clamp for the same reason muse-glimmer-30b.yaml did: 2048 measured faster
+  # the clamp for the same reason meta-muse-glimmer-30b-bf16.yaml did: 2048 measured faster
   # than 8192 under spec decoding on this fleet. Worth an A/B here.
   max_num_batched_tokens: 2048
 

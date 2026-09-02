@@ -7,9 +7,10 @@
 # WHY BF16 AND NOT THE FP8 RECIPE: @official/qwen3.8-27b-fp8-mtp-vllm already exists
 # upstream (recipe-registry, 2026-08-14) and is the right choice for SERVING. This recipe
 # exists to MEASURE. At 51.7 GiB the reference weights fit one 121.6 GB GB10 outright, so
-# we do not have to accept a quantization confound — the same argument muse-glimmer-30b.yaml
-# makes for itself. Benchmarking an FP8 Qwen against a BF16 Muse Glimmer would bias the
-# comparison in Glimmer's favour and make any Qwen loss unattributable.
+# we do not have to accept a quantization confound — the same argument that
+# meta-muse-glimmer-30b-bf16.yaml makes for itself. Benchmarking an FP8 Qwen against a BF16
+# Muse Glimmer would bias the comparison in Glimmer's favour and make any Qwen loss
+# unattributable.
 #
 # It also sidesteps every sm_121 quantization-kernel question at once: the blockwise-FP8
 # DeepGEMM family-12 gate (vllm#51884), NVFP4 Marlin fallback, and MXFP4 (which does not
@@ -23,7 +24,8 @@
 #
 # CONTAINER: the eugr nightly, pinned to a DATED tag for reproducible benchmark numbers.
 # NOTE: `-tf5` is now a DEPRECATED ALIAS of `-nightly` (identical digest, per the dgx-vllm
-# README) — the tf5 comment block in muse-glimmer-30b.yaml is historically out of date.
+# README) — the tf5 comment block in meta-muse-glimmer-30b-bf16.yaml is historically out of
+# date.
 # b12x is unnecessary: this is a dense model, so none of b12x's sparse-MLA/MoE kernels apply.
 # If load fails with "ParallelLMHead has no output_size_per_partition" (vllm#52434, filed
 # 2026-08-15 against main from #52147), drop back to :2026081201, which predates it.
@@ -41,7 +43,8 @@ defaults:
 
   # 0.88, NOT 0.92: vLLM's startup guard compares gmu*total against CUDA-VISIBLE free, which
   # runs ~7 GiB below MemFree on these nodes. 0.90 was measured failing by 0.05 GiB on this
-  # fleet (2026-07-10). Same value every GLM-5.2 recipe and muse-glimmer-30b.yaml use.
+  # fleet (2026-07-10). Same value every GLM-5.2 recipe and
+  # meta-muse-glimmer-30b-bf16.yaml use.
   gpu_memory_utilization: 0.88
 
   # Native trained context. Do NOT chase the 1M headline — that needs an explicit YaRN
@@ -57,7 +60,7 @@ defaults:
   max_model_len: 262144
 
   # Matches the benchmark harness (-w 8 for mini-SWE-agent, num_concurrent=8 for lm-eval),
-  # same as muse-glimmer-30b.yaml. The one published GB10 datapoint for this model
+  # same as meta-muse-glimmer-30b-bf16.yaml. The one published GB10 datapoint for this model
   # (sglang#34872, FP8) also ran concurrency 8.
   max_num_seqs: 8
 
@@ -66,8 +69,8 @@ defaults:
   # is not spec-decode-tuned for GB10.
   #
   # CORRECTED 2026-08-31: this line previously also claimed "vLLM clamps to 2048 on its own
-  # when spec decoding is on", copied from muse-glimmer-30b.yaml without checking. It is
-  # false. vllm/config/vllm.py::_set_max_num_scheduled_tokens does
+  # when spec decoding is on", copied from meta-muse-glimmer-30b-bf16.yaml without checking.
+  # It is false. vllm/config/vllm.py::_set_max_num_scheduled_tokens does
   # `max_num_scheduled_tokens = max_num_batched_tokens` with no clamp, and warns when the
   # result is < 8192 — so 2048 is what TRIGGERS the warning this deployment logs, not what
   # avoids it. The remaining justification is the measurement alone, which is 2.7% from

@@ -1,8 +1,9 @@
+# @dgxrun/zai-glm-5.2-quanttrio-int4-c16-64k-4x — throughput variant, 16 concurrent seqs at 64K.
 recipe_version: "2"
 runner: dgxrun
 maxoutmem: true
 # Concurrency-optimized serving recipe: serves MANY requests at once, where
-# glm-5.2-quanttrio-unpruned-dcp2-320k serves one at a time at the lowest latency.
+# zai-glm-5.2-quanttrio-int4-unpruned-dcp2-320k-4x serves one at a time at the lowest latency.
 # Same container/model/DCP2 topology — only the serve knobs change. Trades single-
 # stream latency (and 320K context) for aggregate throughput, so a batch of work
 # (benchmark suites, batch jobs, several users at once) finishes ~5-8x faster.

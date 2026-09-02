@@ -80,7 +80,7 @@ advantage the data does not support.
 The obvious objection to the above is that DeepSeek ran at 1M context and GLM at 64K, so
 the comparison hands DeepSeek a structural advantage. We tested that directly: re-ran
 **only the 28 instances GLM failed to patch**, on
-`@dgxrun/glm-5.2-quanttrio-unpruned-dcp2-320k` — 320K context, `--max-num-seqs 1`.
+`@dgxrun/zai-glm-5.2-quanttrio-int4-unpruned-dcp2-320k-4x` — 320K context, `--max-num-seqs 1`.
 
 | Of the 28 | |
 |---|---|

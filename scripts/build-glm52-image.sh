@@ -12,7 +12,8 @@
 #
 # Usage:   ./scripts/build-glm52-image.sh [legacy|dcp]     (default: dcp)
 # Docs:    docs/glm-5.2-dcp-image-build.md , docs/glm-5.2-custom-image-build.md
-# Recipes: recipes/dgxrun/glm-5.2-awq-15pct{,-144k}.yaml (legacy) , -dcp2.yaml (dcp)
+# Recipes: recipes/dgxrun/zai-glm-5.2-awq-int4-15pct-144k-4x.yaml (legacy) ,
+#          zai-glm-5.2-quanttrio-int4-unpruned-dcp2-{256k,320k}-4x.yaml (dcp)
 #
 # PREREQUISITES (external, not vendored here — pinned + referenced, per each doc):
 #   - eugr spark-vllm-docker clone at $SPARK_VLLM_DOCKER (build infra; ~1h arm64 compile)

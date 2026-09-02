@@ -345,7 +345,7 @@ matrix. This is why the above came from source.
    and it makes regressions like #54360 visible the day an image bumps rather than months
    later.
 3. **A/B the DCP2 + MTP + `cudagraph_mode: FULL` pair against PIECEWISE on long outputs.**
-   `glm-5.2-quanttrio-unpruned-dcp2.yaml` and `-dcp2-320k.yaml` sit exactly on #45425's
+   `zai-glm-5.2-quanttrio-int4-unpruned-dcp2-{256k,320k}-4x.yaml` sit exactly on #45425's
    shape. Counter-evidence: those recipes have served real agentic sessions and scored
    normally on benchmarks, which argues against gross corruption — so this is a check to
    close the question, not an alarm. Our DCP4 recipes already use PIECEWISE.

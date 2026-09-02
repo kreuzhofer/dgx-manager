@@ -23,7 +23,7 @@ third party. **§11 is the opposite**: everything in it was measured on dgx-spar
    stale. **`sparkrun registry update` is the entire fix.** No sparkrun upgrade needed.
 3. **For benchmarking against Muse Glimmer, use BF16, not that recipe.** 51.7 GiB fits one
    Spark, which means we can measure reference weights with no quantization confound — the same
-   argument `muse-glimmer-30b.yaml` already makes for itself. That needs a small dgxrun recipe
+   argument `meta-muse-glimmer-30b-bf16.yaml` already makes for itself. That needs a small dgxrun recipe
    (§6).
 4. **GPQA-Diamond is the one clean comparison** — Qwen3.8-27B **89.2** vs Muse Glimmer **83.5**.
    The SWE-bench comparison is a trap (§5).
@@ -145,7 +145,7 @@ support) — treat all `*-MXFP4` repos as blocked.
 
 ### The apples-to-apples argument
 
-`muse-glimmer-30b.yaml` states its own rationale: *"BF16 fits one Spark, so we measure the
+`meta-muse-glimmer-30b-bf16.yaml` states its own rationale: *"BF16 fits one Spark, so we measure the
 REFERENCE weights: no quantization confound, unlike GLM-5.2 (INT4) or DeepSeek V4 Flash (fp8).
 A gap against Meta's numbers is therefore harness or serving, never 'our quantization is
 worse'."*
@@ -206,9 +206,9 @@ with multi-hour timeouts (5h Terminal Bench, 8h QwenSWEBench, 12h PaperBench). `
 | Variant | Class | Reason | Fork from |
 |---|---|---|---|
 | `Qwen3.8-27B-FP8` | **(a) already served** | `@official/qwen3.8-27b-fp8-mtp-vllm` upstream 2026-08-14. Run `sparkrun registry update` | — use directly |
-| **`Qwen3.8-27B` BF16** | **(b) small dgxrun recipe** | 51.7 GiB on one Spark; arch supported since v0.17.0; no upstream recipe exists; sidesteps all quant-kernel risk | **`muse-glimmer-30b.yaml`** |
-| `unsloth/Qwen3.8-27B-NVFP4` | (b), with risk | Kernel path clear (Marlin fallback), keeps MTP. But sglang#34895 reports a dropped `lm_head weight_scale` on *this exact repo* → degenerate repetition | muse-glimmer-30b.yaml |
-| `cyankiwi/Qwen3.8-27B-AWQ-INT4` | (b), unvalidated | Well-trodden dense W4A16→Marlin path, keeps MTP, but 3 downloads. Our prior Int4-Int8Mix stall was **MoE**-specific and later re-attributed to earlyoom, so it doesn't indict dense W4A16 | muse-glimmer-30b.yaml |
+| **`Qwen3.8-27B` BF16** | **(b) small dgxrun recipe** | 51.7 GiB on one Spark; arch supported since v0.17.0; no upstream recipe exists; sidesteps all quant-kernel risk | **`meta-muse-glimmer-30b-bf16.yaml`** |
+| `unsloth/Qwen3.8-27B-NVFP4` | (b), with risk | Kernel path clear (Marlin fallback), keeps MTP. But sglang#34895 reports a dropped `lm_head weight_scale` on *this exact repo* → degenerate repetition | meta-muse-glimmer-30b-bf16.yaml |
+| `cyankiwi/Qwen3.8-27B-AWQ-INT4` | (b), unvalidated | Well-trodden dense W4A16→Marlin path, keeps MTP, but 3 downloads. Our prior Int4-Int8Mix stall was **MoE**-specific and later re-attributed to earlyoom, so it doesn't indict dense W4A16 | meta-muse-glimmer-30b-bf16.yaml |
 | GGUF / llama.cpp | (b) | Works as `qwen35` hybrid. Known: MTP CUDA lockups under `--split-mode tensor`, chat-template friction with agentic harnesses | `@sparkrun-transitional/*-llama-cpp` |
 | SGLang FP8 | (b), custom image | Day-0 support, **validated on one GB10** (below). Needs `lmsysorg/sglang:qwen38-27b` | `@sparkrun-transitional/qwen3.5-27b-fp8-sglang` |
 | MXFP4 | **(c) blocked** | Does not load on NVIDIA; vllm#52347 is an open feature request, not a fix | — |
@@ -231,7 +231,7 @@ and that 0.75 blew a 512 MiB swap guard during CUDA-graph capture.
 
 Per the [spark-arena/dgx-vllm README](https://github.com/spark-arena/dgx-vllm), **`-tf5` is now a
 deprecated alias of `-nightly` — identical digest.** The upstream `--tf5` build flag no longer
-produces a separate lineage. The comment block in `recipes/dgxrun/muse-glimmer-30b.yaml` treats
+produces a separate lineage. The comment block in `recipes/dgxrun/meta-muse-glimmer-30b-bf16.yaml` treats
 tf5 as a distinct thing; that is now only historically true.
 
 | Image | vLLM | `Qwen3_5*` registered? |
@@ -277,12 +277,12 @@ spelling at our pinned image tag — check `vllm serve --help` in the container 
    Zero work, no sparkrun upgrade (v0.3.4 latest; our `>=0.3.3` floor is fine).
 2. **Add `recipes/dgxrun/qwen3.8-27b.yaml`** for the BF16 reference weights — the
    apples-to-apples benchmark target against Muse Glimmer. A full sketch forked from
-   `muse-glimmer-30b.yaml`, with every flag justified and unknowns marked TODO rather than
+   `meta-muse-glimmer-30b-bf16.yaml`, with every flag justified and unknowns marked TODO rather than
    guessed, is in
    `scratchpad/qwen38-serving-findings.md` §8.
 3. **Run GPQA-Diamond first** — the one directly comparable number (89.2 claimed vs Glimmer's
    83.5, which our fleet has the harness for).
-4. **Fix the stale `muse-glimmer-30b.yaml` comment** about tf5 being a distinct image lineage.
+4. **Fix the stale `meta-muse-glimmer-30b-bf16.yaml` comment** about tf5 being a distinct image lineage.
 
 ---
 

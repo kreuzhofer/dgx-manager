@@ -1,6 +1,6 @@
-# @dgxrun/glm-5.2-quanttrio-dcp4-c4-160k-mtp — 4 concurrent agents, 160K context each. DCP4 + MTP.
+# @dgxrun/zai-glm-5.2-quanttrio-int4-dcp4-c4-160k-mtp-4x — 4 concurrent agents, 160K context each. DCP4 + MTP.
 #
-# Sibling of @dgxrun/glm-5.2-quanttrio-dcp4-c2-230k, which spends the same pool on two
+# Sibling of @dgxrun/zai-glm-5.2-quanttrio-int4-dcp4-c2-230k-4x, which spends the same pool on two
 # streams of 230K instead of four of 160K. Pick this one when you actually run 3-4 agents.
 #
 # Rests on a measurement taken 2026-08-07: DCP4 yields **78,446 KV tokens/GiB, exactly 2.00x
@@ -21,7 +21,7 @@
 # ~10% prefill and worsens TTFR at c=4 (3.1s -> 4.6s), which is a good trade for agentic work.
 # MTP + PIECEWISE + DCP4 had never been run together before this; it works.
 #
-# Known cost vs @dgxrun/glm-5.2-quanttrio-unpruned-dcp2-320k: single-stream decode is 16.4 vs
+# Known cost vs @dgxrun/zai-glm-5.2-quanttrio-int4-unpruned-dcp2-320k-4x: single-stream decode is 16.4 vs
 # 24.7 tok/s. That gap is DCP4's decode communication overhead and does NOT tune away with MTP.
 # The trade is real concurrency and per-stream context; the 320K recipe runs max-num-seqs 1.
 recipe_version: "2"

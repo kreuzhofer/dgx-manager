@@ -1,4 +1,4 @@
-# @dgxrun/muse-glimmer-30b — Meta Muse Glimmer 30B on ONE Spark.
+# @dgxrun/meta-muse-glimmer-30b-bf16 — Meta Muse Glimmer 30B at BF16, on ONE Spark.
 #
 # 29.6B dense text decoder (52 layers, hidden 6656) + ~1.8B ViT-G/14 perception
 # encoder, Apache 2.0, released 2026-08-10. Distilled from Muse Spark 1.2 and aimed

@@ -1,17 +1,10 @@
-# @dgxrun/glm-5.2-quanttrio-dcp4-c2-230k — the 2-agent daily driver. DCP4 + MTP.
-#
-# Sibling of @dgxrun/glm-5.2-quanttrio-dcp4-c4-160k-mtp, same pool spent on two streams
-# instead of four. DCP4 was measured at 78,446 KV tokens/GiB (2.00x DCP2) on 2026-08-07,
-# and this recipe's 6.00 GiB pool measured 470,784 tokens at 160K — so two streams of
-# 230K (471K tokens) is sized to sit right at that pool rather than oversubscribe it.
-#
-# Why c2 and not c4: measured decode at c4 was 30.6 tok/s aggregate, i.e. ~7.6 per agent,
-# which is thin for interactive coding. Two streams share the same aggregate over half as
-# many consumers AND get 230K each instead of 160K.
-#
-# Known cost vs the DCP2 320K recipe: single-stream decode is ~16.4 vs 24.7 tok/s. That
-# gap is DCP4's decode communication overhead and does not go away with MTP (tested).
-# The trade is per-stream context and real concurrency; DCP2 320K runs max-num-seqs 1.
+# @dgxrun/zai-glm-5.2-quanttrio-int4-unpruned-dcp2-320k-4x — UNPRUNED QuantTrio Int4-Int8Mix + DCP2, 320K.
+# CONTEXT variant. Sibling of @dgxrun/zai-glm-5.2-quanttrio-int4-unpruned-dcp2-256k-4x (256K, faster prefill).
+# Pick this one when the window matters more than prefill throughput.
+# The community reference model (best quality). SELF-DRAFTS (built-in MTP head) — no separate
+# drafter, so the spec-config points at the model itself. Config mirrors CosmicRaisins
+# recipes/glm52-quanttrio-unpruned-dcp2-320k.yaml, at 256K / gmu 0.89 (conservative after the
+# pruned model OOM'd at 0.90/320K). Requires the DCP image (scripts/build-glm52-image.sh dcp).
 recipe_version: "2"
 runner: dgxrun
 maxoutmem: true
@@ -58,7 +51,7 @@ defaults:
   # 893 tok/s prefill. Steady free while serving: ~1.7-1.9 GiB (was ~2.9 GiB at 256K).
   # To go further, halve mnbt again (512 -> 1.56 GiB @ 320K) or raise KV; each step costs prefill.
   # =================================================================================
-  max_model_len: 235520   # 230K x 2 concurrent = 471K tokens ~= the measured pool
+  max_model_len: 327680   # 320K via DCP2
   served_model_name: glm-5.2
 env:
   HF_HOME: /cache/huggingface
@@ -96,4 +89,4 @@ env:
   NCCL_DEBUG: WARN
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
 command: |
-  vllm serve {model} --served-model-name {served_model_name} --host {host} --port {port} --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --enable-prefix-caching --speculative-config '{"model":"CosmicRaisins/GLM-5.2-MTP-INT4-aligned","method":"mtp","draft_attention_backend":"B12X_MLA_SPARSE","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' -tp {tensor_parallel} --pipeline-parallel-size 1 --decode-context-parallel-size 4 --dcp-kv-cache-interleave-size 1 --attention-backend B12X_MLA_SPARSE --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}' --max-model-len {max_model_len} --max-num-seqs 2 --max-num-batched-tokens 1024 --gpu-memory-utilization {gpu_memory_utilization} --kv-cache-dtype fp8_ds_mla --kv-cache-memory-bytes 6442450944 --async-scheduling --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"PIECEWISE","max_cudagraph_capture_size":8}'
+  vllm serve {model} --served-model-name {served_model_name} --host {host} --port {port} --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --enable-prefix-caching --speculative-config '{"model":"CosmicRaisins/GLM-5.2-MTP-INT4-aligned","method":"mtp","draft_attention_backend":"B12X_MLA_SPARSE","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' -tp {tensor_parallel} --pipeline-parallel-size 1 --decode-context-parallel-size 2 --dcp-kv-cache-interleave-size 1 --attention-backend B12X_MLA_SPARSE --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}' --max-model-len {max_model_len} --max-num-seqs 1 --max-num-batched-tokens 1024 --gpu-memory-utilization {gpu_memory_utilization} --kv-cache-dtype fp8_ds_mla --kv-cache-memory-bytes 9126805504 --async-scheduling --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"FULL","max_cudagraph_capture_size":10}'
