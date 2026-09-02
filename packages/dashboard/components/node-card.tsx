@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
-import { canWake, isNodeInactive, nodeMetricsPlaceholder } from "@/lib/node-power";
+import { isNodeInactive, nodeMetricsPlaceholder, showWakeButton } from "@/lib/node-power";
 import { Sparkline } from "./sparkline";
 
 interface NetInterfaceSample {
@@ -115,10 +115,10 @@ export function NodeCard({
     onMetrics?.(appendSample);
   }, [onMetrics, appendSample]);
 
-  // Dimming and the Reboot/Shutdown pair follow power state; Wake follows the
-  // captured MAC. See lib/node-power for why the two axes are separate.
+  // Dimming and the Reboot/Shutdown pair follow power state alone; Wake needs
+  // both a captured MAC and an inactive node. See lib/node-power.
   const isInactive = isNodeInactive(node.powerState);
-  const showWake = canWake(node.macAddress);
+  const showWake = showWakeButton(node.powerState, node.macAddress);
 
   async function power(action: "reboot" | "shutdown") {
     const verb = action === "reboot" ? "Reboot" : "Shut down";

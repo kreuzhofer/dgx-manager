@@ -50,3 +50,19 @@ export function nodeMetricsPlaceholder(
     ? "Waking… — click Wake to retry if it doesn't come back"
     : "Powered off — Wake to bring it back";
 }
+
+/**
+ * Whether the Wake button should render for a node.
+ *
+ * Both axes are required. The MAC decides whether a magic packet can be
+ * addressed at all — without one the manager refuses the wake, so a button
+ * would only fail after the click. Power state decides whether waking means
+ * anything — a packet aimed at a live host is a no-op, so on a running node
+ * the button is a control that does nothing.
+ */
+export function showWakeButton(
+  powerState: string | null | undefined,
+  macAddress: string | null | undefined,
+): boolean {
+  return isNodeInactive(powerState) && canWake(macAddress);
+}

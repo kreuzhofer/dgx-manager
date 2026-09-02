@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { canWake, isNodeInactive, nodeMetricsPlaceholder } from "./node-power.js";
+import { canWake, isNodeInactive, nodeMetricsPlaceholder, showWakeButton } from "./node-power.js";
 
 describe("canWake", () => {
   it("a node with a captured MAC can be woken", () => {
@@ -66,5 +66,41 @@ describe("nodeMetricsPlaceholder", () => {
   it("names the actual power state when no MAC was captured", () => {
     expect(nodeMetricsPlaceholder("off", null)).toMatch(/^Powered off/);
     expect(nodeMetricsPlaceholder("waking", "")).toMatch(/^Waking/);
+  });
+});
+
+describe("showWakeButton", () => {
+  const MAC = "74:56:3c:5a:c7:b0";
+
+  it("an inactive node with a captured MAC offers Wake", () => {
+    expect(showWakeButton("off", MAC)).toBe(true);
+    expect(showWakeButton("asleep", MAC)).toBe(true);
+    expect(showWakeButton("waking", MAC)).toBe(true);
+  });
+
+  // A magic packet aimed at a live host is a no-op, so the button would be a
+  // control that does nothing where it appears.
+  it("a running node does not offer Wake, even with a captured MAC", () => {
+    expect(showWakeButton("on", MAC)).toBe(false);
+    expect(showWakeButton("rebooting", MAC)).toBe(false);
+    expect(showWakeButton(undefined, MAC)).toBe(false);
+  });
+
+  // The half #76 added, kept: no MAC means no packet can be addressed, so the
+  // button must not appear only to fail with a 409 after the click.
+  it("a node with no captured MAC never offers Wake", () => {
+    for (const state of ["on", "off", "asleep", "waking", "rebooting"]) {
+      expect(showWakeButton(state, null)).toBe(false);
+      expect(showWakeButton(state, "  ")).toBe(false);
+    }
+  });
+
+  it("agrees with the placeholder copy: the button shows iff the copy points at it", () => {
+    for (const state of ["on", "off", "asleep", "waking", "rebooting"]) {
+      for (const mac of [MAC, null]) {
+        const pointsAtButton = /click Wake|Wake to bring/.test(nodeMetricsPlaceholder(state, mac));
+        expect(pointsAtButton).toBe(showWakeButton(state, mac));
+      }
+    }
   });
 });
