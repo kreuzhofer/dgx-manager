@@ -11,7 +11,8 @@ interface Recipe {
   model?: string;
   container: string;
   cluster_only?: boolean;
-  arch: string;
+  /** Narrowed at load time — an unrecognised value drops the recipe entirely. */
+  arch: "amd64" | "arm64";
   defaults: Record<string, unknown>;
 }
 

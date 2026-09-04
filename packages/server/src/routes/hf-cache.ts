@@ -5,6 +5,7 @@ import {
   deploymentModelCandidates, groupInventories, newerIso, repoUsage, type DeploymentUsage,
 } from "../hf-cache/grouping.js";
 import { loadRepoLastDeployed } from "../hf-cache/repo-deployment.js";
+import { getDgxrunCatalog } from "../deployments/dgxrun-catalog.js";
 
 export const hfCacheRouter = Router();
 
@@ -13,8 +14,9 @@ export const hfCacheRouter = Router();
  *  ones drive the guard) and assembles each one's full set of model-name
  *  candidates. Completeness here is what makes the guard sound:
  *   - Model.name + config.modelName (Ollama tag / inline-YAML HF id)
- *   - the recipe catalog's HF id resolved from config.recipeFile (registry-ref
- *     vLLM, where Model.name is only the recipe slug)
+ *   - either recipe catalog's HF id resolved from config.recipeFile (both the
+ *     sparkrun registry ref and the server-side `@dgxrun/` ref, where
+ *     Model.name is only the recipe slug)
  *   - the fine-tune base model (its base weights live in the HF cache)
  *  Known gap: recipePath deploys don't persist their recipe ref, and a recipe
  *  absent from the catalog can't be resolved — both yield a conservative miss. */
@@ -25,8 +27,12 @@ async function loadDeploymentUsage(agentHub: AgentHub): Promise<DeploymentUsage[
       clusterNodes: true,
     },
   });
+  // BOTH catalogs. `agentHub.getRecipes()` is only the agent-reported sparkrun
+  // one; every `@dgxrun/` ref lives in the server-side catalog and used to miss
+  // here, leaving actively-serving weights unmatched and offered for deletion
+  // — a delete guard failing in the dangerous direction (#85).
   const recipeHfId = new Map<string, string>();
-  for (const r of agentHub.getRecipes()) {
+  for (const r of [...getDgxrunCatalog(), ...agentHub.getRecipes()]) {
     if (r.model) recipeHfId.set(r.file, r.model);
   }
   return deployments.map((d) => {

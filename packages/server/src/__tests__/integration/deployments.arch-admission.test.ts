@@ -7,10 +7,13 @@
  *     nothing dispatched.
  *   - The same recipe on a matching arm64 node → admitted (cmd:deploy sent).
  *   - An arch-agnostic ("any") recipe is admitted on any node.
+ *   - The same three guarantees for `@dgxrun/` recipes, which live in the
+ *     server-side catalog and are absent from the agent-reported one (#44),
+ *     including a mixed-arch cluster.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execSync } from "child_process";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import express from "express";
@@ -19,6 +22,33 @@ import request from "supertest";
 const TMP_DIR = mkdtempSync(join(tmpdir(), "dgx-test-"));
 const DB_PATH = join(TMP_DIR, "test.db");
 process.env.DATABASE_URL = `file:${DB_PATH}`;
+
+// Point the server-side dgxrun catalog at a fixture dir. dgxrun-catalog.ts
+// freezes this at import time, so it must be set before the router below is
+// imported (beforeAll) — module scope is the only place that holds.
+const DGXRUN_DIR = join(TMP_DIR, "recipes");
+process.env.DGXRUN_RECIPES_DIR = DGXRUN_DIR;
+mkdirSync(DGXRUN_DIR, { recursive: true });
+
+/** A minimal valid dgxrun recipe; `arch` omitted means arm64 (catalog default). */
+function dgxrunYaml(model: string, arch?: string) {
+  return [
+    "runner: dgxrun",
+    `model: ${model}`,
+    "container: img:probe",
+    ...(arch ? [`arch: ${arch}`] : []),
+    "defaults:",
+    "  port: 8000",
+    "  host: 0.0.0.0",
+    "  tensor_parallel: 1",
+    "  gpu_memory_utilization: 0.5",
+    "  served_model_name: probe",
+    "command: |",
+    "  vllm serve {model} --host {host} --port {port}",
+  ].join("\n");
+}
+writeFileSync(join(DGXRUN_DIR, "arm-probe.yaml"), dgxrunYaml("org/arm-model"));
+writeFileSync(join(DGXRUN_DIR, "amd-probe.yaml"), dgxrunYaml("org/amd-model", "amd64"));
 
 let prisma: typeof import("../../prisma.js").prisma;
 let deploymentsRouter: typeof import("../../routes/deployments.js").deploymentsRouter;
@@ -50,7 +80,10 @@ function makeStubHub(
   return {
     hub: {
       getRecipes: () => recipes,
+      getTrainingRecipes: () => [],
       getOllamaModels: () => [],
+      isAgentOnline: (_id: string) => true,
+      onlineNodeIds: () => [] as string[],
       sendToAgent: (nodeId: string, message: unknown) => {
         sentMessages.push({ nodeId, message });
       },
@@ -167,5 +200,108 @@ describe("POST /api/deployments — arch admission", () => {
     expect(res.status).toBe(201);
     expect(sentMessages).toHaveLength(1);
     expect((sentMessages[0].message as { type: string }).type).toBe("cmd:deploy");
+  });
+});
+
+/**
+ * `@dgxrun/` recipes live in the server-side catalog (recipes/dgxrun/*.yaml),
+ * not in the agent-reported `sparkrun list` output — so `getRecipes()` misses
+ * them and, before #44, the whole arch loop was skipped. The stub hub below
+ * deliberately reports an EMPTY sparkrun catalog: every admission decision
+ * here has to come from the dgxrun catalog or not at all.
+ */
+describe("POST /api/deployments — arch admission for @dgxrun/ catalog recipes", () => {
+  it("rejects an arm64 @dgxrun/ recipe deployed to an amd64 node (400, nothing dispatched)", async () => {
+    await wipeAll();
+    await prisma.node.create({
+      data: {
+        id: "amd-node",
+        name: "aihost01",
+        ipAddress: "192.168.44.50",
+        arch: "amd64",
+        vramTotal: 32_000,
+        status: "online",
+      },
+    });
+
+    const { hub, sentMessages } = makeStubHub([]);
+    const app = makeApp(hub);
+
+    const res = await request(app)
+      .post("/api/deployments")
+      .send({ nodeId: "amd-node", recipeFile: "@dgxrun/arm-probe", config: {} });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("mismatch");
+    expect(res.body.error).toContain("aihost01");
+    expect(res.body.recipeArch).toBe("arm64");
+    expect(res.body.nodeArch).toBe("amd64");
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it("admits an amd64 @dgxrun/ recipe on the amd64 node (dispatches cmd:deploy)", async () => {
+    await wipeAll();
+    await prisma.node.create({
+      data: {
+        id: "amd-node",
+        name: "aihost01",
+        ipAddress: "192.168.44.50",
+        arch: "amd64",
+        vramTotal: 32_000,
+        status: "online",
+      },
+    });
+
+    const { hub, sentMessages } = makeStubHub([]);
+    const app = makeApp(hub);
+
+    const res = await request(app)
+      .post("/api/deployments")
+      .send({ nodeId: "amd-node", recipeFile: "@dgxrun/amd-probe", config: {} });
+
+    expect(res.status).toBe(201);
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0].nodeId).toBe("amd-node");
+    expect((sentMessages[0].message as { type: string }).type).toBe("cmd:deploy");
+  });
+
+  it("rejects a mixed-arch cluster, naming the offending node", async () => {
+    // The heterogeneous-cluster case with no coverage at all today: every
+    // member is checked, so one amd64 node in an otherwise arm64 cluster
+    // must sink the whole deploy.
+    await wipeAll();
+    await prisma.node.create({
+      data: {
+        id: "arm-node",
+        name: "dgx-spark-01",
+        ipAddress: "192.168.44.36",
+        arch: "arm64",
+        vramTotal: 122_502,
+        status: "online",
+      },
+    });
+    await prisma.node.create({
+      data: {
+        id: "amd-node",
+        name: "aihost01",
+        ipAddress: "192.168.44.50",
+        arch: "amd64",
+        vramTotal: 32_000,
+        status: "online",
+      },
+    });
+
+    const { hub, sentMessages } = makeStubHub([]);
+    const app = makeApp(hub);
+
+    const res = await request(app)
+      .post("/api/deployments")
+      .send({ nodeIds: ["arm-node", "amd-node"], recipeFile: "@dgxrun/arm-probe", config: {} });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("aihost01");
+    expect(res.body.recipeArch).toBe("arm64");
+    expect(res.body.nodeArch).toBe("amd64");
+    expect(sentMessages).toHaveLength(0);
   });
 });

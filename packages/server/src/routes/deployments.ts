@@ -18,7 +18,7 @@ import { maxOutMemoryForDeploy, parseMaxOutMemYaml } from "../deployments/maxout
 import { sshExec } from "../ssh/executor.js";
 import { resolveDgxrunRecipe, type DgxrunResolvedRecipe } from "../deployments/dgxrun-recipe.js";
 import { buildDgxrunDeploys, DEFAULT_MASTER_PORT } from "../deployments/dgxrun-dispatch.js";
-import { resolveDgxrunRecipeFile, DGXRUN_RECIPES_DIR } from "../deployments/dgxrun-catalog.js";
+import { resolveDgxrunRecipeFile, getDgxrunCatalog, DGXRUN_RECIPES_DIR } from "../deployments/dgxrun-catalog.js";
 import { deploymentEndpointUrl, resolveServedModelName } from "../benchmarks/endpoint.js";
 import { buildClaudeLaunchSnippet, CLAUDE_AUTH_TOKEN } from "../deployments/claude-launch.js";
 import { runtimeAllowedOnNode, evalNodeRejectionMessage } from "../nodes/role.js";
@@ -443,14 +443,24 @@ deploymentsRouter.post("/", async (req, res) => {
   // auto-evict.
   if (!isOllama) {
     const agentHub: AgentHub = req.app.get("agentHub");
-    const recipe = agentHub.getRecipes().find((r) => r.file === recipeFile);
+    // Both catalogs, because there are two: the agent-reported sparkrun one
+    // (`sparkrun list`) and the server-side dgxrun one (recipes/dgxrun/*.yaml).
+    // `@dgxrun/` refs exist only in the latter, so a getRecipes()-only lookup
+    // silently skipped every guard below for them (#44, #85).
+    const recipe = agentHub.getRecipes().find((r) => r.file === recipeFile)
+      ?? getDgxrunCatalog().find((r) => r.file === recipeFile);
     const checkNodeIds = isCluster ? (nodeIds as string[]) : [headNodeId];
 
     // Arch admission — fail fast on a recipe/node CPU-arch mismatch (e.g. an
-    // arm64 DGX-Spark recipe deployed to the amd64 RTX-5090 host). Only the
-    // registry-ref branch (recipeFile, resolved against the catalog) is
-    // guarded; inline recipeYaml and Ollama are user-authored / arch-agnostic
-    // and intentionally bypass this.
+    // arm64 DGX-Spark recipe deployed to the amd64 RTX-5090 host). Every
+    // cluster member is checked, so one mismatched node sinks the deploy.
+    //
+    // Only curated catalog entries (recipeFile, sparkrun or dgxrun) are
+    // guarded. Inline `recipeYaml` and `recipePath` deliberately stay
+    // unguarded: they are the remote-recipe-development escape hatch, authored
+    // against a node the user has picked by hand, and guarding them would
+    // break that loop for no safety gain the catalog doesn't already provide.
+    // Ollama is arch-agnostic. See #44 for the decision.
     if (recipe) {
       for (const nid of checkNodeIds) {
         const node = await prisma.node.findUnique({ where: { id: nid } });
