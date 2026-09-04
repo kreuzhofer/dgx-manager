@@ -171,11 +171,16 @@ path to configure. The recipe catalog comes from sparkrun's configured registrie
 
 ---
 
-## 8. Recipes, registries, and engine isolation
+## 8. Recipes, runners, registries, and engine isolation
 
-Inference is deployed through [sparkrun](https://github.com/spark-arena/sparkrun):
-the head-node agent runs `sparkrun run`, which resolves the recipe, distributes the
-container image + model across the target hosts, and starts the runtime.
+Inference is deployed through one of **two runners**. Which one launches a
+deployment is a property of the recipe, not a setting you choose.
+
+### sparkrun — recipes from registries
+
+[sparkrun](https://github.com/spark-arena/sparkrun) resolves the recipe,
+distributes the container image + model across the target hosts, and starts the
+runtime. The head-node agent runs `sparkrun run`.
 
 **Recipe catalog.** The dropdown is populated from `sparkrun list`, which enumerates
 recipes from sparkrun's configured registries (e.g. `@official`,
@@ -186,15 +191,94 @@ the git registry on the nodes:
 sparkrun registry add <git-url>     # then they appear in `sparkrun list`
 ```
 
+Registries can also be managed centrally: `POST /api/registries` records one and
+pushes it to every online node, so a newly-joined node ends up with the same
+registry set as the rest of the cluster.
+
 After adding or updating registries/recipes, refresh the catalog:
 
 ```
 POST /api/recipes/refresh           # tells agents to re-run `sparkrun list`
 ```
 
-**Three ways to deploy a recipe** (`POST /api/deployments`, exactly one of):
+### dgxrun — recipes versioned in this repository
 
-- `recipeFile` — a registry recipe ref from the catalog (e.g. `@official/<id>`).
+sparkrun's registries are clones it refreshes on its own schedule, so what a
+recipe *means* can change without anything here changing, and a node that never
+registered the right registry simply fails. `dgxrun` is the answer to that: the
+recipe is a file in this repo, the launch is expressed directly, and the image is
+pinned — a dgxrun deployment reproduces on a node that has never been touched.
+
+Recipes live in [`recipes/dgxrun/`](../recipes/dgxrun) and opt in with
+`runner: dgxrun`. They appear in the same deploy dropdown as
+`@dgxrun/<filename>` (without the `.yaml`), which is also the `recipeFile` value
+to POST.
+
+```yaml
+recipe_version: "2"
+runner: dgxrun
+model: QuantTrio/GLM-5.2-Int4-Int8Mix
+runtime: vllm
+container: vllm-node-tf5-glm52-b12x-dcp:probe   # pinned, not resolved
+cluster_only: true          # default true — a single-node recipe must say false
+arch: arm64                 # default arm64 — an amd64 host must say so
+maxoutmem: true             # free unified memory before launch
+mods:
+  - instanttensor-hybrid-draft-loader
+defaults:
+  tensor_parallel: 4
+  gpu_memory_utilization: 0.88
+  max_model_len: 327680
+```
+
+- **Editing a recipe needs no rebuild.** `./recipes` is bind-mounted read-only
+  into the server container (`./recipes:/app/recipes:ro`) and the catalog is
+  memoized, so a change is picked up by `POST /api/recipes/refresh` alone — no
+  `docker compose build`, no agent roll. Override the directory with
+  `DGXRUN_RECIPES_DIR` if the repo isn't the working tree you run from.
+- **An unrecognised `arch` is dropped, not defaulted.** A typo'd value removes
+  the recipe from the catalog rather than silently routing it at the wrong
+  hardware. Same for a file that isn't a YAML mapping or lacks `runner: dgxrun` —
+  the server logs `[dgxrun-catalog] skip <file>: …` and moves on.
+- **Renaming a recipe file does not rename the model.** The catalog ref follows
+  the filename; the name clients use at the gateway comes from the recipe's
+  served-model name. Renaming the file changes what you deploy *by*, not what you
+  request *as*.
+- The naming convention in use is
+  `<hf-org>-<model>-<precision>[-variant]-<Nx>`, with the `Nx` node-count suffix
+  only when the recipe spans more than one node.
+
+### Mods
+
+A **mod** is a named change applied to a runtime container *before* it begins
+serving, giving it a behaviour its own image does not have. A dgxrun recipe
+declares the ones it needs by name (`mods:` above); each lives in
+[`mods/`](../mods) as a directory containing a `run.sh`.
+
+How a mod reaches a node, and what happens when it hasn't:
+
+1. The agent bundle carries `mods/` and installs it to `/opt/dgx-agent/mods/`.
+   **Adding or changing a mod therefore requires rebuilding the agent bundles and
+   rolling the agents** — unlike a recipe edit, it is not picked up live.
+2. At launch the agent bind-mounts each declared mod read-only at `/mods/<name>`
+   and runs `bash /mods/<name>/run.sh` immediately before `exec`ing the serve
+   command, so everything the mod writes lands in the container's own tree.
+3. The manager validates that a mod name is a single path segment (it becomes a
+   bind-mount source). The agent then checks the directory actually exists on
+   *that* node and **refuses the deploy** if it does not — a runtime that starts
+   without a mod it needed looks perfectly healthy and fails much later, somewhere
+   unrelated.
+
+Mods are vendored rather than referenced from a registry for the same
+reproducibility reason dgxrun exists; `mods/README.md` records each one's
+upstream and commit.
+
+### Deploying a recipe
+
+`POST /api/deployments`, exactly one of:
+
+- `recipeFile` — a catalog ref, either a sparkrun registry recipe (e.g.
+  `@official/<id>`) or an in-repo dgxrun recipe (`@dgxrun/<name>`).
 - `recipePath` — a path to a recipe YAML staged under `SHARED_STORAGE_PATH`.
 - `recipeYaml` — an **inline recipe body** posted directly in the request. The agent
   writes it to a transient file and runs it; nothing lands on the cluster filesystem.
@@ -202,15 +286,23 @@ POST /api/recipes/refresh           # tells agents to re-run `sparkrun list`
   like a recipe; the `command:` it declares runs in a container, so treat it as a
   privileged endpoint.)
 
-**Engine isolation.** Each recipe declares its own `runtime` (vLLM / SGLang /
-llama.cpp) and `container` image, so different models can run different engine
-versions side by side without affecting each other. sparkrun's default DGX Spark
-image is eugr-based (`dgx-vllm-eugr-nightly`); the **first** deploy of a new image
-family does a one-time from-source build (~15 min) and is cached thereafter — so the
-first launch of a given recipe family is slow even though the workload is small.
+A `recipePath` or `recipeYaml` body that declares `runner: dgxrun` is launched by
+dgxrun too — the manager reads the YAML it already holds to decide.
+
+### Engine isolation
+
+Each recipe declares its own `runtime` (vLLM / SGLang / llama.cpp) and `container`
+image, so different models can run different engine versions side by side without
+affecting each other. sparkrun's default DGX Spark image is eugr-based
+(`dgx-vllm-eugr-nightly`); the **first** deploy of a new image family does a one-time
+from-source build (~15 min) and is cached thereafter — so the first launch of a given
+recipe family is slow even though the workload is small. dgxrun recipes name an image
+tag directly and never build one, so the image must already exist on the node (or be
+pullable) — `scripts/` holds the builders for the custom images the in-repo recipes
+use.
 
 **Live logs.** vLLM's detailed model-loading output streams to the deployment log via
-a `sparkrun logs` follower the agent attaches after launch.
+a log follower the agent attaches after launch.
 
 ---
 
