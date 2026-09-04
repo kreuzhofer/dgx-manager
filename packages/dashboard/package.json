@@ -2,6 +2,7 @@
   "name": "@dgx-manager/dashboard",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "scripts": {
     "dev": "next dev --port 3000",
     "build": "next build",
