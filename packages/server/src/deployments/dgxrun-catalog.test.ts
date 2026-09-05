@@ -41,6 +41,60 @@ describe("loadDgxrunCatalog", () => {
   });
 });
 
+const AMD64 = `runner: dgxrun
+arch: amd64
+cluster_only: false
+model: unsloth/Qwen3.8-27B-NVFP4
+container: vllm/vllm-openai:v0.28.0
+defaults:
+  tensor_parallel: 1
+  port: 8000
+command: vllm serve {model}`;
+
+describe("loadDgxrunCatalog arch + cluster_only", () => {
+  const deps = (files: Record<string, string>) => ({
+    readDir: () => Object.keys(files),
+    readFile: (p: string) => files[p.split("/").pop()!],
+  });
+
+  /** A recipe that declares `arch: amd64` is tagged amd64, so the deploy-time
+   *  arch admission guard lets it onto the RTX-5090 host. */
+  it("reads arch from the recipe", () => {
+    const r = loadDgxrunCatalog("/d", deps({ "qwen.yaml": AMD64 }));
+    expect(r[0].arch).toBe("amd64");
+  });
+
+  /** Backward compatibility: every recipe written before `arch:` existed
+   *  targets the arm64 Sparks, so an absent field must still mean arm64. */
+  it("defaults arch to arm64 when the recipe omits it", () => {
+    const r = loadDgxrunCatalog("/d", deps({ "glm.yaml": VALID }));
+    expect(r[0].arch).toBe("arm64");
+  });
+
+  /** cluster_only is likewise read, not assumed: a single-GPU amd64 recipe is
+   *  deployable solo and must not be forced into the cluster-only UI path. */
+  it("reads cluster_only: false from the recipe", () => {
+    const r = loadDgxrunCatalog("/d", deps({ "qwen.yaml": AMD64 }));
+    expect(r[0].cluster_only).toBe(false);
+  });
+
+  /** Backward compatibility: the pre-existing recipes are all cluster_only. */
+  it("defaults cluster_only to true when the recipe omits it", () => {
+    const noFlag = VALID.replace("cluster_only: true\n", "");
+    const r = loadDgxrunCatalog("/d", deps({ "glm.yaml": noFlag }));
+    expect(r[0].cluster_only).toBe(true);
+  });
+
+  /** Fail loud, not silently: an unrecognised arch is a typo that would
+   *  otherwise route the recipe to the wrong hardware, so the recipe is
+   *  dropped from the catalog rather than defaulted. */
+  it("skips a recipe whose arch is not amd64/arm64", () => {
+    const bad = AMD64.replace("arch: amd64", "arch: x86");
+    const r = loadDgxrunCatalog("/d", deps({ "qwen.yaml": bad, "ok.yaml": VALID }));
+    expect(r.map((x) => x.file)).toEqual(["@dgxrun/ok"]);
+  });
+});
+
 describe("resolveDgxrunRecipeFile", () => {
   it("maps @dgxrun/<name> to <dir>/<name>.yaml", () => {
     expect(resolveDgxrunRecipeFile("@dgxrun/glm-5.2-awq-15pct", "/app/recipes/dgxrun"))

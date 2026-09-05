@@ -50,6 +50,14 @@ export interface DgxrunLaunchOptions {
   shmSize?: string;
   /** Host directory holding the vendored mods. Default `/opt/dgx-agent/mods`. */
   modsDir?: string;
+  /**
+   * Whether this host has the RoCE/InfiniBand fabric (`/dev/infiniband`).
+   * Defaults to `true` — every DGX Spark has it, so the Spark argv is
+   * unchanged. Set false on a host without it (the amd64 RTX-5090 box): the
+   * device passthrough would make `docker run` fail outright, and the fabric
+   * env names NICs that do not exist there.
+   */
+  hasInfiniband?: boolean;
 }
 
 /** Where the agent bundle installs the vendored mods on a node. */
@@ -82,6 +90,28 @@ export const FABRIC_ENV_DEFAULTS: Record<string, string> = {
   OMP_NUM_THREADS: "4",
   TRANSFORMERS_OFFLINE: "1",
 };
+
+/**
+ * The subset of {@link FABRIC_ENV_DEFAULTS} that names physical fabric — IB
+ * HCAs and the GB10 NIC interfaces. On a host without `/dev/infiniband` these
+ * point at hardware that isn't there, and NCCL then fails to initialise rather
+ * than quietly falling back, so they are dropped instead of passed through.
+ *
+ * The rest of the block (`NCCL_CUMEM_ENABLE`, `NCCL_IGNORE_CPU_AFFINITY`,
+ * `NCCL_DEBUG`, `OMP_NUM_THREADS`, `TRANSFORMERS_OFFLINE`) is hardware-
+ * independent and is injected either way. Filtering the single ordered map —
+ * rather than composing two — keeps `-e` emission order identical on the
+ * Sparks, which the golden argv tests pin.
+ */
+export const IB_FABRIC_ENV_KEYS: ReadonlySet<string> = new Set([
+  "NCCL_NET",
+  "NCCL_IB_DISABLE",
+  "NCCL_IB_HCA",
+  "NCCL_SOCKET_IFNAME",
+  "NCCL_IB_GID_INDEX",
+  "NCCL_CROSS_NIC",
+  "GLOO_SOCKET_IFNAME",
+]);
 
 /** A mod name must be a single path segment — it becomes a bind-mount source. */
 const MOD_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -267,6 +297,7 @@ export function buildDgxrunDockerArgs(recipe: DgxrunRecipe, opts: DgxrunLaunchOp
   const headless = opts.headless ?? opts.rank > 0;
   const shmSize = opts.shmSize ?? "32gb";
   const modsDir = opts.modsDir ?? DEFAULT_MODS_DIR;
+  const hasInfiniband = opts.hasInfiniband ?? true;
 
   const args: string[] = [
     "run", "-d", "--name", opts.containerName,
@@ -277,7 +308,7 @@ export function buildDgxrunDockerArgs(recipe: DgxrunRecipe, opts: DgxrunLaunchOp
     "--network", "host",
     "--ipc", "host",
     "--gpus", "all",
-    "--device", "/dev/infiniband:/dev/infiniband",
+    ...(hasInfiniband ? ["--device", "/dev/infiniband:/dev/infiniband"] : []),
     "--cap-add", "IPC_LOCK",
     "--ulimit", "memlock=-1:-1",
     "--ulimit", "stack=67108864:67108864",
@@ -291,6 +322,14 @@ export function buildDgxrunDockerArgs(recipe: DgxrunRecipe, opts: DgxrunLaunchOp
     args.push("-v", `${modsDir}/${m}:${CONTAINER_MODS_ROOT}/${m}:ro`);
   }
 
+  // On a host with no RoCE fabric, drop the env that names IB HCAs and GB10
+  // NICs; the rest of the block is hardware-independent and still applies.
+  const fabricEnv = hasInfiniband
+    ? FABRIC_ENV_DEFAULTS
+    : Object.fromEntries(
+        Object.entries(FABRIC_ENV_DEFAULTS).filter(([k]) => !IB_FABRIC_ENV_KEYS.has(k)),
+      );
+
   // dgxrun OWNS the `/cache/huggingface` bind-mount (weightsDir), so default HF
   // there and go offline — cluster weights are pre-staged on NFS. Pushed BEFORE
   // the recipe env so a recipe can still override (docker uses the last -e for a
@@ -300,7 +339,7 @@ export function buildDgxrunDockerArgs(recipe: DgxrunRecipe, opts: DgxrunLaunchOp
   const hfDefaults: Record<string, string> = {
     HF_HOME: "/cache/huggingface",
     HF_HUB_OFFLINE: "1",
-    ...FABRIC_ENV_DEFAULTS,
+    ...fabricEnv,
   };
   for (const [k, v] of Object.entries(hfDefaults)) {
     args.push("-e", `${k}=${v}`);

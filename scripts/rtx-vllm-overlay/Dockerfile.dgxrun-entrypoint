@@ -1,0 +1,19 @@
+ARG FROM_TAG=vllm/vllm-openai:v0.28.0
+FROM ${FROM_TAG}
+
+# The ONLY layer in this overlay — and the only reason it exists.
+#
+# dgxrun passes the entire serve argv as the container COMMAND and appends the
+# rank flags to it (--nnodes/--node-rank/--master-addr/--master-port), so the
+# recipe's `vllm serve {model} …` must be argv[0..]. The official
+# vllm/vllm-openai image sets ENTRYPOINT ["vllm","serve"], which turns that
+# command into ARGUMENTS to an already-chosen subcommand — the container dies
+# instantly with:
+#
+#   vllm: error: unrecognized arguments: serve unsloth/Qwen3.8-27B-NVFP4
+#
+# Every other dgxrun container on this cluster is entrypoint-less. Resetting it
+# here keeps the RTX recipes normal recipes instead of ones that have to know
+# their image is shaped differently. Same fix, same reason, as
+# scripts/glm53-flash-overlay/Dockerfile.dgxrun-entrypoint.
+ENTRYPOINT []

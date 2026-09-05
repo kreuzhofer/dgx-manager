@@ -68,7 +68,17 @@ function ComparePageBody() {
               <div key={r.id} className="text-sm">
                 <div className="flex justify-between text-xs text-gray-400 mb-0.5">
                   <span>{r.deployment?.displayName ?? r.modelName} · {r.presetId ?? "custom"}</span>
-                  <span>{r.accuracyScore != null ? `${r.accuracyScore.toFixed(1)}/100` : "—"}</span>
+                  <span>
+                    {(r.extractionFindings ?? []).some((f) => f.severity === "failed") && (
+                      <span
+                        className="mr-1 text-amber-400"
+                        title="Answer extraction may have failed - not comparable with the others"
+                      >
+                        &#9888;
+                      </span>
+                    )}
+                    {r.accuracyScore != null ? `${r.accuracyScore.toFixed(1)}/100` : "—"}
+                  </span>
                 </div>
                 <div className="h-2 rounded bg-gray-800 overflow-hidden">
                   <div

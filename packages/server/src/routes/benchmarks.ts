@@ -2,6 +2,7 @@ import express, { type Request, type Response } from "express";
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { prisma } from "../prisma.js";
+import { extractionFindingsFor } from "../benchmarks/extraction-failure.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import {
   BENCHMARK_PRESETS,
@@ -68,7 +69,9 @@ benchmarksRouter.get("/", async (req, res) => {
     orderBy: { createdAt: "desc" },
     include: { deployment: { include: { node: true, model: true } } },
   });
-  res.json(runs);
+  // Derived, not stored: a score whose extraction failed looks identical to a
+  // genuine one, and deriving on read means historical runs are checked too.
+  res.json(runs.map((r) => ({ ...r, extractionFindings: extractionFindingsFor(r.accuracyMetrics) })));
 });
 
 /**
@@ -137,7 +140,7 @@ benchmarksRouter.get("/:id", async (req, res) => {
     },
   });
   if (!run) return res.status(404).json({ error: "not found" });
-  res.json(run);
+  res.json({ ...run, extractionFindings: extractionFindingsFor(run.accuracyMetrics) });
 });
 
 /**
@@ -328,6 +331,34 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "numConcurrent must be an integer between 1 and 256" });
     }
     config = { ...(config as AccuracyConfig), numConcurrent: n };
+  }
+
+  // Optional per-run timeout override (SECONDS) for accuracy runs. lm-eval
+  // applies it as aiohttp ClientTimeout(total=...), bounding the whole request
+  // including generation, so the right value is a function of maxGenToks and the
+  // model's per-request throughput. Its default (300s) livelocked a GPQA run on a
+  // slow model at concurrency 8 — see DEFAULT_TIMEOUT_S in lm-eval-args.ts.
+  // Upper bound 86400 keeps a typo from parking a run for a week.
+  // Optional per-run answer-format instruction for accuracy runs. Deliberately
+  // per-run rather than baked into the shared presets: it changes what the score
+  // MEANS, so a preset carrying it would silently make new numbers incomparable
+  // with the baselines already measured without it. The value is stored in the
+  // run's config, which is the only record of how a number was produced.
+  const siOverride = (req.body as { systemInstruction?: unknown }).systemInstruction;
+  if (kind === "accuracy" && siOverride !== undefined) {
+    if (typeof siOverride !== "string" || siOverride.trim() === "" || siOverride.length > 2000) {
+      return res.status(400).json({ error: "systemInstruction must be a non-empty string under 2000 characters" });
+    }
+    config = { ...(config as AccuracyConfig), systemInstruction: siOverride };
+  }
+
+  const toOverride = (req.body as { timeout?: unknown }).timeout;
+  if (kind === "accuracy" && toOverride !== undefined) {
+    const t = Number(toOverride);
+    if (!Number.isInteger(t) || t < 1 || t > 86400) {
+      return res.status(400).json({ error: "timeout must be an integer number of seconds between 1 and 86400" });
+    }
+    config = { ...(config as AccuracyConfig), timeout: t };
   }
 
   let endpointUrl: string;

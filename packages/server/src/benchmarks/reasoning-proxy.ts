@@ -19,6 +19,15 @@ export function applyNoTimeouts(server: http.Server): void {
   server.requestTimeout = 0;
   server.headersTimeout = 0;
   server.setTimeout(0);
+  // keepAliveTimeout is NOT a request timeout — it closes an IDLE pooled
+  // connection after 5 s (Node's default) — which is why the first pass at this
+  // missed it. lm-eval's aiohttp pools connections, so once items get slow enough
+  // that the gap between requests exceeds 5 s, the client reuses a socket Node has
+  // just closed and sees ServerDisconnectedError. That killed a GPQA longgen run
+  // at 193/198 after 3h50m, having survived the tail that ended every earlier
+  // attempt. Same reasoning as the three above: the correct bound is the
+  // upstream's, not ours.
+  server.keepAliveTimeout = 0;
 }
 
 /** Forward a request with no timeout of any kind, collecting the full response. */

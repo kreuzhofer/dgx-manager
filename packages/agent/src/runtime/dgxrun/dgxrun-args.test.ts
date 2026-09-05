@@ -353,6 +353,64 @@ describe("buildDgxrunDockerArgs — fabric env defaults", () => {
   });
 });
 
+describe("buildDgxrunDockerArgs — hosts without InfiniBand", () => {
+  // The RTX-5090 host (aihost01) has no /dev/infiniband and none of the GB10
+  // NIC names. Passing the device makes `docker run` fail outright, and the
+  // NCCL_*_IFNAME/HCA values name hardware that does not exist — NCCL fails to
+  // initialise rather than degrading to TCP. So both are dropped there.
+  const noIb = { ...baseOpts, rank: 0, hasInfiniband: false };
+
+  it("omits the IB device passthrough", () => {
+    const s2 = buildDgxrunDockerArgs(glmRecipe, noIb).join(" ");
+    expect(s2).not.toContain("/dev/infiniband");
+  });
+
+  it("omits the env vars that name IB devices or GB10 NICs", () => {
+    const bare: DgxrunRecipe = { ...glmRecipe, env: {} };
+    const s2 = buildDgxrunDockerArgs(bare, noIb).join(" ");
+    for (const k of ["NCCL_NET", "NCCL_IB_DISABLE", "NCCL_IB_HCA", "NCCL_IB_GID_INDEX",
+                     "NCCL_CROSS_NIC", "NCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME"]) {
+      expect(s2).not.toContain(`-e ${k}=`);
+    }
+  });
+
+  it("keeps the hardware-independent env", () => {
+    const bare: DgxrunRecipe = { ...glmRecipe, env: {} };
+    const s2 = buildDgxrunDockerArgs(bare, noIb).join(" ");
+    expect(s2).toContain("-e NCCL_CUMEM_ENABLE=0");
+    expect(s2).toContain("-e NCCL_IGNORE_CPU_AFFINITY=1");
+    expect(s2).toContain("-e NCCL_DEBUG=WARN");
+    expect(s2).toContain("-e OMP_NUM_THREADS=4");
+    expect(s2).toContain("-e TRANSFORMERS_OFFLINE=1");
+    expect(s2).toContain("-e HF_HOME=/cache/huggingface");
+  });
+
+  it("keeps everything else — only the fabric bits differ", () => {
+    const s2 = buildDgxrunDockerArgs(glmRecipe, noIb).join(" ");
+    expect(s2).toContain("--network host");
+    expect(s2).toContain("--ipc host");
+    expect(s2).toContain("--gpus all");
+    expect(s2).toContain("--cap-add IPC_LOCK");
+    expect(s2).toContain("--ulimit memlock=-1:-1");
+    expect(s2).toContain("--shm-size 32gb");
+    expect(s2).toContain("-v /mnt/tank/models:/cache/huggingface");
+  });
+
+  /** Default stays true so every Spark launch is byte-identical to before. */
+  it("defaults to IB present when the option is omitted", () => {
+    const withDefault = buildDgxrunDockerArgs(glmRecipe, { ...baseOpts, rank: 0 });
+    const explicit = buildDgxrunDockerArgs(glmRecipe, { ...baseOpts, rank: 0, hasInfiniband: true });
+    expect(withDefault).toEqual(explicit);
+    expect(withDefault.join(" ")).toContain("--device /dev/infiniband:/dev/infiniband");
+  });
+
+  it("still lets a recipe set a dropped key explicitly", () => {
+    const r: DgxrunRecipe = { ...glmRecipe, env: { NCCL_SOCKET_IFNAME: "eno1" } };
+    const s2 = buildDgxrunDockerArgs(r, noIb).join(" ");
+    expect(s2).toContain("-e NCCL_SOCKET_IFNAME=eno1");
+  });
+});
+
 describe("buildDgxrunDockerArgs — HF cache defaults", () => {
   // dgxrun owns the /cache/huggingface bind-mount, so it must default HF_HOME
   // there + offline; else a recipe that omits them (like the registry recipe,

@@ -1,4 +1,4 @@
-# @dgxrun/glm-5.2-awq-15pct-144k — big-context daily-driver variant of glm-5.2-awq-15pct.
+# @dgxrun/zai-glm-5.2-awq-int4-15pct-144k-4x — big-context daily-driver variant of glm-5.2-awq-15pct.
 # Reduced sparse-MLA/indexer workspace chunks eliminate the head's capture/JIT memory spike,
 # lifting the no-DCP context ceiling from ~85K to ~159K (KV-limited at gmu 0.88). 144K here
 # leaves startup margin below that ceiling. Decode is unchanged (~25-31 on real/code content;

@@ -1,0 +1,416 @@
+# @dgxrun/qwen3.8-27b-nvfp4-rtx — Qwen3.8-27B at NVFP4, on the ONE amd64 RTX 5090.
+#
+# THE FIRST amd64 RECIPE IN THIS CATALOG. Everything else here targets arm64 GB10
+# Sparks with unified memory and a RoCE fabric. This one targets aihost01: a
+# commodity Ubuntu 24.04 box with a single consumer Blackwell card, 32,607 MiB of
+# DISCRETE VRAM, no InfiniBand, and one 2.5 GbE NIC. Hence `arch: amd64` and
+# `cluster_only: false` — both fields exist because of this recipe.
+#
+# WHY NVFP4 AND NOT BF16 OR FP8. The BF16 reference weights are 51.7 GiB and the
+# card holds 31.8 GiB usable — not close. FP8 is 28.7 GiB, which would leave under
+# 3 GiB for KV and activations, and vllm#51884 (blockwise FP8 dying in
+# process_weights_after_loading, "Unknown SF transformation") is filed against
+# capability family 12 on THIS EXACT CARD CLASS — sm_120, RTX 5090. So FP8 is both
+# too big and the one quantization with a known open bug here.
+#
+# NVFP4 at 21.8 GiB is the natural fit: sm_120 has native FP4 tensor cores, so
+# this is the quantization the hardware was built for, and unsloth's checkpoint
+# keeps the MTP weights (as a separate model_mtp.safetensors, 0.79 GiB) so MTP
+# speculative decoding survives — measured working below.
+#
+# ⚠ KNOWN RISK, VERIFIED AT FIRST BOOT: sglang#34895 reports a dropped
+# `lm_head weight_scale` on this exact repo producing degenerate repetition. That
+# is a silent quality failure — the server comes up healthy and serves garbage —
+# so the measured block below records an explicit coherence check, not just that
+# it loaded.
+#
+# CONTAINER: `rtx-vllm:v0.28.0` — the stock upstream `vllm/vllm-openai:v0.28.0`
+# release (2026-08-26) plus ONE metadata layer that clears its ENTRYPOINT.
+# Built by scripts/build-rtx-vllm-image.sh; no kernel work, no vLLM compile.
+#
+# The overlay is not optional. dgxrun passes the whole serve argv as the
+# container COMMAND, but the official image sets ENTRYPOINT ["vllm","serve"], so
+# the recipe's command lands as arguments to an already-chosen subcommand and
+# the container dies in under a second with:
+#   vllm: error: unrecognized arguments: serve unsloth/Qwen3.8-27B-NVFP4
+# Measured here 2026-08-29, and the same trap GLM-5.3-Flash hit — see
+# scripts/glm53-flash-overlay/Dockerfile.dgxrun-entrypoint.
+#
+# NO OTHER IMAGE WORK IS NEEDED. Qwen3.8 declares
+# `Qwen3_5ForConditionalGeneration`, in-tree since vLLM v0.17.0, with a native
+# multimodal processor — so no `--trust-remote-code`. sm_120 is stock-supported,
+# unlike the GB10's sm_121a which is why the eugr/b12x images exist; those are
+# arm64 and cannot run on this host at all. Pin a DATED release, never
+# `:latest` — it drifts per node and silently changes benchmark numbers.
+recipe_version: "2"
+runner: dgxrun
+arch: amd64
+cluster_only: false
+model: unsloth/Qwen3.8-27B-NVFP4
+runtime: vllm
+container: rtx-vllm:v0.28.0
+description: Qwen3.8-27B NVFP4 on the RTX 5090 (amd64, single GPU)
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+
+  # One GPU in the box. Never a cluster — dgxrun's multi-node path needs the
+  # RoCE fabric this host does not have.
+  tensor_parallel: 1
+
+  # 0.94, MEASURED, not inherited. Every GB10 recipe here uses 0.88 for a reason
+  # that does not apply to this box: vLLM's startup guard compares gmu*total
+  # against CUDA-VISIBLE free, which on a Spark runs ~7 GiB below MemFree because
+  # of unified memory. This card has 32 GiB of DISCRETE VRAM and no such gap, so
+  # the conservative Spark value would simply waste ~1.3 GiB of KV here.
+  #
+  # Measured on hardware 2026-08-29, at a 65,536 window, only this value changed:
+  #     0.90  ->  KV  73,728 tokens (1.12x)  |  115.4 tok/s
+  #     0.94  ->  KV 101,814 tokens (1.55x)  |  124.9 tok/s   <- chosen
+  # Both loaded and both passed the coherence check. 0.94 is +38% KV and +8%
+  # decode for free. vLLM notes CUDA-graph profiling makes 0.94 behave as
+  # 0.9255, so a little headroom remains above this.
+  gpu_memory_utilization: 0.94
+
+  # 98,304 (96K). MEASURED, both configurations booted and coherence-checked:
+  #     65,536  ->  KV 101,814 tokens (1.55x)  |  124.9 tok/s
+  #     98,304  ->  KV 111,070 tokens (1.13x)  |  115.4 tok/s   <- chosen
+  # So the wider window costs ~8% decode and most of the concurrency headroom.
+  # Chosen because a single-GPU box like this serves one caller at a time far
+  # more often than four, and 96K is the difference between holding a whole
+  # working set and not. DROP TO 65536 if this endpoint ever fronts more than
+  # one caller — that is the better setting for concurrent serving.
+  #
+  # Note the KV pool is NOT a constant: it came out LARGER at the wider window
+  # (111,070 vs 101,814) because max_model_len feeds vLLM's block/padding maths.
+  # Do not treat any single measured pool size as the hard ceiling; vLLM prints
+  # its own "estimated maximum model length" when it refuses, and that is the
+  # number to believe.
+  # THE TWO LEVERS THAT DO NOT WORK HERE — both were tried, both on 2026-08-29.
+  #
+  # DCP2 / DCP4. Every long-context recipe in this directory (glm-5.2-*-dcp2/dcp4)
+  # buys its window with decode context parallelism. It is UNAVAILABLE on this
+  # host, and not for a tuning reason: DCP SHARDS the KV cache across
+  # tensor-parallel ranks rather than adding capacity, so vLLM enforces
+  # `tp % dcp == 0` (config/parallel.py). One GPU means tp=1, and dcp=2 dies at
+  # config validation with
+  #     ValueError: tp_size=1 must be divisible by dcp_size=2
+  # DCP is a multi-GPU feature. The GLM recipes get it from spanning 2-4 Sparks.
+  #
+  # --kv-cache-dtype fp8. Available, but far weaker than halving KV bytes implies:
+  # it moved the ceiling only ~101,814 -> ~115,200 tokens (+13%, not ~2x). Only 16
+  # of this model's 64 layers hold a KV cache; the other 48 are linear/GDN carrying
+  # a constant-size recurrent state that kv_cache_dtype does not touch, so FP8
+  # shrinks the minority component. Not enabled — +13% context is not worth
+  # quantizing the cache. (That +13% is also why the same hybrid design makes
+  # 100K+ tokens fit in ~4.5 GiB in the first place.)
+  max_model_len: 98304
+
+  # 8, matching qwen3.8-27b-bf16.yaml — which picked 8 specifically to match the
+  # benchmark harness (-w 8 for mini-SWE-agent, num_concurrent 8 for lm-eval).
+  # Keeping them equal is what makes the NVFP4-vs-BF16 comparison mean anything:
+  # at 16/32/64 a throughput sweep is dominated by this cap, so a 4-vs-8 mismatch
+  # would compare batching limits rather than quantizations.
+  #
+  # MEASURED FREE (2026-08-29), which is why it is safe here. This model is
+  # hybrid, and the 48 linear/GDN layers hold a recurrent state allocated PER
+  # SEQUENCE SLOT, so doubling the slots was expected to cost real context. It
+  # did not — at the 98,304 window:
+  #     max_num_seqs 4  ->  KV 111,070 tokens (1.13x)
+  #     max_num_seqs 8  ->  KV 109,794 tokens (1.12x)
+  # i.e. ~1.1%, not the near-halving the per-slot state implies. The GDN state is
+  # small next to the pool.
+  #
+  # Note the pool only affords ~1.1x concurrency at this window either way, so
+  # eight simultaneous FULL-LENGTH requests cannot be resident and vLLM will
+  # queue/preempt. That is the right trade for typical short requests; pair a
+  # higher value with max_model_len 65536 for real concurrent load.
+  max_num_seqs: 8
+
+  # 2048 because vLLM CLAMPS to it under speculative decoding anyway — it logs
+  # "max_num_scheduled_tokens is set to 2048 based on the speculative decoding
+  # settings" and suggests raising this to accommodate draft-token slots. Left at
+  # the clamp for the same reason meta-muse-glimmer-30b-bf16.yaml did: 2048 measured faster
+  # than 8192 under spec decoding on this fleet. Worth an A/B here.
+  max_num_batched_tokens: 2048
+
+  # The MTP head ships as a SEPARATE model_mtp.safetensors (0.79 GiB) in this
+  # repo, not merged into the main file — but vLLM finds it and logs "Detected
+  # MTP model". No drafter to stage. Measured acceptance at nst=3: 58.8% of
+  # drafted tokens, 1.76 accepted per draft => 2.76 tokens per forward pass,
+  # which closely tracks the BF16 Spark run's 56.2% / 1.68 / 2.68.
+  num_speculative_tokens: 3
+
+  served_model_name: qwen3.8-27b-nvfp4
+
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      --tensor-parallel-size {tensor_parallel} \
+      --max-model-len {max_model_len} \
+      --max-num-seqs {max_num_seqs} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --enable-auto-tool-choice \
+      --tool-call-parser qwen3_coder \
+      --reasoning-parser qwen3 \
+      --generation-config auto \
+      --default-chat-template-kwargs '{"reasoning_effort":"medium"}' \
+      --speculative-config '{"method":"mtp","num_speculative_tokens":{num_speculative_tokens}}'
+
+# ---------------------------------------------------------------------------------------
+# MEASURED ON HARDWARE — aihost01 (RTX 5090, amd64), 2026-08-29, this exact recipe
+#
+#   Loads and serves.       Weights 22.13 GiB; total VRAM 27,579 MiB of 32,607 at gmu 0.90,
+#                           ~29.7 GiB at 0.94. Graph capture 3 s / 0.10 GiB.
+#   Cold start.             410 s to /health: 85 s weight load (21 GB SINGLE safetensors
+#                           over 2.5 GbE NFS — the repo is NOT sharded, so the load cannot
+#                           parallelize), 72.9 s torch.compile backbone + 10.5 s eagle head,
+#                           then FlashInfer autotune + 20.7 s multimodal warmup.
+#   Warm restart.           Weight load drops 85 s -> 7.0 s once the file is in the node's
+#                           page cache (62 GB RAM). torch.compile does NOT survive: its
+#                           cache lives at /root/.cache/vllm INSIDE the container, which
+#                           dgxrun destroys on every redeploy, so every restart re-pays ~83 s.
+#                           Mounting that path would remove it; not done here.
+#   Context.                KV 111,070 tokens at gmu 0.94 / 98,304 window (1.13x). At a
+#                           65,536 window the pool is 101,814 (1.55x) — the pool size
+#                           moves with max_model_len. A 196,608 window was REFUSED:
+#                           "7.16 GiB KV needed, 4.54 GiB available, estimated maximum
+#                           model length is 115200" (that estimate was with fp8 KV).
+#   MTP works, no drafter.  SpeculativeConfig(method='mtp', num_spec_tokens=3);
+#                           "Detected MTP model. Sharing target model embedding weights"
+#                           AND "Sharing target model lm_head weights with the draft model".
+#                           Acceptance 58.8%, mean 1.76 accepted/draft => 2.76 tok/forward.
+#                           Per position: 79.1% / 58.3% / 39.1%.
+#   Decode.                 115.4 tok/s single stream at the shipped 98,304 window.
+#                           124.9 tok/s at a 65,536 window (three runs: 124.8/124.9/124.9
+#                           — remarkably stable), and 115.4 at gmu 0.90 / 65,536. Both
+#                           the window and gmu move decode by ~8%.
+#   Vision.                 WORKS. A 256x256 synthetic image (red/green/blue horizontal
+#                           bands + black centre square) was described exactly right,
+#                           including that the square sits within the green band.
+#                           127 prompt tokens. Ignore the startup line "multimodal inputs
+#                           are configuration-disabled" — that refers only to mm_prefix
+#                           ATTENTION MODE, not to vision; the encoder is profiled and
+#                           "Multi-modal warmup completed in 20.672s" follows it.
+#
+# ✅ THE sglang#34895 RISK DID NOT MATERIALIZE
+#
+#   The dropped-lm_head_weight_scale degeneration reported against this repo did not appear.
+#   Four prompts (factual / reasoning / prose / code) at temperature 0 all returned coherent
+#   output with a 6-gram repetition ratio of 0.00, and the bat-and-ball question returned the
+#   counterintuitive-correct $0.05 rather than the $0.10 trap.
+#
+#   A likely reason it does not bite under vLLM: the log shows vLLM SHARES THE TARGET
+#   MODEL'S lm_head with the draft model rather than loading the checkpoint's own, so a bad
+#   lm_head scale in the MTP weights would never be used. Re-check this if a future vLLM
+#   stops sharing, and re-run the coherence check on any recipe change — the failure mode is
+#   silent, and a server that serves garbage looks exactly like one that serves well.
+#
+# ⚠ REASONING EFFORT — READ BEFORE BENCHMARKING
+#
+#   Same trap as qwen3.8-27b-bf16.yaml: the default reasoning effort can think past the
+#   token cap and return a COMPLETELY EMPTY response (finish_reason="length", both content
+#   and reasoning_content empty). Every hand-run measurement above pinned
+#   chat_template_kwargs={"reasoning_effort":"low"}. Without that, an empty reply is
+#   indistinguishable from quantization damage — which would have made the sglang#34895
+#   check above report a false positive.
+#
+#   THE LEVELS, from this checkpoint's own chat_template.jinja (it raise_exception()s on
+#   anything else, so this list is authoritative):
+#       low | medium | xhigh          ('high' is an alias that resolves to xhigh)
+#       DEFAULT = xhigh — the MAXIMUM. We do not set it, so that is what we serve.
+#
+#   It is a PROMPT STEER, NOT A BUDGET. xhigh injects "think carefully through the task,
+#   validate key assumptions, consider plausible alternatives…"; low injects "keep your
+#   thinking brief…"; medium injects NOTHING (no branch — it is the neutral setting).
+#   Nothing enforces a token budget, which is why raising a generation cap reduces but
+#   never eliminates truncation: some items simply never converge. (The repo hit the same
+#   wall on AIME — "one that never stops reasoning even at 48k".)
+#
+#   DELIBERATELY NOT PINNED. Setting it would be a no-op against today's default and adds
+#   a flag that must stay correct, in a command block that already carries fiddly JSON
+#   quoting; and because the template raise_exception()s on unknown values, a pin turns a
+#   future rename into a hard boot failure instead of a graceful default. The value of
+#   writing it down is documentation, which this comment provides. Note the caveat: the
+#   default ships INSIDE the checkpoint, so swapping quant repos (cyankiwi, dbirks) could
+#   change it silently — re-read chat_template.jinja if you do.
+#
+#   To override per request: chat_template_kwargs={"reasoning_effort":"low"|"medium"}, or
+#   enable_thinking:false to disable reasoning entirely (the whole block is gated on it).
+#   To change it for EVERY request, vLLM v0.28.0 has --default-chat-template-kwargs —
+#   which is the only way to reach lm-eval, since it cannot send chat_template_kwargs.
+#
+#   ✅ THIS RECIPE NOW PINS reasoning_effort=medium (measured 2026-08-30).
+#
+#   The template default is xhigh — the MAXIMUM — and nobody chose it. On agentic
+#   work that is actively harmful, because every turn's reasoning accumulates in a
+#   conversation that is resent each step. Measured on SWE-bench Verified, the same
+#   seeded 50 instances, ONLY this flag changed:
+#
+#                        xhigh    medium   medium(replicate)
+#       context-exceeded     4         0         1
+#       empty patch          7         1         3
+#       median messages    102        52        50
+#       wall clock       ~5.5h     ~20m      ~40m
+#       resolved         74.0%     78.0%     70.0%
+#
+#   READ THE RESOLVED ROW CAREFULLY: the two SAME-CONFIG runs differ by 8 points,
+#   twice the 4-point xhigh-vs-medium gap. Quality is a WASH (McNemar p=0.80), and
+#   20% of instances flip between identical runs. medium is chosen on the
+#   OPERATIONAL columns — which reproduced — not on a quality win. Do not cite
+#   78% > 74% as evidence medium is smarter; that reading is noise.
+#
+#   NOT temperature. Leaving sampling at the default is deliberate: vLLM v0.28.0
+#   has no batch-invariance option (only --seed, already 0), so under continuous
+#   batching temp=0 would not actually be reproducible; it would measure a config
+#   nobody serves; and it would break comparability with the GLM-5.2 / DeepSeek
+#   baselines. ~6 points is simply the resolution limit of SWE-bench at n=500.
+#
+# EVAL RESULTS — aihost01, 2026-08-29, this recipe at max_num_seqs 8
+#
+#   Throughput sweep (llama-benchy, concurrency 1/4/16/32/64):
+#       decode  115.4 / 228.0 / 397.3 / 401.6 / 400.8 tok/s   (peak 119/406/628/621/624)
+#       prefill 3554 / 4033 / 1879 / 1690 / 1568 tok/s
+#       TTFR    128 ms / 532 ms / 1.8 s / 4.2 s / 9.3 s
+#   Aggregate decode SATURATES at ~400 tok/s from concurrency 16 up — that is the
+#   max_num_seqs=8 batching cap; past it only latency grows.
+#
+#   GPQA-Diamond (198, gpqa_diamond_cot_zeroshot, lm-eval 0.4.12, num_concurrent 1,
+#   acc-gpqa-diamond-full-longgen @ max_gen_toks 32768):
+#
+#       ✅ 76.8% at reasoning_effort=medium — THE NUMBER FOR THIS RECIPE.
+#          2 of 198 nulls (1.0%), 1h41m, 31 s/item. This is what the recipe serves,
+#          so it is the number to quote. GLM-5.2 (INT4) scored 69.2% on the same
+#          harness; the official 91.2 uses Qwen's own prompt/extraction stack and is
+#          not reproducible off the shelf.
+#
+#          70.7% at the old default xhigh, for contrast — a FLOOR, not a score:
+#          33 of 198 items (16.7%) returned EMPTY content and were scored WRONG
+#          because reasoning ran past even a 32768-token cap. Runtime 4h37m
+#          (144 s/item), 2.7x slower for a worse, untrustworthy number.
+#
+#       THE NULLS WERE NEVER A CAP PROBLEM. Raising 4096 -> 32768 only moved the null
+#       rate 33% -> 17%; pinning medium took it to 1%. reasoning_effort is a prompt
+#       steer with no enforced budget, so a bigger cap cannot fix a model that has
+#       been told to think maximally — see the REASONING EFFORT block above.
+#
+#       Do NOT use the standard acc-gpqa-diamond-full preset (4096) for this model
+#       under any effort setting; at xhigh its null rate was 33%.
+#
+#       CAUTION ON ADJUSTED FIGURES: the xhigh run was reported at the time as
+#       "~84.8% adjusted", assuming the 33 nulls would have scored like the answered
+#       items. The measured 76.8% suggests that was too optimistic — items that
+#       overrun are harder than average, not representative. Prefer a measured
+#       number over an adjusted one.
+#
+# PREFIX CACHING IS ON BY DEFAULT HERE, AND IT IS STARVED, NOT BROKEN. MEASURED 2026-08-31,
+# CONFIRMED BY AN IDLE RE-PROBE 2026-09-01 (the discriminator this block asked for).
+#
+#   This recipe passes no caching flag either way. On v0.28.0 that means ENABLED:
+#   vllm#50991 shipped in this release under "New defaults — prefix caching enabled by
+#   default for Mamba models". Startup confirms it:
+#       Mamba cache mode is set to 'align' ... by default when prefix caching is enabled
+#       enable_prefix_caching=True
+#
+#   THE POOL CANNOT HOLD A CACHE. From the same startup log:
+#       Setting attention block size to 1600 tokens (attention page >= mamba page)
+#       GPU KV cache size: 109,794 tokens
+#       Maximum concurrency for 98,304 tokens per request: 1.12x
+#   109,794 KV tokens against a 98,304-token window is ONE request's worth. Under the
+#   sustained load this endpoint actually sees (2-3 running, 4-7 queued, KV usage
+#   oscillating 47-97%, 11,466 preemptions) every completed request's blocks must be
+#   evicted immediately to admit the next. There is no headroom to retain a prefix in.
+#
+#   MEASURED: lifetime 53,458,391 queried tokens, ~0 hits; a controlled sweep (shared
+#   prefix, divergent tail, exact repeat) at 1222 / 2422 / 4822 / 19222 / 48022 prompt
+#   tokens returned 0 hits at every length, while the endpoint was serving other traffic.
+#
+#   BUT IT IS NOT STRUCTURALLY DEAD. Across 3,500 logged intervals the rate is mostly
+#   0.0% yet reaches 0.1-1.2% at times. A structurally disabled cache reads exactly zero
+#   forever. This one hits occasionally and then loses the blocks.
+#
+#   NOTE THE HASH UNIT IS 1600 HERE (vs 816 on the BF16 Spark recipe — it tracks the GDN
+#   mamba page, which differs with quantization). So the zero-reuse threshold is 2*1600 =
+#   3200 tokens, and the 1222- and 2422-token probes above were expected to return zero
+#   REGARDLESS. Only the 4822 / 19222 / 48022 points are evidence of anything.
+#
+#   ⚠ THIS IS THEREFORE **NOT** EVIDENCE OF A v0.28.0 REGRESSION, and an earlier revision
+#   of this comment wrongly said so. The BF16 sibling's 96.8% and this endpoint's ~0%
+#   differ in six ways at once (version, quantization, GPU, container, window, nst) and
+#   the confound that actually explains it is POOL HEADROOM x LOAD, not vLLM version.
+#   Nothing here says whether vllm#54360 affects us.
+#
+#   ✅ IDLE RE-PROBE, 2026-09-01 — THE CACHE WORKS. STARVATION CONFIRMED.
+#   Endpoint verified quiet first (GPU util 0%, nothing running or waiting), then one
+#   14,067-token prompt (well past the 3200 threshold) sent three times:
+#
+#       A  cold                        prompt_tokens 14067   hits     0    0.0%
+#       B  same prefix, divergent tail prompt_tokens 14067   hits 11200   79.6%
+#       A' exact repeat                prompt_tokens 14067   hits 11200   79.6%
+#
+#   Cold miss then immediate reuse is a healthy cache. So the lifetime ~0% under load was
+#   POOL HEADROOM x LOAD, exactly as suspected above — NOT a defect.
+#
+#   ⛔ vllm#54360 IS RULED OUT, and with it #50897 / #53802 / #48375. The condition this
+#   block set ("only if it still reads zero idle at >3200 tokens") was tested and failed.
+#
+#   HASH UNIT 1600 CONFIRMED FROM THE HIT COUNTER, not just the startup log: 11,200 is
+#   exactly 7 x 1600.
+#
+#   ⚠ THERE IS A PERMANENT CEILING OF 7/8 BLOCKS HERE, NOT 8. 14,067 tokens spans 8 full
+#   1600-blocks (12,800) plus a 1,267 remainder, and the trailing block is never reused.
+#   A' was an EXACT repeat and still capped at 79.6%, identical to B — so this is ordinary
+#   last-block exclusion, nothing to do with the divergent tail. Practical consequence:
+#   ~1600 tokens of every request always re-prefills, so the achievable hit rate is
+#   1 - 1600/prompt_tokens. It improves as conversations lengthen.
+#
+#   ⚠ QUIET-ENDPOINT NUMBER. It proves the mechanism is sound; it does NOT predict the hit
+#   rate under concurrent load, which is the case that actually matters. That needs the
+#   tuning below and then a re-measure under realistic load.
+#
+#   WHAT WOULD ACTUALLY HELP — now worth doing, because the cache is known to work:
+#     - Lower max_num_seqs (8 -> 3 or 4). At 1.12x concurrency, 8 is oversubscribed; the
+#       11,466 preemptions are the receipt. Fewer live requests leaves pool for reuse.
+#     - Or shrink the window (98,304 -> 65,536), which buys pool headroom AND decode
+#       (101,814 KV / 124.9 tok/s vs 111,070 / 115.4). Trades context for both.
+#     - Then re-measure under load. Tracked in kreuzhofer/dgx-manager#75.
+#
+#   Unrelated but free, same hardware: vllm#54225 (FlashInfer IMA on sm_120 with NVFP4 +
+#   fp8 KV) is mitigated by FLASHINFER_CUDA_ARCH_LIST=12.0f, reported at no throughput
+#   cost. This deployment does select FLASHINFER (startup log), so it is in scope.
+#
+#   SWE-bench Verified, FULL 500 (mini-SWE-agent 2.4.5, -w 8, swebench.yaml,
+#   model timeout 1800s, harness 4.1.0, reasoning_effort=medium):
+#       76.0% resolved (380/500), 95% CI +/- 3.7 pts (72.3-79.7%).
+#       488 completed / 108 unresolved / 12 empty patch / 0 errors.
+#       GLM-5.2 INT4 across FOUR Sparks scored 73.0% on the same harness. The
+#       intervals overlap, so this is COMPARABLE, not better — do not claim a win.
+#       (Two 50-instance pilots read 78.0% and 70.0%, straddling the true 76.0%,
+#        which is what a +/-12 pt interval at n=50 should do.)
+#
+#   ⚠ EFFECTIVE CONCURRENCY IS ~2, NOT 8 — for AGENTIC workloads.
+#       Measured during the 500 campaign: vLLM ran 1-4 requests (mean ~2.3) with
+#       4-7 queued, and EVERY queued request was reason="capacity" — KV capacity,
+#       never sequence slots. So max_num_seqs=8 is not the binding constraint
+#       here; the 111,070-token KV pool is, because agent conversations grow to
+#       tens of thousands of tokens and only ~2 fit resident.
+#       Consequence: pointing more client workers at this endpoint buys nothing.
+#       -w 8 and -w 4 would deliver near-identical throughput; the extra workers
+#       just queue. The only real lever is a smaller window (65,536 measured
+#       1.55x concurrency vs 1.13x), traded against context-exceeded failures.
+#       NOTE this is invisible in the throughput sweep, which uses fixed 512-token
+#       prompts where sequence slots DO bind and aggregate hits ~400 tok/s.
+#
+# COMPARISON TO THE SPARKS — read carefully, it is NOT apples to apples.
+#
+#   qwen3.8-27b-bf16.yaml measured 9–12 tok/s for the same model on one Spark; this is
+#   124.9. That ~11x is TWO effects multiplied, not a model result: ~6.5x memory bandwidth
+#   (1792 vs 273 GB/s) and ~2.4x fewer weight bytes (NVFP4 21.8 GiB vs BF16 51.7 GiB). The
+#   Spark recipe deliberately serves unquantized weights to measure quality without a
+#   confound; this one deliberately quantizes to fit 32 GB. They answer different questions,
+#   and neither number should be quoted as "model X is faster on hardware Y".
+# ---------------------------------------------------------------------------------------

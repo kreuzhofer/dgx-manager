@@ -1,4 +1,4 @@
-# @dgxrun/muse-glimmer-30b — Meta Muse Glimmer 30B on ONE Spark.
+# @dgxrun/meta-muse-glimmer-30b-bf16 — Meta Muse Glimmer 30B at BF16, on ONE Spark.
 #
 # 29.6B dense text decoder (52 layers, hidden 6656) + ~1.8B ViT-G/14 perception
 # encoder, Apache 2.0, released 2026-08-10. Distilled from Muse Spark 1.2 and aimed
@@ -26,6 +26,25 @@
 # these nodes. We measured 0.90 failing by 0.05 GiB on this fleet (2026-07-10). 0.88 is
 # the value every GLM-5.2 recipe here uses and it clears reliably; it does not cap KV,
 # which is bounded by max_model_len and max_num_seqs.
+# REASONING STRENGTH IS PINNED TO "medium" - AND THE KNOB IS NOT CALLED WHAT YOU THINK.
+#
+# Glimmer's chat template reads `reasoning_strength`, NOT the `reasoning_effort` that
+# the Qwen3.8 recipes pin. Copying that line across would be accepted silently and do
+# nothing, leaving the model at its default:
+#
+#   {%- set rs = reasoning_strength if reasoning_strength is defined and reasoning_strength
+#                else 'high' -%}
+#   {{- 'Reasoning strength: ' + rs + '.' -}}
+#
+# The default is HIGH, i.e. maximum. Unpinned, the GPQA-Diamond run of 2026-08-30 spent
+# 3h18m at 60 s/item and still returned 7 null answers (3.5%) where thinking outran even
+# the 32768-token cap - each of which lm-eval scores WRONG. medium matches what the
+# Qwen3.8 recipes use, so the two are measured at comparable effort.
+#
+# The template only injects its default when the system prompt does not already mention
+# "reasoning strength" (it normalises "Reasoning effort" to "Reasoning strength" first),
+# so a benchmark run can override this per-run by saying so in its system instruction.
+# Pinning here makes the deployment's default explicit rather than inherited.
 recipe_version: "2"
 runner: dgxrun
 model: meta-models/Muse-Glimmer-30B
@@ -55,9 +74,26 @@ defaults:
   #     nst=15, mnbt=8192  -> 17.09 tok/s
   #     nst=6,  mnbt=8192  -> 13.70 tok/s   (block alignment broken)
   num_speculative_tokens: 15
-  # 2048 is what vLLM clamps to on its own when speculative decoding is on; setting it
-  # explicitly silences the "suboptimal performance" warning without changing anything.
-  # Raising it to 8192 was measured SLOWER (above) — the warning is misleading here.
+  # 2048 rests on the measurement above and nothing else.
+  #
+  # CORRECTED 2026-08-31: this previously claimed vLLM clamps to 2048 under speculative
+  # decoding, and that setting it explicitly silences the "suboptimal performance"
+  # warning without changing anything. Both are false, and the second is backwards.
+  # vllm/config/vllm.py::_set_max_num_scheduled_tokens assigns directly:
+  #
+  #     max_num_scheduled_tokens = max_num_batched_tokens      # no min(), no clamp
+  #     if max_num_scheduled_tokens < 8192: warn(...)
+  #
+  # So 8192 really would be 8192, and the warning fires precisely BECAUSE this is 2048.
+  # Setting 2048 causes the warning; 8192 is what silences it. (Confirmed independently
+  # by the Qwen3.8 deploy of 2026-08-28, which ran mnbt=2048 and logged the warning.)
+  # `scheduled_token_delta` only feeds a guard that raises when mnbt is too small; it
+  # never reduces the scheduled total.
+  #
+  # The measurement therefore compared two genuinely different configs and stands — but
+  # it is now the ONLY argument for 2048, and it is thin: 17.56 vs 17.09 is 2.7% from
+  # 3 runs with no variance reported. Treat it as weak evidence, not a settled result,
+  # and re-measure with stddev before relying on it.
   max_num_batched_tokens: 2048
   served_model_name: muse-glimmer
 
@@ -76,5 +112,6 @@ command: |
       --enable-auto-tool-choice \
       --tool-call-parser muse_glimmer \
       --reasoning-parser muse_glimmer \
+      --default-chat-template-kwargs '{"reasoning_strength":"medium"}' \
       --generation-config auto \
       --speculative-config '{"method":"dflash","model":"meta-models/Muse-Glimmer-30B-assistant","num_speculative_tokens":{num_speculative_tokens}}'

@@ -32,6 +32,20 @@ export type AccuracyConfig = {
    *  latency-tuned serving recipe, higher (e.g. 16) for the batched eval recipe.
    *  Optional/omitted => 1. */
   numConcurrent?: number;
+  /** Prepended as a system message on every request (lm-eval's
+   *  --system_instruction). Exists because the GPQA prompt never states an
+   *  answer format: it ends "Let's think step by step: " and assumes the model
+   *  will spontaneously write "The answer is (C)". A model that phrases it
+   *  differently scores zero however correct it is. Optional/omitted => the flag
+   *  is not passed at all, so existing presets and their baselines are
+   *  unaffected. Setting it CHANGES WHAT THE NUMBER MEANS - a run with an
+   *  instruction is not comparable with one without. */
+  systemInstruction?: string;
+  /** Per-request timeout in SECONDS, bounding the whole request including
+   *  generation (lm-eval applies it as aiohttp ClientTimeout(total=...)).
+   *  Optional/omitted => DEFAULT_TIMEOUT_S. Raise it when maxGenToks divided by
+   *  the model's realistic per-request tokens/sec exceeds the default. */
+  timeout?: number;
 };
 
 export type BenchmarkKind = "throughput" | "tool-eval" | "accuracy";
@@ -52,6 +66,44 @@ type AccuracyBench = {
   quickLimit: number;
   maxGenToks: number;
   blurb: string;
+  /**
+   * When set, also emit an `acc-<idBase>-full-longgen` preset with this
+   * generation cap instead of {@link maxGenToks}.
+   *
+   * Exists because a reasoning model that thinks past max_gen_toks returns
+   * EMPTY content; lm-eval substitutes LMEVAL_MODEL_NONE_ANSWER_PLACEHOLDER and
+   * scores the item WRONG, silently, with no error in the results. Measured on
+   * Qwen3.8-27B (2026-08-29): 33% of GPQA-Diamond items came back null at the
+   * standard 4096 cap, which would have produced a badly depressed score that
+   * looked like a real result.
+   *
+   * This is ADDITIVE rather than a raise of the shared cap on purpose: GLM-5.2
+   * ran the standard preset with 0 errors and its published 69.2% is a
+   * comparison baseline, so changing that preset's cap would silently
+   * invalidate every number already measured with it.
+   */
+  longGenToks?: number;
+  /**
+   * When set (alongside {@link longGenToks}), also emit an
+   * `acc-<idBase>-full-longgen-formatted` preset carrying this as a system
+   * instruction.
+   *
+   * Exists because this task's prompt never states an answer format while its
+   * filters demand one. GPQA's doc_to_text ends "Let's think step by step: " and
+   * strict-match then requires the literal "The answer is ". Muse Glimmer
+   * reasoned correctly, wrote "This is choice B", matched neither filter and
+   * scored 22.73 against a published 83.5; instructing the format lifted the
+   * same model to 82.83 on the same 198 items (2026-08-31).
+   *
+   * ADDITIVE for the same reason longGenToks is. An instruction changes what the
+   * number MEANS, so it must never reach the presets whose values are already
+   * baselines - GLM-5.2 67.68, DeepSeek 55.05, Qwen3.8 76.77 and GLM-5.3 81.31
+   * were all measured without one, and are not comparable with a run that has
+   * one. A distinct preset id is also what makes an instructed number
+   * reproducible from the dashboard rather than requiring someone to remember
+   * the exact wording.
+   */
+  answerFormatInstruction?: string;
 };
 
 // The v1 lineup: HF Open LLM Leaderboard v2 minus MuSR, all generative/CoT so
@@ -60,11 +112,22 @@ type AccuracyBench = {
 const ACCURACY_BENCHES: AccuracyBench[] = [
   { idBase: "ifeval", label: "IFEval", task: "ifeval", primaryMetric: "prompt_level_strict_acc", quickLimit: 100, maxGenToks: 2048, blurb: "Instruction-following adherence." },
   { idBase: "mmlu-pro", label: "MMLU-Pro (CoT)", task: "mmlu_pro", primaryMetric: "exact_match", quickLimit: 200, maxGenToks: 4096, blurb: "Knowledge/reasoning tail, chain-of-thought." },
-  { idBase: "gpqa-diamond", label: "GPQA-Diamond (CoT)", task: "gpqa_diamond_cot_zeroshot", primaryMetric: "exact_match", quickLimit: 50, maxGenToks: 4096, blurb: "Hard graduate-level Q&A, chain-of-thought." },
+  { idBase: "gpqa-diamond", label: "GPQA-Diamond (CoT)", task: "gpqa_diamond_cot_zeroshot", primaryMetric: "exact_match", quickLimit: 50, maxGenToks: 4096, longGenToks: 32768, blurb: "Hard graduate-level Q&A, chain-of-thought.", answerFormatInstruction: "After your reasoning, end your reply with a final line in exactly this form: The answer is (X) - where X is the letter A, B, C or D of the correct choice. This exact wording is required." },
   { idBase: "gsm8k", label: "GSM8K", task: "gsm8k_cot", primaryMetric: "exact_match", quickLimit: 200, maxGenToks: 2048, blurb: "Grade-school math word problems." },
   { idBase: "bbh", label: "BBH", task: "bbh_cot_zeroshot", primaryMetric: "exact_match", quickLimit: 40, maxGenToks: 4096, blurb: "Big-Bench-Hard reasoning suite, chain-of-thought." },
   { idBase: "math-hard", label: "MATH-hard", task: "leaderboard_math_hard", primaryMetric: "exact_match", quickLimit: 100, maxGenToks: 4096, blurb: "Competition-level MATH (level-5)." },
 ];
+
+/**
+ * Slowest per-request generation rate we plan for, in tokens/sec, used to derive a
+ * long-generation preset's timeout from its own cap.
+ *
+ * Not a measurement of any one model — a floor. Qwen3.8-27B measures 10.75 tok/s
+ * single-stream on one Spark and Muse Glimmer ~16.8 at concurrency 5, but presets run at
+ * numConcurrent 8 where per-request throughput is a fraction of that. Lower this if a
+ * slower endpoint starts timing out; the derivation then widens every longgen timeout.
+ */
+const SLOWEST_PER_REQUEST_TOKS_PER_SEC = 5;
 
 function accuracyPresets(): BenchmarkPreset[] {
   const out: BenchmarkPreset[] = [];
@@ -94,6 +157,48 @@ function accuracyPresets(): BenchmarkPreset[] {
       kind: "accuracy",
       config: { ...base },
     });
+    if (b.longGenToks) {
+      out.push({
+        id: `acc-${b.idBase}-full-longgen`,
+        label: `${b.label} — full, long generation (${Math.round(b.longGenToks / 1024)}k)`,
+        description:
+          `${b.blurb} Complete dataset with a ${b.longGenToks}-token generation cap, for ` +
+          `reasoning models that overrun the standard ${b.maxGenToks}. Use this when the run log ` +
+          `shows "API returned null content" — those items score WRONG rather than erroring.`,
+        kind: "accuracy",
+        config: {
+          ...base,
+          maxGenToks: b.longGenToks,
+          // DERIVED, never hardcoded: the timeout bounds the WHOLE request including
+          // generation, so a cap the timeout cannot reach is a guaranteed failure rather
+          // than a bigger budget. Deriving it from the cap is what stops the two drifting
+          // apart — which is exactly how the 2026-08-30 GPQA run died at 137/198 after
+          // 4h34m, needing >18 tok/s per request to fit 32768 tokens in the 1800s default.
+          timeout: Math.ceil(b.longGenToks / SLOWEST_PER_REQUEST_TOKS_PER_SEC),
+        },
+      });
+
+      if (b.answerFormatInstruction) {
+        out.push({
+          id: `acc-${b.idBase}-full-longgen-formatted`,
+          label: `${b.label} \u2014 full, long generation, answer format instructed`,
+          description:
+            `${b.blurb} As the long-generation preset, plus a system instruction telling the ` +
+            `model how to phrase its final answer. Use it for a model whose answers the ` +
+            `extraction filters cannot find \u2014 Muse Glimmer scored 22.73 here and 82.83 with ` +
+            `the instruction, on the same 198 items. NOT comparable with runs from the other ` +
+            `presets: instructing the format changes what the score means, so compare instructed ` +
+            `runs only with instructed runs.`,
+          kind: "accuracy",
+          config: {
+            ...base,
+            maxGenToks: b.longGenToks,
+            timeout: Math.ceil(b.longGenToks / SLOWEST_PER_REQUEST_TOKS_PER_SEC),
+            systemInstruction: b.answerFormatInstruction,
+          },
+        });
+      }
+    }
   }
   return out;
 }

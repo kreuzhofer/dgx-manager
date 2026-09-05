@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useRef, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
+import { isNodeInactive, nodeMetricsPlaceholder, showWakeButton } from "@/lib/node-power";
 import { Sparkline } from "./sparkline";
 
 interface NetInterfaceSample {
@@ -56,6 +57,7 @@ interface Node {
   ipAddress: string;
   status: string;
   powerState?: string;
+  macAddress?: string | null;
   gpuModel: string | null;
   vramTotal: number | null;
   agentVersion?: string | null;
@@ -113,12 +115,10 @@ export function NodeCard({
     onMetrics?.(appendSample);
   }, [onMetrics, appendSample]);
 
-  const isOff = node.powerState === "off" || node.powerState === "asleep";
-  // "waking" = a WOL packet was sent but the agent has not reconnected yet.
-  // Treat off/asleep/waking all as "inactive" so the card dims and keeps showing
-  // the Wake button — a node stuck in "waking" (WOL packet missed) can be retried.
-  const isWaking = node.powerState === "waking";
-  const isInactive = isOff || isWaking;
+  // Dimming and the Reboot/Shutdown pair follow power state alone; Wake needs
+  // both a captured MAC and an inactive node. See lib/node-power.
+  const isInactive = isNodeInactive(node.powerState);
+  const showWake = showWakeButton(node.powerState, node.macAddress);
 
   async function power(action: "reboot" | "shutdown") {
     const verb = action === "reboot" ? "Reboot" : "Shut down";
@@ -264,7 +264,7 @@ export function NodeCard({
         </div>
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-1">
-            {isInactive ? (
+            {showWake && (
               <button
                 onClick={wake}
                 className="text-[10px] px-2 py-0.5 rounded bg-blue-900/60 text-blue-300 hover:bg-blue-800"
@@ -272,7 +272,8 @@ export function NodeCard({
               >
                 Wake
               </button>
-            ) : (
+            )}
+            {!isInactive && (
               <>
                 <button
                   onClick={() => power("reboot")}
@@ -411,11 +412,7 @@ export function NodeCard({
         </div>
       ) : (
         <p className="text-xs text-gray-500 italic">
-          {isWaking
-            ? "Waking… — click Wake to retry if it doesn't come back"
-            : isOff
-            ? "Powered off — Wake to bring it back"
-            : "No metrics yet"}
+          {nodeMetricsPlaceholder(node.powerState, node.macAddress)}
         </p>
       )}
     </div>

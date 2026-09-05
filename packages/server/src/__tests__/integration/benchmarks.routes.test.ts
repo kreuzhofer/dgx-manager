@@ -487,6 +487,58 @@ describe("GET /api/benchmarks/:id", () => {
   });
 });
 
+describe("extractionFindings on GET responses", () => {
+  // Derived on read, so it must actually reach the client on BOTH list and
+  // detail - a warning nobody receives is no warning. The blob below is the
+  // shape lm-eval produces for GPQA: exact_match once per extraction filter,
+  // strict at a clean 0.0 while flexible found something.
+  const gpqaMetrics = JSON.stringify([
+    { task: "gpqa", metric: "exact_match", value: 0, stderr: 0, isGroup: false, nSamples: 198, filter: "strict-match" },
+    { task: "gpqa", metric: "exact_match", value: 0.227, stderr: 0.03, isGroup: false, nSamples: 198, filter: "flexible-extract" },
+  ]);
+
+  async function seedRun(accuracyMetrics: string | null) {
+    const d = await seedRunningDeployment();
+    return prisma.benchmarkRun.create({
+      data: {
+        deploymentId: d.id, modelName: "m", endpointUrl: "u",
+        servedModelName: "m", config: "{}", status: "completed",
+        kind: "accuracy", accuracyScore: 22.7, accuracyMetrics,
+      },
+    });
+  }
+
+  it("reports the failure on the detail response", async () => {
+    const run = await seedRun(gpqaMetrics);
+    const res = await request(makeApp()).get(`/api/benchmarks/${run.id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.extractionFindings).toHaveLength(1);
+    expect(res.body.extractionFindings[0]).toMatchObject({
+      task: "gpqa", metric: "exact_match", zeroFilters: ["strict-match"], bestFilter: "flexible-extract", severity: "partial",
+    });
+  });
+
+  it("reports the failure on the list response", async () => {
+    const run = await seedRun(gpqaMetrics);
+    const res = await request(makeApp()).get(`/api/benchmarks?deploymentId=${run.deploymentId}`);
+    expect(res.status).toBe(200);
+    const found = res.body.find((r: { id: string }) => r.id === run.id);
+    expect(found.extractionFindings).toHaveLength(1);
+  });
+
+  it("reports an empty list for a run with no accuracy metrics", async () => {
+    const run = await seedRun(null);
+    const res = await request(makeApp()).get(`/api/benchmarks/${run.id}`);
+    expect(res.body.extractionFindings).toEqual([]);
+  });
+
+  it("leaves accuracyScore untouched", async () => {
+    const run = await seedRun(gpqaMetrics);
+    const res = await request(makeApp()).get(`/api/benchmarks/${run.id}`);
+    expect(res.body.accuracyScore).toBe(22.7);
+  });
+});
+
 describe("DELETE /api/benchmarks/:id", () => {
   it("removes the run and cascades to results", async () => {
     const d = await seedRunningDeployment();

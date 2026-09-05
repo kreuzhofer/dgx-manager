@@ -18,9 +18,9 @@ journey), [`glm-5.2-inference-benchmark.md`](glm-5.2-inference-benchmark.md) (sp
 - **Hardware:** 4× NVIDIA GB10 (Grace-Blackwell, unified memory), tensor-parallel 4,
   decode-context-parallel 2 (DCP2), b12x sparse-MLA indexer, vLLM OpenAI endpoint.
 - **Two recipes** — only one can hold the 4-node pool at a time:
-  - `@dgxrun/glm-5.2-quanttrio-unpruned-dcp2-320k` — daily driver: 320K context, MTP
+  - `@dgxrun/zai-glm-5.2-quanttrio-int4-unpruned-dcp2-320k-4x` — daily driver: 320K context, MTP
     speculative drafter, tuned for single-stream latency (~25–31 tok/s decode).
-  - `@dgxrun/glm-5.2-quanttrio-c16-64k` — concurrent recipe for eval throughput: no MTP,
+  - `@dgxrun/zai-glm-5.2-quanttrio-int4-c16-64k-4x` — concurrent recipe for eval throughput: no MTP,
     `--max-num-seqs 16`, 64K context, 6 GiB KV, PIECEWISE cudagraph. Batches many
     requests at once. Accuracy is identical to the serving recipe (batching changes
     speed, not correctness — confirmed: GPQA 67.7% serial vs 69.2% batched, within noise).

@@ -114,6 +114,10 @@ export function launchDgxrun(
       masterAddr: args.masterAddr,
       masterPort: args.masterPort,
       params: args.params,
+      // Probed, not assumed: the Sparks have the RoCE fabric, the amd64
+      // RTX-5090 host does not, and passing its device there fails the
+      // `docker run` outright.
+      hasInfiniband: existsSync("/dev/infiniband"),
     });
   } catch (err) {
     onLog(`[dgxrun] failed to build launch args: ${err}\n`);

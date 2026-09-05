@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { execSync } from "child_process";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import express from "express";
@@ -9,6 +9,23 @@ import request from "supertest";
 const TMP_DIR = mkdtempSync(join(tmpdir(), "dgx-test-"));
 const DB_PATH = join(TMP_DIR, "test.db");
 process.env.DATABASE_URL = `file:${DB_PATH}`;
+
+// Point the server-side dgxrun catalog at a fixture dir. dgxrun-catalog.ts
+// freezes this at import time, so it must be set before the router below is
+// imported (beforeAll) — module scope is the only place that holds.
+const DGXRUN_DIR = join(TMP_DIR, "recipes");
+process.env.DGXRUN_RECIPES_DIR = DGXRUN_DIR;
+mkdirSync(DGXRUN_DIR, { recursive: true });
+writeFileSync(
+  join(DGXRUN_DIR, "zai-glm-5.3-flash-libertai-nvfp4-2x.yaml"),
+  [
+    "runner: dgxrun",
+    "model: LibertAIDAI/GLM-5.3-Flash-NVFP4",
+    "container: img:probe",
+    "command: |",
+    "  vllm serve {model}",
+  ].join("\n"),
+);
 
 let prisma: typeof import("../../prisma.js").prisma;
 let hfCacheRouter: typeof import("../../routes/hf-cache.js").hfCacheRouter;
@@ -175,6 +192,30 @@ describe("GET /api/hf-cache", () => {
     expect(r.inUseBy).toEqual(["gemma-prod"]);
   });
 
+  it("flags in-use for a @dgxrun/ deploy via the SERVER-SIDE catalog HF id (#85)", async () => {
+    // The fail-open case: `@dgxrun/` recipes are absent from the agent-reported
+    // sparkrun catalog, so resolving recipeFile -> HF id against `getRecipes()`
+    // alone left every dgxrun deploy unmatched and its serving weights offered
+    // for deletion. The stub hub reports an EMPTY sparkrun catalog on purpose.
+    const node = await prisma.node.create({ data: { name: "dgx-spark-02" } });
+    const model = await prisma.model.create({
+      data: { name: "@dgxrun/zai-glm-5.3-flash-libertai-nvfp4-2x", runtime: "dgxrun" },
+    });
+    await prisma.deployment.create({
+      data: {
+        nodeId: node.id, modelId: model.id, status: "running", displayName: "glm-flash-prod",
+        config: JSON.stringify({ recipeFile: "@dgxrun/zai-glm-5.3-flash-libertai-nvfp4-2x", runner: "dgxrun" }),
+      },
+    });
+    const hub = makeHub();
+    hub.inventories = [inv(node.id, "shared", [repo("LibertAIDAI/GLM-5.3-Flash-NVFP4")])];
+
+    const res = await request(makeApp(hub)).get("/api/hf-cache");
+    const r = res.body.caches[0].repos.find((x: { repoId: string }) => x.repoId === "LibertAIDAI/GLM-5.3-Flash-NVFP4");
+    expect(r.inUse).toBe(true);
+    expect(r.inUseBy).toEqual(["glm-flash-prod"]);
+  });
+
   it("flags in-use for a fine-tune deploy's base model (base weights load from cache)", async () => {
     const node = await prisma.node.create({ data: { name: "spark-1" } });
     const job = await prisma.fineTuneJob.create({
@@ -323,6 +364,28 @@ describe("DELETE /api/hf-cache/:cacheId", () => {
     const res = await request(makeApp(hub)).delete("/api/hf-cache/shared?repoId=org%2Falpha");
     expect(res.status).toBe(409);
     expect(res.body.error).toContain("alpha-prod");
+    expect(hub.sent).toHaveLength(0);
+  });
+
+  it("409 when a @dgxrun/ deploy is serving the repo, and sends nothing (#85)", async () => {
+    const node = await prisma.node.create({ data: { name: "dgx-spark-02" } });
+    const model = await prisma.model.create({
+      data: { name: "@dgxrun/zai-glm-5.3-flash-libertai-nvfp4-2x", runtime: "dgxrun" },
+    });
+    await prisma.deployment.create({
+      data: {
+        nodeId: node.id, modelId: model.id, status: "running", displayName: "glm-flash-prod",
+        config: JSON.stringify({ recipeFile: "@dgxrun/zai-glm-5.3-flash-libertai-nvfp4-2x", runner: "dgxrun" }),
+      },
+    });
+    const hub = makeHub();
+    hub.inventories = [inv(node.id, "shared", [repo("LibertAIDAI/GLM-5.3-Flash-NVFP4")])];
+    hub.online.add(node.id);
+
+    const res = await request(makeApp(hub))
+      .delete("/api/hf-cache/shared?repoId=LibertAIDAI%2FGLM-5.3-Flash-NVFP4");
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain("glm-flash-prod");
     expect(hub.sent).toHaveLength(0);
   });
 
