@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { test, fc } from "@fast-check/vitest";
-import { reconcileOllamaAction } from "./ollama-reconcile.js";
+import { reconcileOllamaAction, shouldRetryOllamaReconcile } from "./ollama-reconcile.js";
 
 describe("reconcileOllamaAction", () => {
   // The reboot case this exists for. Fleet policy leaves Ollama disabled at
@@ -55,6 +55,54 @@ describe("reconcileOllamaAction", () => {
         expect(stopping).toBeFalsy();
       }
       expect(action.reason.length).toBeGreaterThan(0);
+    },
+  );
+});
+
+/**
+ * The second half of the 2026-09-04 agenthost reboot bug.
+ *
+ * The reconcile above runs only when the agent registers over the WebSocket.
+ * On that boot the restore failed (Ollama's systemd job was still queued
+ * behind network-online.target), the deployment was reported `failed` — and
+ * then nothing ever looked again. The agent stayed connected, so no second
+ * reconcile ran, even though Ollama came up 76s later and the agent's own 15s
+ * health tick was successfully polling /api/ps the whole time.
+ *
+ * `shouldRetryOllamaReconcile` lets the health tick drive a retry, so a
+ * transient boot-time failure heals itself instead of needing a manual
+ * `systemctl restart dgx-agent`.
+ */
+describe("shouldRetryOllamaReconcile", () => {
+  it("retries when a restore is still outstanding", () => {
+    expect(shouldRetryOllamaReconcile({ pendingRestores: 1, inFlight: false })).toBe(true);
+  });
+
+  // Nothing failed, so a retry would be pure churn against systemd + the API.
+  it("stays quiet when no restore is outstanding", () => {
+    expect(shouldRetryOllamaReconcile({ pendingRestores: 0, inFlight: false })).toBe(false);
+  });
+
+  // The reconcile can wait minutes for a slow boot. The health tick fires every
+  // 15s, so without this guard a single failure would pile up reconciles, each
+  // issuing its own `systemctl start` and status report.
+  it("never starts a second reconcile while one is running", () => {
+    expect(shouldRetryOllamaReconcile({ pendingRestores: 3, inFlight: true })).toBe(false);
+  });
+
+  /**
+   * Invariant: a retry happens only when there is outstanding work AND no
+   * reconcile is already in flight. Both conditions are necessary.
+   */
+  test.prop([fc.nat({ max: 5 }), fc.boolean()])(
+    "retries only when work is outstanding and nothing is in flight",
+    (pendingRestores, inFlight) => {
+      const retry = shouldRetryOllamaReconcile({ pendingRestores, inFlight });
+      expect(retry).toBe(pendingRestores > 0 && !inFlight);
+      if (retry) {
+        expect(pendingRestores).toBeGreaterThan(0);
+        expect(inFlight).toBe(false);
+      }
     },
   );
 });

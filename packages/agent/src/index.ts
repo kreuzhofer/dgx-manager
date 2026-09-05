@@ -27,8 +27,12 @@ import {
   isOllamaRunning,
   startOllama,
   trackOllamaDeployment,
+  OLLAMA_BOOT_READY_BUDGET,
 } from "./runtime/ollama.js";
-import { reconcileOllamaAction } from "./runtime/ollama-reconcile.js";
+import {
+  reconcileOllamaAction,
+  shouldRetryOllamaReconcile,
+} from "./runtime/ollama-reconcile.js";
 import { discoverTrainingRecipes } from "./training-recipes.js";
 import { findInferenceTemplate, applyFinetuneSubstitutions, renderSparkrunFinetuneRecipe } from "./runtime/inference-template.js";
 import { startFinetuneJob, stopFinetuneJob, mergeLoraAdapter, reattachFinetuneJobs } from "./runtime/finetune.js";
@@ -128,6 +132,8 @@ let ws: WebSocket | null = null;
 let reconnectDelay = RECONNECT_BASE;
 /** Guards the Ollama reconnect reconcile against a flapping socket. */
 let ollamaReconcileInFlight = false;
+/** Deployments whose Ollama restore failed, for the health tick to retry. */
+const ollamaPendingRestores = new Set<string>();
 let metricsTimer: ReturnType<typeof setInterval> | null = null;
 let healthTimer: ReturnType<typeof setInterval> | null = null;
 const ollamaLastState = new Map<string, string>(); // deploymentId → last reported state
@@ -259,10 +265,12 @@ function connect() {
       const current = loadDeployments().find((x) => x.deploymentId === d.deploymentId);
       if (!current) {
         console.log(`[reconcile-ollama] ${d.deploymentId}: gone since reconcile started, skipping`);
+        ollamaPendingRestores.delete(d.deploymentId);
         continue;
       }
       if (current.stopping) {
         console.log(`[reconcile-ollama] ${d.deploymentId}: skip (undeploy in progress)`);
+        ollamaPendingRestores.delete(d.deploymentId);
         continue;
       }
 
@@ -283,11 +291,17 @@ function connect() {
 
       if (action.kind === "restore") {
         try {
-          await startOllama();
+          // This reconcile runs at agent start, which on a node reboot races
+          // the boot itself — ollama.service waits on network-online.target.
+          // Hence the boot-sized readiness budget rather than the default.
+          await startOllama(OLLAMA_BOOT_READY_BUDGET);
         } catch (err) {
           // The deployment is genuinely down and we could not revive it — say
-          // so rather than leaving the manager believing it still serves.
+          // so rather than leaving the manager believing it still serves. Also
+          // queue a retry: at boot this is often transient (the systemd job is
+          // still queued), and the health tick will come back to it.
           console.error(`[reconcile-ollama] ${d.deploymentId}: could not start Ollama:`, err);
+          ollamaPendingRestores.add(d.deploymentId);
           sendMsg("agent:deployment:status", {
             deploymentId: d.deploymentId,
             status: "failed",
@@ -299,6 +313,7 @@ function connect() {
 
       // Serving, idle, or just restored: Ollama answers and loads this model on
       // demand, so the deployment is usable.
+      ollamaPendingRestores.delete(d.deploymentId);
       sendMsg("agent:deployment:status", {
         deploymentId: d.deploymentId,
         status: "running",
@@ -574,6 +589,18 @@ function connect() {
             sendMsg("agent:ollama-status", { models: loadedModels });
           }
         } catch { /* ollama not running */ }
+
+        // A restore that failed at boot is retried here rather than waiting
+        // for the next WebSocket reconnect, which may never come.
+        if (shouldRetryOllamaReconcile({
+          pendingRestores: ollamaPendingRestores.size,
+          inFlight: ollamaReconcileInFlight,
+        })) {
+          console.log(`[reconcile-ollama] retrying ${ollamaPendingRestores.size} failed restore(s)`);
+          void reconcileOllamaDeployments().catch((err) =>
+            console.error("[reconcile-ollama] retry failed:", err),
+          );
+        }
 
         // Check tracked Ollama deployments for eviction
         const { getActiveDeployments: getOllamaDeployments, decideOllamaStateTransition } = await import("./runtime/ollama.js");

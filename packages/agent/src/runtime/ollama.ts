@@ -138,6 +138,25 @@ export interface EnsureOllamaDeps {
   onLog?: (line: string) => void;
 }
 
+/** How long to wait for the API to answer: maxAttempts polls, intervalMs apart. */
+export interface OllamaReadyBudget {
+  maxAttempts?: number;
+  intervalMs?: number;
+}
+
+/**
+ * Readiness budget for a start racing a node boot (~3 min).
+ *
+ * The default (~20s) is sized for a node that has been up for a while. It is
+ * far too short at boot: on agenthost 2026-09-04 `network-online.target`, which
+ * `ollama.service` is ordered after, was not reached until 2min 3s in because
+ * systemd-networkd-wait-online sat on a carrier-less NIC until its own timeout.
+ */
+export const OLLAMA_BOOT_READY_BUDGET: Required<OllamaReadyBudget> = {
+  maxAttempts: 90,
+  intervalMs: 2000,
+};
+
 /**
  * Make sure the Ollama service is up before a deploy. Fleet policy disables
  * Ollama autostart on all nodes (unauthenticated :11434 API), so a stopped
@@ -151,7 +170,7 @@ export interface EnsureOllamaDeps {
  */
 export async function ensureOllamaRunning(
   deps: EnsureOllamaDeps,
-  opts: { maxAttempts?: number; intervalMs?: number } = {},
+  opts: OllamaReadyBudget = {},
 ): Promise<void> {
   const maxAttempts = opts.maxAttempts ?? 10;
   const intervalMs = opts.intervalMs ?? 2000;
@@ -180,10 +199,27 @@ export async function ensureOllamaRunning(
   );
 }
 
-/** Start the Ollama systemd unit. `sudo -n` so a missing sudoers rule fails
- *  fast instead of hanging on a password prompt; argv-array exec (no shell). */
+/**
+ * argv for starting the Ollama unit. Pure so the flags can be pinned by a test.
+ *
+ * `sudo -n` so a missing sudoers rule fails fast instead of hanging on a
+ * password prompt; argv-array exec (no shell).
+ *
+ * `--no-block` matters: `systemctl start` otherwise waits for its job to
+ * *complete*, and `ollama.service` is ordered `After=network-online.target`.
+ * On a cold boot that target can be minutes away, so the call blocked, our
+ * timeout killed the client, and the deploy was reported failed — while
+ * systemd went on to run the still-queued job successfully. Enqueue and let
+ * the readiness poll below decide whether Ollama actually came up.
+ */
+export function ollamaStartArgv(): string[] {
+  return ["-n", "systemctl", "start", "--no-block", "ollama"];
+}
+
 async function startOllamaService(): Promise<void> {
-  await execFileAsync("sudo", ["-n", "systemctl", "start", "ollama"], { timeout: 15_000 });
+  // With --no-block this returns as soon as the job is enqueued, so the
+  // timeout only guards against sudo itself wedging.
+  await execFileAsync("sudo", ollamaStartArgv(), { timeout: 15_000 });
 }
 
 /** Deploy an Ollama model: pull if needed, load into GPU memory. */
@@ -330,13 +366,14 @@ export function trackOllamaDeployment(deploymentId: string, modelName: string): 
   activeDeployments.set(deploymentId, modelName);
 }
 
-/** Start the Ollama service (exported for the reconnect reconcile). */
-export async function startOllama(): Promise<void> {
+/** Start the Ollama service (exported for the reconnect reconcile).
+ *  Callers racing a node boot should pass OLLAMA_BOOT_READY_BUDGET. */
+export async function startOllama(opts?: OllamaReadyBudget): Promise<void> {
   await ensureOllamaRunning({
     isRunning: isOllamaRunning,
     startService: startOllamaService,
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-  });
+  }, opts);
 }
 
 /** Check if Ollama service is reachable. */

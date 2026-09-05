@@ -48,3 +48,30 @@ export function reconcileOllamaAction(state: OllamaReconcileState): OllamaReconc
 
   return { kind: "serving", reason: "model resident" };
 }
+
+/** Inputs to the retry decision below. */
+export interface OllamaRetryState {
+  /** Deployments whose restore failed and that no one has re-checked since. */
+  pendingRestores: number;
+  /** Is a reconcile running right now? */
+  inFlight: boolean;
+}
+
+/**
+ * Should the health tick run the reconcile again?
+ *
+ * The reconcile above only runs when the agent registers over the WebSocket.
+ * That made a restore failure permanent: on the agenthost reboot of
+ * 2026-09-04 the restore lost a race against `network-online.target`, the
+ * deployment was reported `failed`, the agent then stayed connected — so no
+ * second reconcile ever ran, even though Ollama came up 76s later and the
+ * health tick was polling it successfully the whole time.
+ *
+ * Driving a retry from the health tick makes that transient failure heal
+ * itself. The in-flight guard is load-bearing: a reconcile can wait minutes on
+ * a slow boot while the tick fires every 15s, and overlapping reconciles would
+ * each issue their own `systemctl start` and status report.
+ */
+export function shouldRetryOllamaReconcile(state: OllamaRetryState): boolean {
+  return state.pendingRestores > 0 && !state.inFlight;
+}
