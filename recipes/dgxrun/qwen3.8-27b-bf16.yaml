@@ -404,15 +404,44 @@ command: |
 #                           axis if you want them — but do NOT read the gap as a quality
 #                           difference, and do not run it AS a quantization test.
 #
-#                           DECIDED 2026-08-31: skipped — then REVERSED 2026-09-01 and it is
-#                           RUNNING. The cost estimate stands (~1.5-2 days of one Spark; the
-#                           NVFP4 500-run managed 98 instances/hour on the RTX and BF16 is
-#                           7-10x slower in aggregate at concurrency 8), and so does the
-#                           prediction that the BF16-vs-NVFP4 delta will be indistinguishable.
-#                           It is being run for the STANDALONE reference-weights number and
-#                           the agentic axis, NOT as a quantization test — read the result
-#                           that way. Script: ~/swebench/run_qwen38_bf16_swe500.sh on
-#                           agenthost, output qwen38_bf16_verified500.
+#   ★ SWE-bench Verified   378/500 resolved = 75.6%. 484 completed, 16 empty patches,
+#      500, BF16.           0 errors. Scored with harness 4.1.0, --max_workers 8, run_id
+#                           qwen38_bf16_verified500, completed 2026-09-07.
+#
+#                           NVFP4 on the RTX, same harness: 380/500 = 76.0% (488 completed,
+#                           12 empty patches). A DIFFERENCE OF 2 INSTANCES — 0.4 points.
+#
+#                           THE PREDICTION WAS MADE BEFORE THE RUN and is recorded here
+#                           because that is what makes it a prediction: "within ~6 points,
+#                           i.e. no detectable difference", on the grounds that n=500 cannot
+#                           resolve better than ~6 points when ~20% of instances flip between
+#                           IDENTICAL runs, and that teacher-forced token agreement showed the
+#                           two models make identical predictions at 100% of confident
+#                           positions. It landed at 0.4 points. At n=500 the discordant-pair
+#                           sd is ~10 instances (~2 points), so a 2-instance gap is ~0.2 sd —
+#                           not a small difference, an ABSENT one.
+#
+#                           So THREE independent instruments now agree that NVFP4 costs
+#                           nothing measurable on this model: GPQA (identical 76.77%), token
+#                           agreement (100% at confident positions), and SWE-bench (0.4
+#                           points over 500 agentic trajectories). The last is the strongest,
+#                           because an agent loop amplifies any per-token divergence over
+#                           hundreds of turns and it still did not separate them.
+#
+#                           HISTORY, because the first attempt is instructive: decided
+#                           2026-08-31 to skip, reversed 09-01, and the first run was
+#                           INVALIDATED — the endpoint was stopped ("Stop requested" in the
+#                           deployment log) at 09-01 21:14 with ~70 instances done, and the
+#                           remaining 426 failed on connection errors, scoring a meaningless
+#                           60/500. Nothing was wrong with the model, the node or the recipe.
+#                           The rerun redid exactly the 430 failed instances (the 70 real
+#                           results were kept) and took 33.5 hours with ZERO connection
+#                           errors, under an explicit fleet freeze: no server rebuild, no
+#                           agent roll, no deployment restart.
+#                           Script: ~/swebench/run_qwen38_bf16_swe500.sh on agenthost.
+#                           ⚠ Its timeout is 7200, NOT the RTX script's 1800 — see the
+#                           warning above; that difference is why this run did not
+#                           death-spiral.
 #
 #                           ⚠ IF YOU EVER DO RUN IT HERE, DO NOT COPY THE RTX FLAGS VERBATIM.
 #                           `model.model_kwargs.timeout=1800` is comfortable at the RTX's
