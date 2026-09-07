@@ -47,6 +47,19 @@ defaults:
   # meta-muse-glimmer-30b-bf16.yaml use.
   gpu_memory_utilization: 0.88
 
+  # ⚠ THIS DEPLOYMENT IS OOM-KILLABLE BY A JOB THAT USES NO GPU AT ALL.
+  # GB10 is UNIFIED memory: the host and the accelerator share one ~121.6 GiB pool, so a
+  # host-memory-heavy job on the same node competes directly with this replica. At gmu 0.88
+  # this holds ~104 GB resident. "It only downloads weights" / "it uses no GPU" is NOT
+  # protection.
+  # HAPPENED 2026-09-06: a large weights download run on spark-02 OOM-killed the vLLM
+  # replica serving there. The same job on a node running this recipe would have killed it.
+  # Two things make it worse than a plain crash: the manager currently misreports the cause
+  # of death (it blamed a benign transformers docstring warning — see issue #92), and if the
+  # replica is in a gateway pool the pool silently loses a member without erroring.
+  # BEFORE staging weights, building images, or preparing datasets: do it on a node with NO
+  # replica, or check free memory first. Do not assume a non-GPU job is harmless here.
+
   # Native trained context. Do NOT chase the 1M headline — that needs an explicit YaRN
   # --hf-overrides, and Qwen warns that because every open framework implements *static*
   # YaRN it degrades short-context quality. Agentic coding lives well inside 262K.
