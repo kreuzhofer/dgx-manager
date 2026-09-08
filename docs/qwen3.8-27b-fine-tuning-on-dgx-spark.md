@@ -118,6 +118,96 @@ directly against the 50.0% above — no need to re-measure the base.
 
 ---
 
+## How the harness parses model output — read this before comparing against another run
+
+**A 1% base score on this dataset is almost always an extraction bug, not a bad model.** The
+base model does not emit bare SQL: it wraps output in markdown fences, adds prose, and
+sometimes prefixes a label. A strict exact-match scorer sees none of its answers. This section
+documents exactly what `scripts/evaluate.py` does, so a run elsewhere can be made comparable.
+
+### The prompt
+
+A single user message, through the model's own chat template:
+
+```
+{schema}\n\n{question}
+```
+
+**There is no system prompt and no "reply with only SQL" instruction.** That is deliberate — it
+matches `lib/dataset.py: format_example()` so the prompt is what the model was trained on — but
+it means the harness *must* be lenient about output shape, because nothing told the model to be
+terse.
+
+### `normalize_sql()`, applied to BOTH sides
+
+The predicted string and the ground-truth string go through the **same** function, then are
+compared with `==`. Order of operations:
+
+1. **`None` → `""`.** A truncated reasoning response (`finish_reason="length"`,
+   `content: null`) becomes an empty prediction and scores as a miss instead of crashing.
+2. **Closed markdown block wins.** `` ```(?:sql)?\s*\n?(.*?)``` `` with `DOTALL|IGNORECASE`;
+   if it matches, only the captured body is kept.
+3. **Otherwise, last-`SELECT` fallback.** Find every `\bSELECT\b` case-insensitively, take
+   from the **last** one, then hard-cut at the first of `;`, `` ``` ``, `` \n` ``, `\n\nNote`,
+   `\n\nThis `, `\n\nExplanation`. Leading backticks stripped. This is what rescues a
+   verbose reasoning model that explains itself and then answers.
+4. **Chat-template artifacts removed** — split at and discard from the first occurrence of
+   `<end_of_turn>`, `<start_of_turn>`, `<|im_end|>`, `<|im_start|>`, `model`, `user`.
+5. **Trailing noise stripped** — `.strip().rstrip(";").rstrip("`").strip()`.
+6. **Quotes normalised: single → double.** `s.replace("'", '"')`.
+7. **Lowercased and whitespace-collapsed** — `" ".join(s.lower().split())`.
+
+### What that means in practice
+
+**Lenient about** — markdown fences (```` ```sql ```` or bare ```` ``` ````), trailing
+semicolons, ALL CASE differences, any whitespace/newline/indentation differences,
+single-vs-double quotes, prose before the SQL, prose after the SQL, and chat-template tokens.
+
+**Strict about** — everything else. This is **string equality after normalisation, not
+semantic SQL equivalence.** There is no AST parse and no execution. So all of these score as
+**wrong** even though they are correct SQL:
+
+| ground truth | prediction | scored |
+|---|---|---|
+| `SELECT a, b FROM t` | `SELECT b, a FROM t` | ✗ wrong |
+| `WHERE x = 1 AND y = 2` | `WHERE y = 2 AND x = 1` | ✗ wrong |
+| `SELECT COUNT(*) FROM t` | `SELECT COUNT(1) FROM t` | ✗ wrong |
+| `FROM table AS t` | `FROM table t` | ✗ wrong |
+| `"value"` | `` `value` `` | ✗ wrong — only **single** quotes are normalised, backticks are stripped only at the string ends |
+
+So our 50.0% is a **normalised-exact-match** number. It is directly comparable only to another
+normalised-exact-match run using the same rules. If the other side executes the SQL and
+compares result sets, expect their number to be **higher** than ours for the same model —
+different metric, not a better model.
+
+### Two footguns worth knowing
+
+**Step 4 splits on the bare words `model` and `user`.** Any SQL containing those as an
+identifier is truncated there — `SELECT model FROM cars` becomes `SELECT `. Because the *same*
+normalisation is applied to ground truth, the truncation is symmetric and usually still
+matches, so it does not cause false misses. It can, however, cause **false positives**: two
+genuinely different queries that both truncate to the same prefix compare equal. On a dataset
+with `model`/`user` columns this inflates rather than depresses the score.
+
+**`--max-tokens` is load-bearing.** We use 2048. A reasoning model that spends its budget
+thinking returns `content: null`, which step 1 scores as a miss — indistinguishable from a
+wrong answer. On Qwen3.8 reasoning did not fire on these prompts (measured `reasoning=0c`,
+119–183 completion tokens), but do not assume that on a different model or prompt shape. If
+your base scores near zero, check the null rate before concluding anything.
+
+### To reproduce comparably elsewhere
+
+```
+dataset      b-mc2/sql-create-context
+split        dataset.train_test_split(test_size=0.05, seed=42)["test"], first 100
+prompt       f"{schema}\n\n{question}"  as a single user turn, model's own chat template
+             (no system prompt, no format instruction)
+max_tokens   2048
+metric       normalize_sql(pred) == normalize_sql(gold), rules above, applied to BOTH sides
+```
+
+The split is deterministic, so an independent run scores the identical 100 examples.
+
 ## Operational notes
 
 - **`evaluate.py` imports matplotlib at module scope even in HTTP mode.** Neither the Pi nor
