@@ -36,7 +36,8 @@ complete worked example; this is its 3.8 counterpart, stopped one step short.
 | **Qwen3.8-27B base (bf16)** | `b-mc2/sql-create-context`, 100 examples | 2048 | 4 | **50.0%** (50/100) |
 | **Qwen3.8-27B + 500-step LoRA** | same | 2048 | 4 | **67.0%** (67/100) |
 | Qwen3.6-27B base (for contrast) | same | 2048 | — | 39% |
-| Qwen3.6-27B + 500-step LoRA | same | 2048 | — | 76% |
+| Qwen3.6-27B + 500-step LoRA, **single-node (eff. batch 4)** | same | 2048 | — | **73%** |
+| Qwen3.6-27B + 500-step LoRA, multi-node (eff. batch 8) | same | 2048 | — | 76% |
 
 Base measured via `@dgxrun/qwen3.8-27b-bf16` on `dgx-spark-01`.
 
@@ -47,10 +48,16 @@ Read carefully, because two different mistakes are available here:
 
 - **The lift is +17 pp (50 → 67), not +28 pp.** Quoting the 3.6 base of 39% would inflate it by
   11 points. Unpaired 95% CI **+3.5 … +30.5 pp**, z=2.48 — real, but wide at n=100.
-- **Do NOT conclude 3.6 tunes better than 3.8.** The gap between tuned models (76% vs 67%) is
-  9 pp with z=1.42, **not significant at n=100**. The runs also differ in more than the base
-  model: the 3.6 figure is its best result, from a *multi-node* 500-step run, while this is
-  single-node. Treat them as not-yet-comparable rather than as a ranking.
+- **The LIFT is much smaller than 3.6's (+17 vs +34 pp), while the ENDPOINT is statistically
+  indistinguishable (67% vs 73%).** Both facts follow from the same cause: 3.8 starts 11 points
+  higher, so there is less headroom for tuning to recover. A smaller lift here is not evidence
+  of worse tunability — it is what a stronger base looks like on a benchmark with a ceiling.
+- **Compare against 73%, not 76%.** The 3.6 guide's headline 76% is its *multi-node* run at
+  effective batch 8. Its **single-node** 500-step result — same topology, same effective batch
+  4, same recipe defaults as this run — is **73%**. That is the apples-to-apples number.
+- **Do NOT conclude 3.6 tunes better than 3.8.** Like-for-like the gap is 67% vs 73% = 6 pp,
+  z=0.93, **not significant at n=100**. Against the multi-node 76% it is 9 pp, z=1.42, also
+  not significant. Either way there is no measured difference between the tuned models.
 
 Tuned eval wall time 264.4 s for 100 examples at concurrency 4.
 
@@ -92,6 +99,20 @@ step 500  loss 0.4003
 ```
 
 Adapter 40 MB, merged model 52 GB, checkpoints at 300/400/500.
+
+**500 steps is far less training than it sounds.** Final `epoch` is **0.0268** — the run covered
+**2.7% of a single epoch**. At `batch_size 1 x grad_accum 4` on one node, 500 steps is ~2,000
+examples against a ~74.6k-row train split. `num_train_epochs: 1` is set but `max_steps: 500`
+caps it long before an epoch completes. So **+17 pp came from seeing roughly one fortieth of
+the data, once**, and the loss was still falling at the end (0.481 → 0.400 between steps 400
+and 500). If 67% is not good enough, a longer run is the obvious lever — more so than anything
+about serving configuration.
+
+The 3.6 recipe's defaults are **identical** (`batch_size 1`, `grad_accum 4`, `max_seq_length
+256`, `lr 2e-4`, `lora_r/alpha 16`, same attention-only targets), which is what makes the
+single-node 3.6 number a fair comparison and the multi-node one not: 2 ranks doubles the
+effective batch to 8, so the same 500 steps see twice the data. Per the 3.6 guide that bought
+**+3 pp** (73% → 76%) for roughly 4x the wall time.
 
 Two earlier attempts were stopped before completion — `qwen3.8-sql-smoke5` and
 `qwen3.8-sql-500step`, both 2026-09-03. `-r2` is the one that finished.
