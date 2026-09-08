@@ -85,13 +85,24 @@ defaults:
 
   # 5, inherited from the BF16 sweep (10.99 -> 11.38 tok/s going 3 -> 5; nst=7 was worse).
   #
-  # ⚠ EXPECT THE OPTIMUM TO BE LOWER HERE, and re-sweep before trusting 5. MTP drafts
-  # autoregressively, so each speculative token costs a pass over the MTP layer plus the
-  # lm_head. Quantization shrinks the TARGET far more than it shrinks the draft step: the
-  # MTP head is unquantized and lm_head is only FP8, so drafting overhead goes from roughly
-  # 29% of the target read at BF16 to roughly 43% here. Relatively more expensive drafting
-  # usually means a lower optimum. Sweep 3 vs 5 with the paired 8-prompt method before
-  # quoting anything.
+  # MEASURED 2026-09-08 on dgx-spark-01 — 3 vs 5 makes NO DETECTABLE DIFFERENCE, so 5 stays.
+  #     nst=5   24.76 tok/s   acceptance 45.1%   3.253 tokens/forward
+  #     nst=3   24.69 tok/s   acceptance 61.6%   2.847 tokens/forward
+  # Paired over 8 diverse prompts, tokens/wall, reasoning_effort=low: delta -0.066 tok/s,
+  # 95% CI -1.60..+1.47, t(7)=-0.10. Five prompts favour 3, three favour 5. Indistinguishable.
+  #
+  # THE PREDICTION THAT PROMPTED THIS SWEEP WAS WRONG, and the reason is worth keeping. It
+  # said: expect a LOWER optimum here, because MTP drafts autoregressively and quantization
+  # shrinks the TARGET far more than the draft step (the MTP head is unquantized, lm_head only
+  # FP8), pushing drafting overhead from ~29% of the target read at BF16 to ~43% here. The
+  # overhead arithmetic holds. The conclusion did not: it makes the curve FLAT between 3 and 5,
+  # not downward-sloping. nst=5 extracts 14% more tokens per forward (3.253 vs 2.847) and the
+  # two extra draft passes cost almost exactly that much. A clean cancellation, not a win.
+  #
+  # One observation too weak to act on: nst=3 showed a tighter spread (sd 9.9% vs 15.6%, range
+  # 20.6-27.2 against 19.5-29.7). If latency predictability ever matters more than mean
+  # throughput, that is worth re-measuring with more prompts — n=8 cannot support a claim
+  # about variance.
   num_speculative_tokens: 5
 
   # No platform suffix: a Spark is the DEFAULT target in this catalog (every recipe here
