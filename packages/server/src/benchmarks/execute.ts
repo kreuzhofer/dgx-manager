@@ -7,6 +7,7 @@ import { runBenchmark, runToolEval, runAccuracy } from "./orchestrator.js";
 import { type CapInvoker } from "./remote-runner.js";
 import { buildBenchyArgs } from "./args.js";
 import { buildToolEvalArgs } from "./tool-eval-args.js";
+import { decideFinalize } from "./finalize-outcome.js";
 import type { BenchmarkConfig, ToolEvalConfig, AccuracyConfig } from "./presets.js";
 
 /** Deterministic per-run IO — identical in the route and at boot reattach. */
@@ -38,7 +39,10 @@ export async function finishFailed(runId: string, message: string): Promise<void
 export async function finalizeAccuracy(runId: string, r: Awaited<ReturnType<typeof runAccuracy>>): Promise<void> {
   const current = await prisma.benchmarkRun.findUnique({ where: { id: runId } });
   if (current?.status === "canceled") return;
-  if (r.exitCode === 0 && r.summary) {
+  const outcome = decideFinalize({
+    tool: "lm-eval", exitCode: r.exitCode, hasSummary: Boolean(r.summary), parseError: r.error,
+  });
+  if (outcome.kind === "complete" && r.summary) {
     await prisma.benchmarkRun.update({
       where: { id: runId },
       data: {
@@ -51,27 +55,30 @@ export async function finalizeAccuracy(runId: string, r: Awaited<ReturnType<type
     });
     const final = await prisma.benchmarkRun.findUnique({ where: { id: runId } });
     sseBroadcast({ type: "benchmark:status", payload: final });
-  } else if (r.exitCode === 0 && r.error) {
-    // Process succeeded but results couldn't be parsed — surface the real
-    // reason (e.g. a missing primary metric) and keep the raw JSON so the
-    // detail page can show it.
+  } else if (outcome.kind === "fail" && r.exitCode === 0) {
+    // Process succeeded but there is nothing worth recording — an unparseable
+    // result, or no summary at all. Surface the real reason and keep the raw
+    // JSON so the detail page can show it.
     await prisma.benchmarkRun.update({
       where: { id: runId },
-      data: { status: "failed", completedAt: new Date(), error: r.error, rawOutput: r.rawOutput },
+      data: { status: "failed", completedAt: new Date(), error: outcome.reason, rawOutput: r.rawOutput },
     });
     sseBroadcast({
       type: "benchmark:status",
-      payload: { id: runId, status: "failed", error: r.error },
+      payload: { id: runId, status: "failed", error: outcome.reason },
     });
   } else {
-    await finishFailed(runId, `lm-eval exited with code ${r.exitCode}`);
+    await finishFailed(runId, outcome.kind === "fail" ? outcome.reason : "lm-eval produced no summary");
   }
 }
 
 export async function finalizeToolEval(runId: string, r: Awaited<ReturnType<typeof runToolEval>>): Promise<void> {
   const current = await prisma.benchmarkRun.findUnique({ where: { id: runId } });
   if (current?.status === "canceled") return;
-  if (r.exitCode === 0 && r.summary) {
+  const outcome = decideFinalize({
+    tool: "tool-eval-bench", exitCode: r.exitCode, hasSummary: Boolean(r.summary),
+  });
+  if (outcome.kind === "complete" && r.summary) {
     const s = r.summary;
     await prisma.benchmarkRun.update({
       where: { id: runId },
@@ -96,7 +103,7 @@ export async function finalizeToolEval(runId: string, r: Awaited<ReturnType<type
     });
     sseBroadcast({ type: "benchmark:status", payload: final });
   } else {
-    await finishFailed(runId, `tool-eval-bench exited with code ${r.exitCode}`);
+    await finishFailed(runId, outcome.kind === "fail" ? outcome.reason : "tool-eval-bench produced no summary");
   }
 }
 
@@ -105,7 +112,16 @@ export async function finalizeThroughput(runId: string, r: Awaited<ReturnType<ty
   // flipped to "canceled" by the cancel route, leave it alone.
   const current = await prisma.benchmarkRun.findUnique({ where: { id: runId } });
   if (current?.status === "canceled") return;
-  if (r.exitCode === 0) {
+  // `summary` is always an object here (summarizeResults of a possibly-empty
+  // array), so it cannot stand in for "produced data" — the row count is what
+  // distinguishes a real run from one whose every request failed. See #95.
+  const outcome = decideFinalize({
+    tool: "llama-benchy",
+    exitCode: r.exitCode,
+    hasSummary: Boolean(r.summary),
+    rowCount: r.results.length,
+  });
+  if (outcome.kind === "complete") {
     await prisma.benchmarkRun.update({
       where: { id: runId },
       data: {
@@ -118,7 +134,7 @@ export async function finalizeThroughput(runId: string, r: Awaited<ReturnType<ty
       },
     });
   } else {
-    await finishFailed(runId, `llama-benchy exited with code ${r.exitCode}`);
+    await finishFailed(runId, outcome.reason);
     return;
   }
   const final = await prisma.benchmarkRun.findUnique({
