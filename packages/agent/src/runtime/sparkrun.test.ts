@@ -26,14 +26,26 @@ function makeChild() {
 
 const children: ReturnType<typeof makeChild>[] = [];
 
-const { spawnMock, execFileSyncMock, spawnSyncMock } = vi.hoisted(() => {
+const { spawnMock, execFileSyncMock, spawnSyncMock, execCaptureMock } = vi.hoisted(() => {
   const spawnMock = vi.fn();
   const execFileSyncMock = vi.fn(() => "");
   const spawnSyncMock = vi.fn(() => ({ stdout: "", stderr: "" }));
-  return { spawnMock, execFileSyncMock, spawnSyncMock };
+  const execCaptureMock = vi.fn();
+  return { spawnMock, execFileSyncMock, spawnSyncMock, execCaptureMock };
 });
 
+/** Build an ExecCapture result; defaults are "exited 0, said nothing". */
+function cap(o: { status?: number | null; stdout?: string; stderr?: string; error?: Error }) {
+  // NB: `?? 0` would turn an explicit `status: null` (a timeout) into a clean
+  // exit — the exact confusion this ticket is about. Only `undefined` defaults.
+  return {
+    status: o.status === undefined ? 0 : o.status,
+    stdout: o.stdout ?? "", stderr: o.stderr ?? "", error: o.error,
+  };
+}
+
 vi.mock("node:child_process", () => ({ spawn: spawnMock, execFileSync: execFileSyncMock, spawnSync: spawnSyncMock }));
+vi.mock("./exec-capture.js", () => ({ execCapture: execCaptureMock }));
 vi.mock("./deployment-store.js", () => ({ saveDeployment: vi.fn(), removeDeployment: vi.fn() }));
 
 import { launchSparkrun, stopSparkrun, isWorkloadRunning, writeInlineRecipe, removeInlineRecipe, inspectSparkrunContainer, snapshotContainerLogs, captureCrashedContainerLogs, resolveHfHome, isHfHomeExplicit } from "./sparkrun.js";
@@ -50,6 +62,8 @@ beforeEach(() => {
   execFileSyncMock.mockReturnValue("");
   spawnSyncMock.mockReset();
   spawnSyncMock.mockReturnValue({ stdout: "", stderr: "" });
+  execCaptureMock.mockReset();
+  execCaptureMock.mockResolvedValue(cap({}));
   // Spied so stopSparkrun's process-group kill never signals real processes.
   // Asserted on via vi.mocked(process.kill) in the launcher-kill tests.
   vi.spyOn(process, "kill").mockImplementation(() => true);
@@ -155,48 +169,66 @@ describe("launchSparkrun", () => {
 // ---------------------------------------------------------------------------
 
 describe("stopSparkrun", () => {
-  it("calls sparkrun stop with target, -H hosts, and --tp", () => {
-    stopSparkrun("dep-1", "sparkrun_abc123", ["10.0.0.1", "10.0.0.2"], 2);
-    const call = execFileSyncMock.mock.calls[0] as unknown as [string, string[], ...unknown[]];
+  it("calls sparkrun stop with target, -H hosts, and --tp", async () => {
+    await stopSparkrun("dep-1", "sparkrun_abc123", ["10.0.0.1", "10.0.0.2"], 2);
+    const call = execCaptureMock.mock.calls[0] as unknown as [string, string[], ...unknown[]];
     const [cmd, argv] = call;
     expect(cmd).toBe("uvx");
     expect(argv).toEqual(expect.arrayContaining(["stop", "sparkrun_abc123", "-H", "10.0.0.1,10.0.0.2", "--tp", "2"]));
   });
 
-  it("kills the log follower when stop is called", () => {
+  // The old execFileSync threw when `sparkrun stop` failed, and the undeploy
+  // handler logs "stop error (continuing)" off that throw. The async form must
+  // keep throwing rather than reporting a clean teardown that never happened.
+  it("throws when sparkrun stop exits non-zero", async () => {
+    execCaptureMock.mockResolvedValueOnce(cap({ status: 1, stderr: "no such cluster" }));
+    await expect(stopSparkrun("dep-1", "sparkrun_abc123", ["10.0.0.1"], 1))
+      .rejects.toThrow("no such cluster");
+  });
+
+  // ...and the local record still has to go, or the health tick keeps reporting
+  // a deployment we have already disowned.
+  it("drops the local record even when sparkrun stop fails", async () => {
+    const { removeDeployment } = await import("./deployment-store.js");
+    execCaptureMock.mockResolvedValueOnce(cap({ status: null, error: new Error("uvx timed out") }));
+    await expect(stopSparkrun("dep-1", "sparkrun_abc123", ["10.0.0.1"], 1)).rejects.toThrow();
+    expect(removeDeployment).toHaveBeenCalledWith("dep-1");
+  });
+
+  it("kills the log follower when stop is called", async () => {
     launchSparkrun("dep-1", "qwen3-1.7b-vllm", { hosts: ["10.0.0.1"], port: 8000 }, () => {}, () => {});
 
     // Trigger follower spawn
     children[0].__emit("Cluster:   sparkrun_abc123\n");
     expect(children[1]).toBeDefined();
 
-    stopSparkrun("dep-1", "sparkrun_abc123", ["10.0.0.1"], 1);
+    await stopSparkrun("dep-1", "sparkrun_abc123", ["10.0.0.1"], 1);
     expect(children[1].kill).toHaveBeenCalled();
   });
 
-  it("does not throw when there is no follower to kill", () => {
+  it("does not throw when there is no follower to kill", async () => {
     // stopSparkrun called without a prior launch → no follower in map
-    expect(() => stopSparkrun("dep-never-launched", "sparkrun_xyz", ["10.0.0.1"])).not.toThrow();
+    await expect(stopSparkrun("dep-never-launched", "sparkrun_xyz", ["10.0.0.1"])).resolves.toBeUndefined();
   });
 
-  it("kills the in-flight launcher process group (negative pid) when stop is called mid-download", () => {
+  it("kills the in-flight launcher process group (negative pid) when stop is called mid-download", async () => {
     // Launch but DO NOT emit a cluster id → still in the download/launch phase,
     // no container, launcher process group is what holds the running download.
     launchSparkrun("dep-1", "qwen3-1.7b-vllm", { hosts: ["10.0.0.1"], port: 8000 }, () => {}, () => {});
-    stopSparkrun("dep-1", "qwen3-1.7b-vllm", ["10.0.0.1"], 1);
+    await stopSparkrun("dep-1", "qwen3-1.7b-vllm", ["10.0.0.1"], 1);
     // children[0] is the launcher (pid 4242) → group kill targets -4242
     expect(vi.mocked(process.kill)).toHaveBeenCalledWith(-4242, "SIGTERM");
   });
 
-  it("does not call process.kill when no launcher is tracked", () => {
-    stopSparkrun("dep-never-launched", "sparkrun_xyz", ["10.0.0.1"]);
+  it("does not call process.kill when no launcher is tracked", async () => {
+    await stopSparkrun("dep-never-launched", "sparkrun_xyz", ["10.0.0.1"]);
     expect(vi.mocked(process.kill)).not.toHaveBeenCalled();
   });
 
-  it("suppresses onExit for an intentionally-stopped launcher (no spurious 'failed')", () => {
+  it("suppresses onExit for an intentionally-stopped launcher (no spurious 'failed')", async () => {
     const onExit = vi.fn();
     launchSparkrun("dep-1", "qwen3-1.7b-vllm", { hosts: ["10.0.0.1"], port: 8000 }, () => {}, onExit);
-    stopSparkrun("dep-1", "qwen3-1.7b-vllm", ["10.0.0.1"], 1);
+    await stopSparkrun("dep-1", "qwen3-1.7b-vllm", ["10.0.0.1"], 1);
     // The kill makes the launcher exit with a signal (code null) afterwards
     children[0].__exit(null);
     expect(onExit).not.toHaveBeenCalled();
@@ -250,59 +282,64 @@ describe("isHfHomeExplicit", () => {
 // ---------------------------------------------------------------------------
 
 describe("isWorkloadRunning", () => {
-  it("true when check-job exits 0, false when it throws", () => {
-    execFileSyncMock.mockReturnValueOnce("");
-    expect(isWorkloadRunning("sparkrun_abc", ["10.0.0.1"])).toBe(true);
-    execFileSyncMock.mockImplementationOnce(() => { throw new Error("exit 1"); });
-    expect(isWorkloadRunning("sparkrun_abc", ["10.0.0.1"])).toBe(false);
+  it("true when check-job exits 0, false on a non-zero exit", async () => {
+    execCaptureMock.mockResolvedValueOnce(cap({ status: 0 }));
+    await expect(isWorkloadRunning("sparkrun_abc", ["10.0.0.1"])).resolves.toBe(true);
+    execCaptureMock.mockResolvedValueOnce(cap({ status: 1, stderr: "no such job" }));
+    await expect(isWorkloadRunning("sparkrun_abc", ["10.0.0.1"])).resolves.toBe(false);
+  });
+
+  // The old execFileSync threw on timeout and the catch returned false. The
+  // async form reports a timeout as status null; it must still read as "not
+  // running" rather than rejecting and killing the whole health tick.
+  it("false when the check times out", async () => {
+    execCaptureMock.mockResolvedValueOnce(
+      cap({ status: null, error: new Error("uvx timed out after 30000ms") }),
+    );
+    await expect(isWorkloadRunning("sparkrun_abc", ["10.0.0.1"])).resolves.toBe(false);
   });
 });
-
-// ---------------------------------------------------------------------------
-// writeInlineRecipe / removeInlineRecipe
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // inspectSparkrunContainer
 // ---------------------------------------------------------------------------
 
 describe("inspectSparkrunContainer", () => {
-  it("returns null when clusterId is undefined", () => {
-    expect(inspectSparkrunContainer(undefined)).toBeNull();
+  it("returns null when clusterId is undefined", async () => {
+    await expect(inspectSparkrunContainer(undefined)).resolves.toBeNull();
+    expect(execCaptureMock).not.toHaveBeenCalled();
   });
 
-  it("returns null when docker ps finds no container", () => {
-    // docker ps returns empty → containerNameFor returns null
-    spawnSyncMock.mockReturnValue({ stdout: "", stderr: "" });
-    expect(inspectSparkrunContainer("sparkrun_abc123")).toBeNull();
+  it("returns null when docker ps finds no container", async () => {
+    execCaptureMock.mockResolvedValue(cap({}));
+    await expect(inspectSparkrunContainer("sparkrun_abc123")).resolves.toBeNull();
   });
 
-  it("parses state and restartCount from docker inspect output", () => {
-    // First call: docker ps to find name; second call: docker inspect
-    spawnSyncMock
-      .mockReturnValueOnce({ stdout: "sparkrun_abc123_solo\n", stderr: "" })   // ps
-      .mockReturnValueOnce({ stdout: "exited 5\n", stderr: "" });              // inspect
-    const result = inspectSparkrunContainer("sparkrun_abc123");
+  it("parses state and restartCount from docker inspect output", async () => {
+    execCaptureMock
+      .mockResolvedValueOnce(cap({ stdout: "sparkrun_abc123_solo\n" }))  // ps
+      .mockResolvedValueOnce(cap({ stdout: "exited 5\n" }));             // inspect
+    const result = await inspectSparkrunContainer("sparkrun_abc123");
     expect(result).not.toBeNull();
     expect(result!.name).toBe("sparkrun_abc123_solo");
     expect(result!.state).toBe("exited");
     expect(result!.restartCount).toBe(5);
   });
 
-  it("parses restarting state with restartCount 3", () => {
-    spawnSyncMock
-      .mockReturnValueOnce({ stdout: "sparkrun_abc456_solo\n", stderr: "" })
-      .mockReturnValueOnce({ stdout: "restarting 3\n", stderr: "" });
-    const result = inspectSparkrunContainer("sparkrun_abc456");
+  it("parses restarting state with restartCount 3", async () => {
+    execCaptureMock
+      .mockResolvedValueOnce(cap({ stdout: "sparkrun_abc456_solo\n" }))
+      .mockResolvedValueOnce(cap({ stdout: "restarting 3\n" }));
+    const result = await inspectSparkrunContainer("sparkrun_abc456");
     expect(result!.state).toBe("restarting");
     expect(result!.restartCount).toBe(3);
   });
 
-  it("returns null when docker inspect returns empty output", () => {
-    spawnSyncMock
-      .mockReturnValueOnce({ stdout: "sparkrun_abc789_solo\n", stderr: "" })
-      .mockReturnValueOnce({ stdout: "", stderr: "" });
-    expect(inspectSparkrunContainer("sparkrun_abc789")).toBeNull();
+  it("returns null when docker inspect returns empty output", async () => {
+    execCaptureMock
+      .mockResolvedValueOnce(cap({ stdout: "sparkrun_abc789_solo\n" }))
+      .mockResolvedValueOnce(cap({}));
+    await expect(inspectSparkrunContainer("sparkrun_abc789")).resolves.toBeNull();
   });
 });
 
@@ -311,39 +348,38 @@ describe("inspectSparkrunContainer", () => {
 // ---------------------------------------------------------------------------
 
 describe("snapshotContainerLogs", () => {
-  it("returns empty string when clusterId is undefined", () => {
-    expect(snapshotContainerLogs(undefined)).toBe("");
+  it("returns empty string when clusterId is undefined", async () => {
+    await expect(snapshotContainerLogs(undefined)).resolves.toBe("");
   });
 
-  it("returns empty string when no container found", () => {
-    spawnSyncMock.mockReturnValue({ stdout: "", stderr: "" });
-    expect(snapshotContainerLogs("sparkrun_abc123")).toBe("");
+  it("returns empty string when no container found", async () => {
+    execCaptureMock.mockResolvedValue(cap({}));
+    await expect(snapshotContainerLogs("sparkrun_abc123")).resolves.toBe("");
   });
 
-  it("captures full stdout+stderr, stderr (errors) first so the root crash leads", () => {
-    spawnSyncMock
-      .mockReturnValueOnce({ stdout: "sparkrun_abc123_solo\n", stderr: "" })   // ps
-      .mockReturnValueOnce({                                                    // logs (no --tail)
+  it("captures full stdout+stderr, stderr (errors) first so the root crash leads", async () => {
+    execCaptureMock
+      .mockResolvedValueOnce(cap({ stdout: "sparkrun_abc123_solo\n" }))   // ps
+      .mockResolvedValueOnce(cap({                                          // logs (no --tail)
         stdout: "Starting vllm...\n",
         stderr: "vllm serve: error: argument --compilation-config: Invalid JSON\n",
-      });
-    const result = snapshotContainerLogs("sparkrun_abc123");
+      }));
+    const result = await snapshotContainerLogs("sparkrun_abc123");
     expect(result).toContain("Starting vllm...");
     expect(result).toContain("vllm serve: error: argument --compilation-config: Invalid JSON");
     // stderr (the error) must come before stdout so firstErrorLine finds the root
     expect(result.indexOf("Invalid JSON")).toBeLessThan(result.indexOf("Starting vllm"));
     // full capture: docker logs called WITHOUT --tail
-    const logsCall = spawnSyncMock.mock.calls.find((c: any) => c[1]?.includes("logs")) as any[] | undefined;
+    const logsCall = execCaptureMock.mock.calls.find((c: any) => c[1]?.includes("logs")) as any[] | undefined;
     expect(logsCall).toBeTruthy();
     expect(logsCall?.[1]).not.toContain("--tail");
   });
 
-  it("trims the combined output", () => {
-    spawnSyncMock
-      .mockReturnValueOnce({ stdout: "sparkrun_abc123_solo\n", stderr: "" })
-      .mockReturnValueOnce({ stdout: "  log line  \n  ", stderr: "\n  " });
-    const result = snapshotContainerLogs("sparkrun_abc123");
-    expect(result).toBe("log line");
+  it("trims the combined output", async () => {
+    execCaptureMock
+      .mockResolvedValueOnce(cap({ stdout: "sparkrun_abc123_solo\n" }))
+      .mockResolvedValueOnce(cap({ stdout: "  log line  \n  ", stderr: "\n  " }));
+    await expect(snapshotContainerLogs("sparkrun_abc123")).resolves.toBe("log line");
   });
 });
 
@@ -352,30 +388,30 @@ describe("snapshotContainerLogs", () => {
 // ---------------------------------------------------------------------------
 
 describe("captureCrashedContainerLogs", () => {
-  it("returns empty string when clusterId is undefined", () => {
-    expect(captureCrashedContainerLogs(undefined)).toBe("");
-    // spawnSync must not have been called at all
-    expect(spawnSyncMock).not.toHaveBeenCalled();
+  it("returns empty string when clusterId is undefined", async () => {
+    await expect(captureCrashedContainerLogs(undefined)).resolves.toBe("");
+    // nothing may be shelled out to at all
+    expect(execCaptureMock).not.toHaveBeenCalled();
   });
 
-  it("returns empty string when no container is found for the clusterId", () => {
+  it("returns empty string when no container is found for the clusterId", async () => {
     // docker ps returns nothing → containerNameFor returns null → early return
-    spawnSyncMock.mockReturnValue({ stdout: "", stderr: "" });
-    expect(captureCrashedContainerLogs("sparkrun_abc123")).toBe("");
+    execCaptureMock.mockResolvedValue(cap({}));
+    await expect(captureCrashedContainerLogs("sparkrun_abc123")).resolves.toBe("");
   });
 
-  it("calls docker stop before reading logs (stops the restart loop first)", () => {
-    // Three spawnSync calls in order: ps (find name), stop, ps again (inside snapshotContainerLogs), logs
-    spawnSyncMock
-      .mockReturnValueOnce({ stdout: "sparkrun_abc123_solo\n", stderr: "" })  // ps for containerNameFor (stop phase)
-      .mockReturnValueOnce({ stdout: "", stderr: "" })                         // docker stop
-      .mockReturnValueOnce({ stdout: "sparkrun_abc123_solo\n", stderr: "" })  // ps for containerNameFor (logs phase)
-      .mockReturnValueOnce({ stdout: "startup output\n", stderr: "root crash error\n" }); // docker logs
+  it("calls docker stop before reading logs (stops the restart loop first)", async () => {
+    // Four calls in order: ps (find name), stop, ps again (inside snapshotContainerLogs), logs
+    execCaptureMock
+      .mockResolvedValueOnce(cap({ stdout: "sparkrun_abc123_solo\n" }))  // ps for containerNameFor (stop phase)
+      .mockResolvedValueOnce(cap({}))                                      // docker stop
+      .mockResolvedValueOnce(cap({ stdout: "sparkrun_abc123_solo\n" }))  // ps for containerNameFor (logs phase)
+      .mockResolvedValueOnce(cap({ stdout: "startup output\n", stderr: "root crash error\n" })); // docker logs
 
-    const result = captureCrashedContainerLogs("sparkrun_abc123");
+    const result = await captureCrashedContainerLogs("sparkrun_abc123");
 
     // Verify docker stop was called with the right arguments
-    const stopCall = spawnSyncMock.mock.calls.find(
+    const stopCall = execCaptureMock.mock.calls.find(
       (c: any) => Array.isArray(c[1]) && c[1].includes("stop"),
     ) as any[] | undefined;
     expect(stopCall).toBeDefined();
@@ -387,16 +423,16 @@ describe("captureCrashedContainerLogs", () => {
     expect(result).toContain("root crash error");
   });
 
-  it("docker stop is called BEFORE docker logs (stop precedes log read)", () => {
-    spawnSyncMock
-      .mockReturnValueOnce({ stdout: "sparkrun_abc123_solo\n", stderr: "" })  // ps (stop phase)
-      .mockReturnValueOnce({ stdout: "", stderr: "" })                         // stop
-      .mockReturnValueOnce({ stdout: "sparkrun_abc123_solo\n", stderr: "" })  // ps (logs phase)
-      .mockReturnValueOnce({ stdout: "output\n", stderr: "err\n" });           // logs
+  it("docker stop is called BEFORE docker logs (stop precedes log read)", async () => {
+    execCaptureMock
+      .mockResolvedValueOnce(cap({ stdout: "sparkrun_abc123_solo\n" }))  // ps (stop phase)
+      .mockResolvedValueOnce(cap({}))                                      // stop
+      .mockResolvedValueOnce(cap({ stdout: "sparkrun_abc123_solo\n" }))  // ps (logs phase)
+      .mockResolvedValueOnce(cap({ stdout: "output\n", stderr: "err\n" })); // logs
 
-    captureCrashedContainerLogs("sparkrun_abc123");
+    await captureCrashedContainerLogs("sparkrun_abc123");
 
-    const calls = spawnSyncMock.mock.calls as any[][];
+    const calls = execCaptureMock.mock.calls as any[][];
     const stopIdx = calls.findIndex((c) => c[1]?.includes("stop"));
     const logsIdx = calls.findIndex((c) => c[1]?.includes("logs"));
     expect(stopIdx).toBeGreaterThanOrEqual(0);

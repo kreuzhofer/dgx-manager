@@ -1,4 +1,4 @@
-import { spawn, execFileSync, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -7,6 +7,7 @@ import { SHARED_STORAGE } from "../env.js";
 import { buildSparkrunArgs, type SparkrunLaunchOptions } from "./sparkrun-args.js";
 import { parseClusterId } from "./sparkrun-parse.js";
 import { saveDeployment, removeDeployment } from "./deployment-store.js";
+import { execCapture } from "./exec-capture.js";
 
 export type Opts = Omit<SparkrunLaunchOptions, "recipeRef"> & { recipeName?: string };
 
@@ -100,7 +101,7 @@ export function launchSparkrun(
   persist();
 }
 
-export function stopSparkrun(deploymentId: string, target: string, hosts: string[], tp?: number): void {
+export async function stopSparkrun(deploymentId: string, target: string, hosts: string[], tp?: number): Promise<void> {
   // Kill the in-flight launcher process group FIRST. During the image-pull /
   // model-download phase there is no container yet, so `sparkrun stop` has
   // nothing to act on — the launcher (and its hf-download children) would keep
@@ -112,28 +113,38 @@ export function stopSparkrun(deploymentId: string, target: string, hosts: string
   if (f) { try { f.kill(); } catch { /* already gone */ } logFollowers.delete(deploymentId); }
   const args = ["--from", SPARKRUN_PKG, "sparkrun", "stop", target, "-H", hosts.join(",")];
   if (tp != null) args.push("--tp", String(tp));
-  try { execFileSync("uvx", args, { timeout: 120_000 }); }
+  // Was a 120s BLOCKING execFileSync — two full minutes of frozen event loop on
+  // every teardown, which is long enough for the manager to mark the node
+  // offline mid-stop (#36). Still throws on failure, as execFileSync did, so the
+  // caller's "stop error (continuing)" warning keeps firing; `finally` still
+  // drops the local record either way.
+  try {
+    const r = await execCapture("uvx", args, { timeout: 120_000 });
+    if (r.status !== 0) {
+      throw new Error(r.error?.message ?? (r.stderr.trim() || `sparkrun stop exited ${r.status}`));
+    }
+  }
   finally { removeDeployment(deploymentId); }
 }
 
 /** Find the container name for a sparkrun cluster id (e.g. sparkrun_<hex>_solo). */
-function containerNameFor(clusterId: string): string | null {
-  const r = spawnSync("docker", ["ps", "-a", "--filter", `name=${clusterId}`, "--format", "{{.Names}}"],
-    { encoding: "utf8", timeout: 10_000 });
-  const name = (r.stdout || "").trim().split("\n")[0];
+async function containerNameFor(clusterId: string): Promise<string | null> {
+  const r = await execCapture("docker", ["ps", "-a", "--filter", `name=${clusterId}`, "--format", "{{.Names}}"],
+    { timeout: 10_000 });
+  const name = r.stdout.trim().split("\n")[0];
   return name || null;
 }
 
 export interface SparkrunContainerState { name: string; state: string; restartCount: number; }
 
 /** Read-only: docker state + restart count for a sparkrun workload. null if not found. */
-export function inspectSparkrunContainer(clusterId?: string): SparkrunContainerState | null {
+export async function inspectSparkrunContainer(clusterId?: string): Promise<SparkrunContainerState | null> {
   if (!clusterId) return null;
-  const name = containerNameFor(clusterId);
+  const name = await containerNameFor(clusterId);
   if (!name) return null;
-  const r = spawnSync("docker", ["inspect", name, "--format", "{{.State.Status}} {{.RestartCount}}"],
-    { encoding: "utf8", timeout: 10_000 });
-  const out = (r.stdout || "").trim();
+  const r = await execCapture("docker", ["inspect", name, "--format", "{{.State.Status}} {{.RestartCount}}"],
+    { timeout: 10_000 });
+  const out = r.stdout.trim();
   if (!out) return null;
   const [state, rc] = out.split(/\s+/);
   return { name, state, restartCount: Number(rc) || 0 };
@@ -143,18 +154,18 @@ export function inspectSparkrunContainer(clusterId?: string): SparkrunContainerS
  *  `docker stop` cancels the unless-stopped revival and exits the container, so the subsequent
  *  `docker logs` returns the full history (run #0 first) — not "Container is restarting" or just
  *  the latest restart's mangled output. */
-export function captureCrashedContainerLogs(clusterId?: string): string {
+export async function captureCrashedContainerLogs(clusterId?: string): Promise<string> {
   if (!clusterId) return "";
-  const name = containerNameFor(clusterId);
+  const name = await containerNameFor(clusterId);
   if (!name) return "";
-  spawnSync("docker", ["stop", "-t", "3", name], { timeout: 15_000 });
+  await execCapture("docker", ["stop", "-t", "3", name], { timeout: 15_000 });
   return snapshotContainerLogs(clusterId);
 }
 
 /** Read-only: snapshot a sparkrun container's FULL stdout+stderr (all restarts). */
-export function snapshotContainerLogs(clusterId?: string): string {
+export async function snapshotContainerLogs(clusterId?: string): Promise<string> {
   if (!clusterId) return "";
-  const name = containerNameFor(clusterId);
+  const name = await containerNameFor(clusterId);
   if (!name) return "";
   // Capture the FULL container log, not just the tail. The ROOT crash is at the
   // START of the log; docker's unless-stopped restarts append a re-mangled
@@ -162,8 +173,8 @@ export function snapshotContainerLogs(clusterId?: string): string {
   // differently on restart). stderr (where vLLM errors go) is placed FIRST and
   // kept from its head, so `firstErrorLine` surfaces the root cause — not the
   // latest restart's masked error. Goal: an API consumer sees ALL of it.
-  const r = spawnSync("docker", ["logs", name],
-    { encoding: "utf8", timeout: 20_000, maxBuffer: 32 * 1024 * 1024 });
+  const r = await execCapture("docker", ["logs", name],
+    { timeout: 20_000, maxBuffer: 32 * 1024 * 1024 });
   const headCap = (s: string | null | undefined, n: number) => {
     const t = (s || "").trim();
     return t.length > n ? t.slice(0, n) + "\n…[truncated]" : t;
@@ -173,12 +184,11 @@ export function snapshotContainerLogs(clusterId?: string): string {
   return [stderr, stdout].filter(Boolean).join("\n").trim();
 }
 
-export function isWorkloadRunning(target: string, hosts: string[]): boolean {
-  try {
-    execFileSync("uvx", ["--from", SPARKRUN_PKG, "sparkrun", "cluster", "check-job", target, "-H", hosts.join(",")],
-      { timeout: 30_000, stdio: "ignore" });
-    return true;
-  } catch { return false; }
+export async function isWorkloadRunning(target: string, hosts: string[]): Promise<boolean> {
+  const r = await execCapture("uvx",
+    ["--from", SPARKRUN_PKG, "sparkrun", "cluster", "check-job", target, "-H", hosts.join(",")],
+    { timeout: 30_000 });
+  return r.status === 0;
 }
 
 /**

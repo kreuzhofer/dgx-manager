@@ -1,4 +1,5 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { execCapture } from "../exec-capture.js";
 
 /**
  * Best-effort: `sync` + drop the Linux page cache on this node.
@@ -13,26 +14,33 @@ import { spawn, spawnSync } from "node:child_process";
  * `sudo -n`. Never throws — a node that can't drop caches simply doesn't, and
  * the deploy proceeds (it just loses the headroom benefit). Returns true if a
  * drop actually ran, so the caller can warn once if it never does.
+ *
+ * AWAITED, not fire-and-forget: the point is to free the cache BEFORE the
+ * container starts streaming weights, so the caller must be able to wait for
+ * completion. It used to be `spawnSync`, which bought that ordering by parking
+ * the event loop for the 1-7 s a `sync` takes under NFS pressure (#36).
  */
-export function dropCachesOnce(): boolean {
+export async function dropCachesOnce(): Promise<boolean> {
   const cmd = "sync; echo 3 > /proc/sys/vm/drop_caches";
-  const opts = { stdio: "ignore" as const, timeout: 10_000 };
+  const opts = { timeout: 10_000 };
   // Direct write works when the agent runs as root.
-  if (spawnSync("sh", ["-c", cmd], opts).status === 0) return true;
+  if ((await execCapture("sh", ["-c", cmd], opts)).status === 0) return true;
   // Fall back to passwordless sudo (the node's SSH user typically has NOPASSWD).
-  return spawnSync("sudo", ["-n", "sh", "-c", cmd], opts).status === 0;
+  return (await execCapture("sudo", ["-n", "sh", "-c", cmd], opts)).status === 0;
 }
 
 /**
- * Non-blocking drop. `dropCachesOnce` uses spawnSync, which parks the agent's
- * event loop for as long as `sync` takes — and under a ~400 GB NFS weight stream
- * that is SECONDS (observed 1-7 s per call at a 500 ms cadence). A blocked loop
+ * Fire-and-forget drop, for the repeating loop: it does not wait for the `sync`
+ * to finish, so a slow drop cannot pile up behind the next tick.
+ *
+ * Under a ~400 GB NFS weight stream a single `sync` takes SECONDS (observed
+ * 1-7 s per call at a 500 ms cadence). Waiting on that — worse, blocking on it —
  * stops the WS heartbeat (server marks the node offline) and starves the
  * `docker inspect` liveness probe, which used to be misread as "container
- * missing" and tore down every rank of a healthy deploy. Never call spawnSync on
- * the agent's hot path — same failure class as the old blocking `cmd:update`.
+ * missing" and tore down every rank of a healthy deploy. Never block the
+ * agent's event loop — same failure class as the old blocking `cmd:update`.
  *
- * Fire-and-forget: errors are ignored exactly like the sync variant.
+ * Errors are ignored, exactly as in `dropCachesOnce`.
  */
 export function dropCachesAsyncOnce(): void {
   // One shell that tries the direct (root) write, then passwordless sudo.

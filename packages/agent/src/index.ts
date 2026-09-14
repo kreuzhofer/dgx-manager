@@ -228,7 +228,9 @@ function connect() {
       return;
     }
 
-    postRegistrationSetup();
+    void postRegistrationSetup().catch((err) =>
+      console.error("[post-registration] setup failed:", err),
+    );
   });
 
   /**
@@ -322,8 +324,15 @@ function connect() {
     }
   }
 
-  /** Setup tasks that run after successful registration (either nodeId or token flow). */
-  function postRegistrationSetup() {
+  /**
+   * Setup tasks that run after successful registration (either nodeId or token flow).
+   *
+   * Async and fire-and-forget: reconciliation shells out to `sparkrun check-job`
+   * and `docker inspect`, and an agent roll is exactly when the docker daemon is
+   * busiest. Doing that synchronously parked the event loop right when the
+   * manager was waiting on our heartbeat (#36). Neither call site awaits it.
+   */
+  async function postRegistrationSetup() {
     // Reconcile sparkrun deployments from the persistent store.
     // On a WS-only reconnect the sparkrun workload may still be running as a
     // separate cluster job — we use check-job liveness (isWorkloadRunning) to
@@ -334,7 +343,7 @@ function connect() {
       for (const d of sparkrunDeployments) {
         const target = d.clusterId ?? d.recipeFile;
         const hosts = d.clusterNodes ?? [];
-        const listed = isWorkloadRunning(target, hosts);
+        const listed = await isWorkloadRunning(target, hosts);
         const status = reconcileDeployStatus({ launcherAlive: false, listed });
         console.log(`[reconcile-sparkrun] ${d.deploymentId}: target=${target} listed=${listed} → ${status}`);
         sendMsg("agent:deployment:status", {
@@ -367,7 +376,7 @@ function connect() {
         // collapses an inconclusive `docker inspect` into "not running", and one
         // `failed` rank tears down the whole cluster. An agent roll is exactly
         // when the daemon is busiest. See runtime/dgxrun/dgxrun-reconcile.ts.
-        const action = reconcileDgxrunAction(inspectDgxrunContainerResult(d.deploymentId), {
+        const action = reconcileDgxrunAction(await inspectDgxrunContainerResult(d.deploymentId), {
           rank, port: d.port,
         });
         console.log(`[reconcile-dgxrun] ${d.deploymentId}: rank=${rank} → ${action.kind}`);
@@ -497,7 +506,7 @@ function connect() {
             // then untrack so the next health tick doesn't re-report this deployment.
             const d = loadDeployments().find((x) => x.deploymentId === status.deploymentId);
             if (d) {
-              try { stopSparkrun(d.deploymentId, d.clusterId ?? d.recipeFile, d.clusterNodes ?? [], d.tp); } catch { /* best effort */ }
+              try { await stopSparkrun(d.deploymentId, d.clusterId ?? d.recipeFile, d.clusterNodes ?? [], d.tp); } catch { /* best effort */ }
             } else {
               untrackDeployment(status.deploymentId);
             }
@@ -554,7 +563,7 @@ function connect() {
                 error: status.error ?? `dgxrun rank ${status.rank ?? 0} died`,
               });
               // Stop the local container (cancel restart loop) + untrack.
-              try { stopDgxrun(status.deploymentId); } catch { /* best effort */ }
+              try { await stopDgxrun(status.deploymentId); } catch { /* best effort */ }
               deployLastStatus.delete(status.deploymentId);
             } else if (status.containerRunning && isHead) {
               const deployStatus = sparkrunRunningStatus(status);
@@ -646,7 +655,9 @@ function connect() {
         } catch (err) {
           console.error(`Failed to persist node ID: ${err}`);
         }
-        postRegistrationSetup();
+        void postRegistrationSetup().catch((err) =>
+          console.error("[post-registration] setup failed:", err),
+        );
         return;
       }
 
@@ -868,7 +879,7 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
         // dgxrun); fall back to the recipe's default port.
         const deployPort = Number(params?.port ?? recipe.defaults?.port ?? 8000);
         try {
-          launchDgxrun(
+          await launchDgxrun(
             deploymentId,
             { recipe, rank, nnodes, masterAddr, masterPort, port: deployPort, params },
             (line) => {
@@ -883,7 +894,7 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
                 reportPhase(deploymentId, phase, phase === "running" ? { port: deployPort } : {});
               }
             },
-            (code) => {
+            async (code) => {
               // `docker run -d` has exited, so the container provably exists (or
               // provably failed). This is the only safe point to observe a stop
               // that raced the launch: cmd:undeploy's own `docker rm -f` may have
@@ -904,7 +915,7 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
                 deploymentId,
                 log: `\n=== Stop raced the launch — tearing down rank ${rank} ===\n`,
               });
-              try { stopDgxrun(deploymentId); }
+              try { await stopDgxrun(deploymentId); }
               catch (e) { console.warn(`[deploy] cancel teardown error (continuing): ${e}`); }
               deployCancels.forget(deploymentId);
               sendMsg("agent:deployment:status", {
@@ -1095,7 +1106,7 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
             });
             // Mark stopping so a racing health tick doesn't classify this as a crash.
             saveDeployment({ ...stored, stopping: true });
-            try { stopDgxrun(deploymentId); }
+            try { await stopDgxrun(deploymentId); }
             catch (stopErr) { console.warn(`[undeploy] dgxrun stop error (continuing): ${stopErr}`); }
             sendMsg("agent:deployment:status", {
               deploymentId, status: "stopped", deleteAfter: deleteAfter || false,
@@ -1114,7 +1125,7 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
             const target = stored.clusterId ?? stored.recipeFile;
             const hosts = stored.clusterNodes ?? [];
             try {
-              stopSparkrun(deploymentId, target, hosts, stored.tp);
+              await stopSparkrun(deploymentId, target, hosts, stored.tp);
             } catch (stopErr) {
               console.warn(`[undeploy] sparkrun stop error (continuing): ${stopErr}`);
             }
@@ -1133,7 +1144,7 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
           // reporting stopped without removing it is why a second DELETE never
           // cleaned one up. `docker rm -f dgxrun_<id>` is idempotent and a no-op
           // for every other runtime.
-          try { stopDgxrun(deploymentId); }
+          try { await stopDgxrun(deploymentId); }
           catch (e) { console.warn(`[undeploy] orphan sweep error (continuing): ${e}`); }
           sendMsg("agent:deployment:status", {
             deploymentId,

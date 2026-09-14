@@ -129,7 +129,7 @@ export async function checkSparkrunDeployments(): Promise<VllmStatus[]> {
 
     const target = d.clusterId ?? d.recipeFile;
     const hosts = d.clusterNodes ?? [];
-    const running = isWorkloadRunning(target, hosts);
+    const running = await isWorkloadRunning(target, hosts);
 
     // An intentional stop (cmd:undeploy marked stopping===true in the store)
     // that hasn't fully vanished yet must NOT be reported as a crash — exclude
@@ -140,10 +140,10 @@ export async function checkSparkrunDeployments(): Promise<VllmStatus[]> {
     // A healthy loading container has state="running" + restartCount=0, so it is
     // NOT flagged here.  Only act when the container has restarted too many times
     // or is in a non-running/non-created terminal state.
-    const c = inspectSparkrunContainer(d.clusterId);
+    const c = await inspectSparkrunContainer(d.clusterId);
     const failing = c != null && (c.restartCount >= CRASH_LOOP_THRESHOLD || (c.state !== "running" && c.state !== "created"));
     if (failing && !d.stopping) {
-      const snap = captureCrashedContainerLogs(d.clusterId);
+      const snap = await captureCrashedContainerLogs(d.clusterId);
       results.push({
         deploymentId: d.deploymentId,
         recipeName: d.recipeName,

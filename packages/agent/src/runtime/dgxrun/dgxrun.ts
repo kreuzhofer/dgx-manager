@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dropCachesOnce, startDropCacheLoop, stopDropCacheLoop } from "./dgxrun-dropcache.js";
 import type { ChildProcess } from "node:child_process";
@@ -9,6 +9,7 @@ import {
   type DgxrunRecipe,
 } from "./dgxrun-args.js";
 import { resolveHfHome } from "../sparkrun.js";
+import { execCapture } from "../exec-capture.js";
 import { saveDeployment, removeDeployment } from "../deployment-store.js";
 
 /**
@@ -42,10 +43,8 @@ export interface DgxrunLaunchArgs {
 }
 
 /** True when the container image is present locally (fast-fail on a miss). */
-export function dgxrunImageExists(image: string): boolean {
-  const r = spawnSync("docker", ["image", "inspect", image], {
-    stdio: "ignore", timeout: 15_000,
-  });
+export async function dgxrunImageExists(image: string): Promise<boolean> {
+  const r = await execCapture("docker", ["image", "inspect", image], { timeout: 15_000 });
   return r.status === 0;
 }
 
@@ -60,12 +59,12 @@ export function dgxrunImageExists(image: string): boolean {
  * means "started" (not "serving"); the health loop promotes it to running once
  * the head's /metrics binds. A non-zero exit is a real launch failure.
  */
-export function launchDgxrun(
+export async function launchDgxrun(
   deploymentId: string,
   args: DgxrunLaunchArgs,
   onLog: (line: string) => void,
   onExit: (code: number | null) => void,
-): void {
+): Promise<void> {
   const name = dgxrunContainerName(deploymentId);
   const image = args.recipe.container;
   const port = args.port ?? Number(args.recipe.defaults?.port) ?? 8000;
@@ -97,7 +96,7 @@ export function launchDgxrun(
   }
 
   // Fail fast if the custom image isn't on this node — v1 assumes it's present.
-  if (!dgxrunImageExists(image)) {
+  if (!(await dgxrunImageExists(image))) {
     onLog(`[dgxrun] image "${image}" not found locally. v1 does not distribute images; ` +
       `build/load it on this node first (docker load / registry pull).\n`);
     onExit(1);
@@ -126,7 +125,10 @@ export function launchDgxrun(
   }
 
   // Clear any stale container from a prior deploy (idempotent).
-  spawnSync("docker", ["rm", "-f", name], { stdio: "ignore", timeout: 30_000 });
+  // ORDER-CRITICAL: this must fully COMPLETE before `docker run -d` below. A
+  // `docker rm -f` that overlaps the create removes nothing and orphans the new
+  // container — that is the 2026-07-09 incident. The await is the ordering.
+  await execCapture("docker", ["rm", "-f", name], { timeout: 30_000 });
 
   persist();
   onLog(`[dgxrun] rank ${args.rank}/${args.nnodes} launching (master ${args.masterAddr}:${args.masterPort})\n`);
@@ -134,7 +136,7 @@ export function launchDgxrun(
 
   // Free the page cache before the container streams its weights off NFS (GB10's
   // unified pool shares page cache with CUDA-graph capture headroom).
-  dropCachesOnce();
+  await dropCachesOnce();
   const child = spawn("docker", dockerArgs);
   let stderr = "";
   child.stdout?.on("data", (b: Buffer) => onLog(b.toString()));
@@ -165,12 +167,14 @@ function startLogFollower(deploymentId: string, name: string, onLog: (line: stri
 }
 
 /** Tear down THIS node's rank container + kill its log follower. */
-export function stopDgxrun(deploymentId: string): void {
+export async function stopDgxrun(deploymentId: string): Promise<void> {
   stopDropCacheLoop(deploymentId);
   const f = logFollowers.get(deploymentId);
   if (f) { try { f.kill(); } catch { /* gone */ } logFollowers.delete(deploymentId); }
   const name = dgxrunContainerName(deploymentId);
-  try { spawnSync("docker", ["rm", "-f", name], { stdio: "ignore", timeout: 60_000 }); }
+  // `finally`, not `catch`: the local record must go even if docker is wedged,
+  // or the next health tick keeps reporting a deployment we have disowned.
+  try { await execCapture("docker", ["rm", "-f", name], { timeout: 60_000 }); }
   finally { removeDeployment(deploymentId); }
 }
 
@@ -193,8 +197,8 @@ export type DgxrunInspect =
 /**
  * Pure: classify a `docker inspect` invocation. Docker exits non-zero with
  * `Error: No such object: <name>` (or "No such container") when the container
- * genuinely does not exist. Every OTHER non-zero exit — a spawnSync timeout
- * (status null + error), a daemon error — is `unknown`, never `absent`.
+ * genuinely does not exist. Every OTHER non-zero exit — a timeout (status null
+ * + error), a daemon error — is `unknown`, never `absent`.
  */
 export function classifyDockerInspect(
   status: number | null,
@@ -218,16 +222,16 @@ export function classifyDockerInspect(
 }
 
 /** Read-only docker state for a rank container, distinguishing absent from unknown. */
-export function inspectDgxrunContainerResult(deploymentId: string): DgxrunInspect {
+export async function inspectDgxrunContainerResult(deploymentId: string): Promise<DgxrunInspect> {
   const name = dgxrunContainerName(deploymentId);
-  const r = spawnSync("docker", ["inspect", name, "--format", "{{.State.Status}} {{.RestartCount}}"],
-    { encoding: "utf8", timeout: 10_000 });
-  return classifyDockerInspect(r.status, r.stdout ?? "", r.stderr ?? "", name, r.error as Error | undefined);
+  const r = await execCapture("docker", ["inspect", name, "--format", "{{.State.Status}} {{.RestartCount}}"],
+    { timeout: 10_000 });
+  return classifyDockerInspect(r.status, r.stdout, r.stderr, name, r.error);
 }
 
 /** Read-only docker state + restart count for a deployment's rank container. */
-export function inspectDgxrunContainer(deploymentId: string): DgxrunContainerState | null {
-  const res = inspectDgxrunContainerResult(deploymentId);
+export async function inspectDgxrunContainer(deploymentId: string): Promise<DgxrunContainerState | null> {
+  const res = await inspectDgxrunContainerResult(deploymentId);
   return res.kind === "found"
     ? { name: res.name, state: res.state, restartCount: res.restartCount }
     : null;
@@ -239,10 +243,10 @@ export function inspectDgxrunContainer(deploymentId: string): DgxrunContainerSta
 // four-rank cluster. Use inspectDgxrunContainerResult() and handle `unknown`.
 
 /** Read-only snapshot of the FULL container log (all restarts). */
-export function snapshotDgxrunLogs(deploymentId: string): string {
+export async function snapshotDgxrunLogs(deploymentId: string): Promise<string> {
   const name = dgxrunContainerName(deploymentId);
-  const r = spawnSync("docker", ["logs", name],
-    { encoding: "utf8", timeout: 20_000, maxBuffer: 32 * 1024 * 1024 });
+  const r = await execCapture("docker", ["logs", name],
+    { timeout: 20_000, maxBuffer: 32 * 1024 * 1024 });
   if (r.status !== 0 && !r.stdout && !r.stderr) return "";
   const headCap = (s: string | null | undefined, n: number) => {
     const t = (s || "").trim();
@@ -254,8 +258,8 @@ export function snapshotDgxrunLogs(deploymentId: string): string {
 }
 
 /** Stop the restart loop, then capture the full accumulated container log. */
-export function captureCrashedDgxrunLogs(deploymentId: string): string {
+export async function captureCrashedDgxrunLogs(deploymentId: string): Promise<string> {
   const name = dgxrunContainerName(deploymentId);
-  spawnSync("docker", ["stop", "-t", "3", name], { timeout: 15_000 });
+  await execCapture("docker", ["stop", "-t", "3", name], { timeout: 15_000 });
   return snapshotDgxrunLogs(deploymentId);
 }

@@ -39,7 +39,7 @@ export async function checkDgxrunDeployments(): Promise<VllmStatus[]> {
   const results: VllmStatus[] = [];
 
   for (const d of deployments) {
-    const res = inspectDgxrunContainerResult(d.deploymentId);
+    const res = await inspectDgxrunContainerResult(d.deploymentId);
 
     // We failed to ASK docker (timeout / busy daemon), so we know nothing about
     // the container. Reporting a failure here would tear down a healthy cluster.
@@ -81,7 +81,7 @@ export async function checkDgxrunDeployments(): Promise<VllmStatus[]> {
     const failing =
       c.restartCount >= CRASH_LOOP_THRESHOLD || (c.state !== "running" && c.state !== "created");
     if (failing && !d.stopping) {
-      const snap = captureCrashedDgxrunLogs(d.deploymentId);
+      const snap = await captureCrashedDgxrunLogs(d.deploymentId);
       results.push({
         deploymentId: d.deploymentId,
         recipeName: d.recipeName,
