@@ -52,6 +52,9 @@ export async function checkDgxrunDeployments(): Promise<VllmStatus[]> {
     // before believing it — a lone `absent` is routinely a recreate race.
     if (res.kind === "absent") {
       if (d.stopping) { absentTicks.delete(d.deploymentId); continue; }
+      // Still launching: `docker run` has not returned, so the container is
+      // absent because it does not exist YET, not because it vanished.
+      if (d.starting) { absentTicks.delete(d.deploymentId); continue; }
       const n = (absentTicks.get(d.deploymentId) ?? 0) + 1;
       absentTicks.set(d.deploymentId, n);
       if (n < ABSENT_TICKS_TO_FAIL) continue;

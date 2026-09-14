@@ -10,7 +10,7 @@ import {
 } from "./dgxrun-args.js";
 import { resolveHfHome } from "../sparkrun.js";
 import { execCapture } from "../exec-capture.js";
-import { saveDeployment, removeDeployment } from "../deployment-store.js";
+import { saveDeployment, removeDeployment, loadDeployments } from "../deployment-store.js";
 
 /**
  * dgxrun docker lifecycle — mirrors sparkrun.ts's surface (launch / stop /
@@ -49,6 +49,17 @@ export async function dgxrunImageExists(image: string): Promise<boolean> {
 }
 
 /**
+ * Clear the launch-window flag, preserving every other field. `saveDeployment`
+ * replaces the stored entry wholesale, so this reads-then-writes rather than
+ * rebuilding — otherwise a `stopping` flag set by a cmd:undeploy that raced the
+ * launch would be silently dropped.
+ */
+function clearStarting(deploymentId: string): void {
+  const stored = loadDeployments().find((d) => d.deploymentId === deploymentId);
+  if (stored) saveDeployment({ ...stored, starting: false });
+}
+
+/**
  * Launch THIS node's rank via `docker run -d`.
  *
  * v1 does NOT distribute images across nodes (documented follow-up): the image
@@ -70,8 +81,11 @@ export async function launchDgxrun(
   const port = args.port ?? Number(args.recipe.defaults?.port) ?? 8000;
   const weightsDir = args.weightsDir ?? resolveHfHome();
 
-  // Persist first so a reconnect mid-launch can reconcile this rank.
+  // Persist first so a reconnect mid-launch can reconcile this rank. `starting`
+  // marks the window between here and the container existing, so the health tick
+  // does not read a not-yet-created container as a missing one.
   const persist = () => saveDeployment({
+    starting: true,
     deploymentId,
     recipeFile: image,
     recipeName: args.recipe.model ?? deploymentId,
@@ -143,6 +157,12 @@ export async function launchDgxrun(
   child.stderr?.on("data", (b: Buffer) => { const s = b.toString(); stderr += s; onLog(s); });
   child.on("exit", (code) => {
     if (code === 0) {
+      // The container provably exists now, so the launch window is over and the
+      // health tick may treat `absent` as meaningful again. MERGE rather than
+      // re-persist: `saveDeployment` replaces the whole entry, so rebuilding it
+      // here would clobber a `stopping` flag that a racing cmd:undeploy set
+      // while we were launching.
+      clearStarting(deploymentId);
       startLogFollower(deploymentId, name, onLog);
       // Keep the page cache clear through the weight load; stopped when the head
       // reports the API ready (dgxrun-metrics), on teardown, or after the backstop.

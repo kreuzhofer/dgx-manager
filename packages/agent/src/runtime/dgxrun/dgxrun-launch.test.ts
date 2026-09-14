@@ -26,7 +26,7 @@ const { spawnMock, execCaptureMock, dropCachesOnceMock } = vi.hoisted(() => ({
 
 vi.mock("node:child_process", () => ({ spawn: spawnMock }));
 vi.mock("../exec-capture.js", () => ({ execCapture: execCaptureMock }));
-vi.mock("../deployment-store.js", () => ({ saveDeployment: vi.fn(), removeDeployment: vi.fn() }));
+vi.mock("../deployment-store.js", () => ({ saveDeployment: vi.fn(), removeDeployment: vi.fn(), loadDeployments: vi.fn(() => []) }));
 vi.mock("../sparkrun.js", () => ({ resolveHfHome: () => "/mnt/tank/hf" }));
 vi.mock("./dgxrun-dropcache.js", () => ({
   dropCachesOnce: dropCachesOnceMock,
@@ -130,5 +130,43 @@ describe("stopDgxrun", () => {
     });
     await stopDgxrun("d1");
     expect(removeDeployment).toHaveBeenCalledWith("d1");
+  });
+});
+
+describe("launch window flag", () => {
+  // The #91 gate-1 failure: between persist() and the container existing, the
+  // health tick read `absent` as "container missing" and tore down every rank.
+  it("persists starting:true before docker run", async () => {
+    const { saveDeployment } = await import("../deployment-store.js");
+    await launchDgxrun("d1", ARGS, () => {}, () => {});
+    const saved = vi.mocked(saveDeployment).mock.calls.map((c) => c[0]);
+    expect(saved.some((d) => d.deploymentId === "d1" && d.starting === true)).toBe(true);
+  });
+
+  /**
+   * `saveDeployment` REPLACES the stored entry rather than merging, so clearing
+   * the flag by rebuilding the object would silently drop a `stopping` flag set
+   * by a cmd:undeploy that raced the launch — trading one race for another.
+   */
+  it("clearing starting preserves a concurrently-set stopping flag", async () => {
+    const store = await import("../deployment-store.js");
+    vi.mocked(store.loadDeployments).mockReturnValue([
+      { deploymentId: "d1", recipeFile: "img", recipeName: "m", port: 8000,
+        startedAt: "t", kind: "dgxrun", starting: true, stopping: true } as never,
+    ]);
+
+    let onExitCb: ((c: number | null) => void) | undefined;
+    spawnMock.mockImplementation(() => {
+      const c = makeChild();
+      onExitCb = (code) => c.__exit(code);
+      return c;
+    });
+    await launchDgxrun("d1", ARGS, () => {}, () => {});
+    onExitCb?.(0); // docker run succeeded -> launch window over
+
+    const last = vi.mocked(store.saveDeployment).mock.calls.map((c) => c[0])
+      .filter((d) => d.starting === false).pop();
+    expect(last).toBeDefined();
+    expect(last!.stopping).toBe(true);
   });
 });

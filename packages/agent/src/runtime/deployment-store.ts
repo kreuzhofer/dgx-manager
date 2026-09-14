@@ -26,6 +26,23 @@ export interface TrackedDeployment {
    * workload actually vanishing.
    */
   stopping?: boolean;
+  /**
+   * Set to `true` by `launchDgxrun` BEFORE `docker run` and cleared when it
+   * exits 0. Between persisting and the container existing, `docker inspect`
+   * correctly reports `absent`, and the health tick would report "container
+   * missing" and have the manager tear down every rank — killing a launch that
+   * was proceeding normally.
+   *
+   * That window used to be covered by accident: `dropCachesOnce()` was a
+   * blocking `spawnSync`, so the event loop was frozen and the tick could not
+   * run. Making it async (#36) removed the accidental mutual exclusion and the
+   * race became live, killing the #91 gate-1 deploy on 2026-09-14.
+   *
+   * If the agent dies mid-launch this flag stays set and the tick keeps
+   * ignoring the entry; that is recovered on reconnect, where dgxrun
+   * reconciliation inspects the container and reports it properly.
+   */
+  starting?: boolean;
 }
 
 // Default to a user-writable location. The agent runs as a non-root systemd
