@@ -1,4 +1,5 @@
 import { prisma } from "../prisma.js";
+import { decideTeardown } from "./teardown-decision.js";
 
 /** Minimal agentHub surface needed to fan a teardown out to cluster nodes. */
 export interface TeardownHub {
@@ -20,6 +21,7 @@ export interface TeardownHub {
 export async function coordinatedDgxrunTeardown(
   hub: TeardownHub,
   deploymentId: string,
+  trigger: "failed" | "stopped" = "failed",
 ): Promise<string[]> {
   const dep = await prisma.deployment.findUnique({
     where: { id: deploymentId },
@@ -29,17 +31,32 @@ export async function coordinatedDgxrunTeardown(
 
   let cfg: Record<string, unknown> = {};
   try { cfg = dep.config ? JSON.parse(dep.config) : {}; } catch { cfg = {}; }
-  if (cfg.runner !== "dgxrun") return [];
 
   const nodeIds = dep.clusterNodes.length > 0
     ? dep.clusterNodes.map((c) => c.nodeId)
     : [dep.nodeId];
 
-  for (const nid of nodeIds) {
+  const decision = decideTeardown({ runner: cfg.runner, nodeIds, trigger });
+  if (decision.kind === "skip") {
+    if (cfg.runner === "dgxrun") {
+      console.log(`[dgxrun] teardown skipped for ${deploymentId}: ${decision.reason}`);
+    }
+    return [];
+  }
+
+  for (const nid of decision.nodeIds) {
     hub.sendToAgent(nid, {
       type: "cmd:undeploy",
-      payload: { deploymentId, deleteAfter: false, kind: "dgxrun" },
+      payload: {
+        deploymentId,
+        deleteAfter: false,
+        kind: "dgxrun",
+        // Keep the container for post-mortem. launchDgxrun does `docker rm -f`
+        // on the same name before it starts, so this is reclaimed by the next
+        // deploy rather than leaking (#94).
+        preserveContainer: decision.preserveContainer,
+      },
     });
   }
-  return nodeIds;
+  return decision.nodeIds;
 }

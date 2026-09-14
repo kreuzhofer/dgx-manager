@@ -170,3 +170,28 @@ describe("launch window flag", () => {
     expect(last!.stopping).toBe(true);
   });
 });
+
+describe("stopDgxrun evidence preservation (#94)", () => {
+  // A post-mortem needs a body. On a failure teardown the container is stopped,
+  // not removed, so its logs survive for inspection.
+  it("stops rather than removes when preserveContainer is set", async () => {
+    await stopDgxrun("d1", { preserveContainer: true });
+    const argvs = execCaptureMock.mock.calls.map((c) => c[1] as string[]);
+    expect(argvs.some((a) => a[0] === "stop" && a.includes("dgxrun_d1"))).toBe(true);
+    expect(argvs.some((a) => a[0] === "rm")).toBe(false);
+  });
+
+  // A routine stop still removes: it is not a post-mortem and the disk matters.
+  it("removes by default", async () => {
+    await stopDgxrun("d1");
+    const argvs = execCaptureMock.mock.calls.map((c) => c[1] as string[]);
+    expect(argvs.some((a) => a[0] === "rm" && a.includes("-f"))).toBe(true);
+  });
+
+  // Preserving must not leak: the next launch reclaims the name.
+  it("launch removes a preserved container before starting", async () => {
+    await launchDgxrun("d1", ARGS, () => {}, () => {});
+    const argvs = execCaptureMock.mock.calls.map((c) => c[1] as string[]);
+    expect(argvs.some((a) => a[0] === "rm" && a.includes("-f") && a.includes("dgxrun_d1"))).toBe(true);
+  });
+});

@@ -562,8 +562,10 @@ function connect() {
                 status: "failed",
                 error: status.error ?? `dgxrun rank ${status.rank ?? 0} died`,
               });
-              // Stop the local container (cancel restart loop) + untrack.
-              try { await stopDgxrun(status.deploymentId); } catch { /* best effort */ }
+              // Stop the local container (cancel restart loop) + untrack. Keep the
+              // container: this is a FAILURE, and its logs are the post-mortem (#94).
+              try { await stopDgxrun(status.deploymentId, { preserveContainer: true }); }
+              catch { /* best effort */ }
               deployLastStatus.delete(status.deploymentId);
             } else if (status.containerRunning && isHead) {
               const deployStatus = sparkrunRunningStatus(status);
@@ -1106,7 +1108,11 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
             });
             // Mark stopping so a racing health tick doesn't classify this as a crash.
             saveDeployment({ ...stored, stopping: true });
-            try { await stopDgxrun(deploymentId); }
+            // The server sets preserveContainer on a failure teardown so the
+            // container survives for inspection (#94).
+            const preserveContainer = (msg.payload as { preserveContainer?: boolean })
+              ?.preserveContainer === true;
+            try { await stopDgxrun(deploymentId, { preserveContainer }); }
             catch (stopErr) { console.warn(`[undeploy] dgxrun stop error (continuing): ${stopErr}`); }
             sendMsg("agent:deployment:status", {
               deploymentId, status: "stopped", deleteAfter: deleteAfter || false,

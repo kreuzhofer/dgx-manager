@@ -187,14 +187,28 @@ function startLogFollower(deploymentId: string, name: string, onLog: (line: stri
 }
 
 /** Tear down THIS node's rank container + kill its log follower. */
-export async function stopDgxrun(deploymentId: string): Promise<void> {
+export async function stopDgxrun(
+  deploymentId: string,
+  opts: { preserveContainer?: boolean } = {},
+): Promise<void> {
   stopDropCacheLoop(deploymentId);
   const f = logFollowers.get(deploymentId);
   if (f) { try { f.kill(); } catch { /* gone */ } logFollowers.delete(deploymentId); }
   const name = dgxrunContainerName(deploymentId);
+  // On a FAILURE teardown keep the container: `docker stop` rather than
+  // `docker rm -f`. A post-mortem needs a body, and removing it destroys the
+  // only place the cause can still be read (#94 — the evidence was deleted 19
+  // seconds after the first hard timeout).
+  //
+  // This does not leak: `launchDgxrun` runs `docker rm -f` on the same name
+  // before every start, so a preserved container is reclaimed by the next
+  // deploy of the same id.
+  const argv = opts.preserveContainer
+    ? ["stop", "-t", "10", name]
+    : ["rm", "-f", name];
   // `finally`, not `catch`: the local record must go even if docker is wedged,
   // or the next health tick keeps reporting a deployment we have disowned.
-  try { await execCapture("docker", ["rm", "-f", name], { timeout: 60_000 }); }
+  try { await execCapture("docker", argv, { timeout: 60_000 }); }
   finally { removeDeployment(deploymentId); }
 }
 

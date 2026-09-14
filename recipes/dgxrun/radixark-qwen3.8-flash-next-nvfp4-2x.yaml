@@ -58,10 +58,19 @@ defaults:
   port: 8000
   host: 0.0.0.0
   tensor_parallel: 2
-  # 0.87, NOT 0.90. This is a multimodal model and the vision-encoder warmup allocates
-  # OUTSIDE the profiled budget — the GLM-5.3-Flash recipe in this repo records that same
-  # failure shape SIGKILLing a worker at 0.89 with 0.24 GiB of slack.
-  gpu_memory_utilization: 0.87
+  # 0.85. MEASURED, not chosen: at 0.87 the first TP2 boot attempt died with
+  #   ValueError: Free memory on device cuda:0 (105.72/121.63 GiB) on startup is less
+  #   than desired GPU memory utilization (0.87, 105.82 GiB)
+  # — short by 0.1 GiB. vLLM's startup guard compares gmu*TOTAL against CUDA-VISIBLE
+  # free, which on GB10 sits ~7 GiB below MemFree because of CUDA contexts the host
+  # does not account for (see memory `glm52-minfree-and-gmu-guard`). With ~116 GiB
+  # MemFree the visible ceiling is ~105.7, so 0.87 fails structurally on these nodes,
+  # not intermittently.
+  # 0.85 -> 103.4 GiB, ~2.3 GiB of margin. Margin is worth more than KV on a boot
+  # gate, and this is additionally a MULTIMODAL model whose vision-encoder warmup
+  # allocates OUTSIDE the profiled budget — the GLM-5.3-Flash recipe records that
+  # same shape SIGKILLing a worker at 0.89 with 0.24 GiB of slack.
+  gpu_memory_utilization: 0.85
   # 32768 on the FIRST boot, not 262144. The native window is affordable, but multi-node
   # sm_121 has two documented wedges between 95K and 100K (vllm#54629 on 4x GB10, plus a
   # dual-Spark report near 95K). Gate 4 is where we find OUR number — raise this in steps
