@@ -1,0 +1,129 @@
+# @dgxrun/radixark-qwen3.8-flash-next-nvfp4-2x — Qwen3.8-Flash-Next at TP2 on TWO Sparks.
+#
+# GATE-1 CONFIGURATION for #91. This is the "does it boot, is it correct" shape, not a
+# tuned serving recipe: the context window is deliberately small and prefix caching is
+# off. Raise things only after the gates pass, one at a time, and record what moved.
+#
+# WHAT THIS MODEL IS. `Qwen4ExpForConditionalGeneration` / `model_type: qwen4_exp` —
+# Qwen's preview of the Qwen4 architecture, and NOT a scaled-up Qwen3.8-27B (that is
+# `Qwen3_5ForConditionalGeneration`). Nothing from the 27B recipes transfers by default.
+# Multimodal: the config carries a `vision_config`, `image_token_id` and `video_token_id`.
+# Also note `Qwen/Qwen3.8-Flash` does not exist as open weights — that is the Cloud API
+# product; the open checkpoint is `Qwen3.8-Flash-Next`.
+#
+# WHY TP2 AND NOT TP1/TP4. 180 B params, and 28 % of the checkpoint is a 51.2 B n-gram
+# (PLE) embedding table. That table is a `VocabParallelEmbedding` — SHARDED by TP, not
+# replicated — so tensor parallelism is what makes it fit at all:
+#
+#     1 Spark  NVFP4   101.7 GiB/rank   nothing left for KV; PLE offload needs unmerged vllm#53899
+#     2 Sparks NVFP4   ~63    GiB/rank   <-- this recipe (third-party dual-Spark ledger: 62.5 GB/node)
+#     2 Sparks FP8      86.4  GiB/rank   also fits; NVFP4 is staged and leaves more KV room
+#     4 Sparks BF16     83.8  GiB/rank   costs the whole cluster
+#
+# Pipeline parallel is HARD-REFUSED in code (`NotImplementedError`, models/config.py:879)
+# and TP must be a power of two, so TP2 and TP4 are the only options that exist.
+#
+# DO NOT REACH FOR Int4. Every AWQ/GPTQ build on HF is 167-175 GiB — LARGER than official
+# FP8 — because they leave the PLE table in BF16. NVFP4 is the only quantization axis that
+# helps here. This inverts the instinct the 27B work gives you.
+#
+# THE CHECKPOINT. RadixArk's modelopt NVFP4 build, 126 GiB, already staged on /mnt/tank.
+# `hf_quant_config.json` excludes `*.ple.*` and `mtp.*` from quantization — the PLE table
+# is FP8, not NVFP4 (the publisher's own model string is "qwen38next-nvfp4-plefp8"). The
+# publisher also ships eval metrics for THIS checkpoint, which is the Gate-2 target:
+#   gsm8k_metrics.json  -> 0.9727 over 1319 examples (temp 0.6, top_p 0.95, seed 0, 8192 max_tokens)
+#   aime26_metrics.json -> pass@1 0.9875, majority@8 1.0
+# Both measured on SGLang, so treat them as a cross-engine reference, not a like-for-like
+# vLLM baseline. A large shortfall means something here is wrong; an exact match is luck.
+#
+# CONTAINER. `:2026090501` is REQUIRED and is not interchangeable with the `:2026081501`
+# used by the 27B recipes — that image reports `Qwen4Exp supported: False` (verified on
+# spark-01: it carries only the Qwen3_5 family). dgxrun never pulls, so the image must be
+# present on BOTH nodes before deploying, or launch fails fast with "image not found
+# locally". vLLM main in this image is 309 commits past the enabling merge vllm#53896.
+#
+# NOT SET HERE, ON PURPOSE — dgxrun supplies them:
+#   --distributed-executor-backend mp   (dgxrun injects it, and REWRITES it if present)
+#   --nnodes / --node-rank / --master-addr / --master-port
+#
+recipe_version: "2"
+runner: dgxrun
+model: RadixArk/Qwen3.8-Flash-Next-NVFP4
+runtime: vllm
+container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:2026090501
+cluster_only: true
+description: Qwen3.8-Flash-Next NVFP4 at TP2 on two Sparks — #91 gate-1 config, not yet a tuned serving recipe
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 2
+  # 0.87, NOT 0.90. This is a multimodal model and the vision-encoder warmup allocates
+  # OUTSIDE the profiled budget — the GLM-5.3-Flash recipe in this repo records that same
+  # failure shape SIGKILLing a worker at 0.89 with 0.24 GiB of slack.
+  gpu_memory_utilization: 0.87
+  # 32768 on the FIRST boot, not 262144. The native window is affordable, but multi-node
+  # sm_121 has two documented wedges between 95K and 100K (vllm#54629 on 4x GB10, plus a
+  # dual-Spark report near 95K). Gate 4 is where we find OUR number — raise this in steps
+  # and record where it breaks. Do not open at 262K.
+  max_model_len: 32768
+  # 16, not the official 256. GDN state is PER SEQUENCE (~108 MiB/seq at TP1), so
+  # max_num_seqs is a memory knob here, not just a throughput one.
+  max_num_seqs: 16
+  max_num_batched_tokens: 4096
+  served_model_name: qwen3.8-flash-next
+
+env:
+  # sm_121a everywhere — the Sparks need the arch-specific build path.
+  TORCH_CUDA_ARCH_LIST: "12.1a"
+  CUTE_DSL_ARCH: "sm_121a"
+  # The default CUDA GDN decode kernel DETERMINISTICALLY HANGS the engine at
+  # concurrency ~32 with FP8 GDN projections. No error — requests just stall.
+  VLLM_GDN_DECODE_KERNEL: "triton"
+  VLLM_USE_DEEP_GEMM: "0"
+  # Keep JIT/autotune compile parallelism low; these boxes OOM before they run out of CPU.
+  MAX_JOBS: "2"
+  FLASHINFER_NVCC_THREADS: "1"
+  # First boot on a new arch can spend a LONG time in autotune/JIT and look like a hang.
+  # Do not shorten this because the log has gone quiet — that is the documented trap.
+  VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+
+# FLAGS THAT FAIL SILENTLY — the omissions below are load-bearing. Each one produces
+# wrong behaviour with NO error, so "it started and answered" does not clear any of them.
+#
+#   NO --speculative-config / MTP. vllm#55375 (MTP output corruption) merged FOUR HOURS
+#     after this image was cut. We run MTP on everything else in this repo; not here.
+#     Related trap: an accept-length pinned at its maximum is a CORRUPTION SIGNATURE, not
+#     health — one reported case read 3.00/3 while scoring 0/10.
+#   NO --enable-prefix-caching. Off for first boot (vllm#54173). When you do enable it,
+#     `--mamba-cache-mode align` is MANDATORY, and 'all' prefix caching raises
+#     NotImplementedError in models/qwen4_exp/nvidia/model.py:641.
+#   NO --kv-cache-dtype. The QSA backend declares supported_kv_cache_dtypes =
+#     ["auto", "bfloat16"] and enforces it at config time. NVFP4 KV fails silently —
+#     three independent GB10 measurements.
+#   NO --moe-backend. Leave it on auto (-> FLASHINFER_CUTLASS). `flashinfer_b12x` faults
+#     on sm_121; `triton`/`cutlass` overflow the 99 KiB SMEM budget. The `triton` you see
+#     in official recipes is a HOPPER requirement, not a portable default.
+#   NO --enable-expert-parallel. Both documented multi-Spark wedges involved EP.
+#
+# --reasoning-parser qwen3 is REQUIRED: without it the reasoning trace and a stray
+#   </think> leak into `content`.
+# reasoning_effort MUST be pinned to medium: the chat template defaults to `xhigh`, which
+#   reasons past generous caps and returns EMPTY content — the same trap the 27B recipes hit.
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      --tensor-parallel-size {tensor_parallel} \
+      --max-model-len {max_model_len} \
+      --max-num-seqs {max_num_seqs} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --enable-chunked-prefill \
+      --no-enable-flashinfer-autotune \
+      --enable-auto-tool-choice \
+      --tool-call-parser qwen3_xml \
+      --reasoning-parser qwen3 \
+      --default-chat-template-kwargs '{"reasoning_effort":"medium"}' \
+      --limit-mm-per-prompt '{"image":8}'
