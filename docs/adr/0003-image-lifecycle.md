@@ -34,22 +34,28 @@ over SSH, per node, by hand.** That is the same sentence ADR 0002 wrote about
 weights, and it has the same consequences.
 
 It also has one that weights do not. Because each node resolves a tag
-independently, at whatever time someone happened to run `docker pull`, the same
-tag can mean different bytes on different machines. This is not hypothetical:
-the live `qwen3.8-27b-nvfp4` pool was found serving from two different images
-under one **dated** tag —
+independently, at whatever time someone happened to run `docker pull`, there is
+no guarantee that a tag means the same bytes everywhere, and **nothing in the
+product records or compares what was actually deployed**. Today that is an
+unverifiable property rather than a known-broken one: a check found all four
+Sparks holding the same registry digest for the image the pool runs, but only
+because someone went and looked, by hand, after the fact.
 
-```
-ghcr.io/spark-arena/dgx-vllm-eugr-nightly:2026081501
-  spark-03 -> sha256:d56faba2c44f...  (23.0 GB)
-  spark-04 -> sha256:d2eb44d303ba...  (34.2 GB)
-```
+That check was itself instructive. The obvious comparison — local image IDs from
+`docker images` — is **wrong**, and produced a convincing false positive. This
+fleet runs two different Docker image stores (spark-01/04 on the containerd
+store, spark-02/03 on the classic `overlay2` store), and they derive local image
+IDs from different digests and account for sizes differently. The same image
+reads as `d2eb44d303ba`/34.2 GB on one pair and `d56faba2c44f`/23 GB on the
+other. Only `RepoDigests` — the registry manifest digest — is comparable across
+nodes.
 
-— and the hand-built `:probe` images that the 4x recipes reference drift the
-same way, 38.7 GB on two nodes and 19.2 GB on the other two. A tensor-parallel
-deploy can therefore run different code on different ranks, and nothing in the
-product would say so. Dating the tag was the mitigation we adopted for this and
-it is insufficient, because the tag is mutable upstream.
+The store split has a second consequence that bears directly on Decision 3: on
+the containerd-store nodes a layer's compressed blob is reclaimed once unpacked,
+so an image is **runnable but not exportable**. `docker save` returns exit 0 with
+a ~12 KB layerless tar; `ctr export` fails with `content digest ...: not found`.
+On the classic-store nodes export works normally. So a node's image store cannot
+be relied on as a source, and cannot even be relied on to fail consistently.
 
 The cost of the absent concept is also plainly measurable. Across the four
 Sparks there are 79 image instances, 61 unique, 1839 GB stored, of which 391 GB
@@ -60,8 +66,12 @@ because they exist nowhere else and rebuilding one is expensive.
 ## Decision 1 — an image is identified by digest; a tag is a convenience
 
 Recipes name images by tag today. A tag is a mutable pointer, resolved
-independently on every node, and we have direct evidence that it drifts — on a
-dated tag, on production replicas, unnoticed.
+independently on every node at whatever time someone ran `docker pull`. We do
+not have evidence that one has drifted on this cluster — a check found all four
+Sparks on the same registry digest. We have something weaker and still
+unacceptable: **no way to know without checking by hand afterwards.** The
+property we want is not "tags happen to agree today" but "ranks cannot disagree
+by construction".
 
 An image is therefore identified by its **digest** (`sha256:...`) everywhere the
 identity matters: what a recipe pins, what a deployment records, what ranks are
@@ -110,8 +120,14 @@ every image ever built would move the hoarding problem rather than solve it.
 
 ADR 0002 Decision 4 rejected a presence check for weights because a repo that is
 two percent downloaded is a directory with the right name. The image equivalent
-is worse, because a *complete* image with the right name can still be the wrong
-image — that is exactly what #103 is.
+is worse: a *complete* image with the right name can still be the wrong image,
+and a name check cannot tell.
+
+The comparison must be the **registry digest** (`RepoDigests`), not the local
+image ID. This is not pedantry — comparing local IDs across this fleet produces
+a **false positive**, because the containerd and classic image stores derive
+those IDs from different digests (#103). A gate built on the obvious field would
+refuse correct deploys.
 
 So the check resolves the image and compares its **digest** against the one the
 deploy pinned, on each target node. Its value, as with weights, is that it
@@ -176,7 +192,8 @@ insisted a user should choose rather than discover.
 
 - ADR 0002 — staging weights; this ADR is deliberately its mirror, and the two
   meet in Decision 5
-- #103 — the digest drift that motivates Decision 1, found on live replicas
+- #103 — the two-image-store split: why local image IDs are not comparable,
+  and why a node's store is not a reliable image source
 - #102 — the registry that Decision 3 requires
 - #101 — fleet disk reporting; Decision 3 is what makes the reported
   "reclaimable" figure actionable
