@@ -54,6 +54,17 @@ container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:2026090501
 cluster_only: true
 description: Qwen3.8-Flash-Next NVFP4 at TP2 on two Sparks — #91 gate-1 config, not yet a tuned serving recipe
 
+# THE PLE QUANT GATE. This checkpoint's body is NVFP4 but its PLE n-gram table is
+# FP8 with one global BF16 scale — VERIFIED from the safetensors headers: 128
+# `ngram_embedding.shard_N.weight` tensors are F8_E4M3 in a shard family literally
+# named `model-plefp8-*`. vLLM's `_get_ple_embedding_quant_method()` only returns an
+# FP8 method for ModelOptMixedPrecisionConfig or Fp8Config; an NVFP4 body yields
+# ModelOptNvFp4Config, so the PLE is built UNQUANTIZED and the load dies with
+#   ValueError: There is no module or parameter named 'ngram_embedding.weight_scale'
+# (observed here 2026-09-14; upstream vllm#54765). The mod widens that gate.
+mods:
+  - qwen4exp-ple-fp8-gate
+
 defaults:
   port: 8000
   host: 0.0.0.0
@@ -96,6 +107,10 @@ env:
   # First boot on a new arch can spend a LONG time in autotune/JIT and look like a hang.
   # Do not shorten this because the log has gone quiet — that is the documented trap.
   VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+  # Arms the mod above. Deliberately opt-in: an NVFP4 checkpoint with a genuinely
+  # BF16 PLE would have that table misread as FP8, producing fluent WRONG output
+  # rather than an error. Only set it where the PLE dtype has been verified.
+  QWEN4EXP_PLE_FP8_GATE: "1"
 
 # FLAGS THAT FAIL SILENTLY — the omissions below are load-bearing. Each one produces
 # wrong behaviour with NO error, so "it started and answered" does not clear any of them.
@@ -115,6 +130,18 @@ env:
 #     in official recipes is a HOPPER requirement, not a portable default.
 #   NO --enable-expert-parallel. Both documented multi-Spark wedges involved EP.
 #
+# --enforce-eager IS A GATE-1 MEASURE, NOT A SERVING CHOICE. Without it, boot died in
+#   torch.compile autotuning:
+#     InductorError: Failed to run autotuning code block: CUDA out of memory.
+#     Tried to allocate 47.69 GiB. GPU 0 has 121.63 GiB total, of which 44.57 GiB is free.
+#   Weights are resident by then (~75 GiB/rank), so inductor had ~45 GiB and asked for
+#   47.69 GiB in one block. Eager skips capture and its autotune entirely.
+#   REMOVE THIS FOR GATE 3 (throughput): CUDA graphs are the throughput fix on this
+#   family — eager decode is host-bound — so a tok/s number measured with eager is a
+#   floor, not the model's capability. The levers to try before re-enabling graphs are
+#   max_num_batched_tokens (4096 -> 2048 -> 1024; the GLM-5.2 indexer prewarm had this
+#   exact shape) and an explicit cudagraph_capture_sizes list.
+#
 # --reasoning-parser qwen3 is REQUIRED: without it the reasoning trace and a stray
 #   </think> leak into `content`.
 # reasoning_effort MUST be pinned to medium: the chat template defaults to `xhigh`, which
@@ -129,6 +156,7 @@ command: |
       --max-num-seqs {max_num_seqs} \
       --max-num-batched-tokens {max_num_batched_tokens} \
       --gpu-memory-utilization {gpu_memory_utilization} \
+      --enforce-eager \
       --enable-chunked-prefill \
       --no-enable-flashinfer-autotune \
       --enable-auto-tool-choice \
