@@ -1074,6 +1074,12 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
       const { deploymentId, deleteAfter, clusterNodes, runtime, modelName: undeployModelName } = msg.payload as {
         deploymentId: string; deleteAfter?: boolean; clusterNodes?: string[]; runtime?: string; modelName?: string;
       };
+      // Read ONCE here so every teardown path below agrees. A multi-rank failure
+      // sends one cmd:undeploy per rank; the first clears the store entry, so the
+      // second falls through to the orphan sweep — which must not `docker rm -f`
+      // the container the first one deliberately preserved (#94).
+      const sweepPreserve = (msg.payload as { preserveContainer?: boolean })
+        ?.preserveContainer === true;
       sendMsg("agent:deployment:status", { deploymentId, status: "stopping" });
       clearPhaseTracking(deploymentId); // reset forward-only phase tracking for this id
       // Record the cancel SYNCHRONOUSLY, before yielding: a launch whose
@@ -1110,8 +1116,7 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
             saveDeployment({ ...stored, stopping: true });
             // The server sets preserveContainer on a failure teardown so the
             // container survives for inspection (#94).
-            const preserveContainer = (msg.payload as { preserveContainer?: boolean })
-              ?.preserveContainer === true;
+            const preserveContainer = sweepPreserve;
             try { await stopDgxrun(deploymentId, { preserveContainer }); }
             catch (stopErr) { console.warn(`[undeploy] dgxrun stop error (continuing): ${stopErr}`); }
             sendMsg("agent:deployment:status", {
@@ -1150,7 +1155,14 @@ async function handleCommand(msg: { type: string; payload: Record<string, unknow
           // reporting stopped without removing it is why a second DELETE never
           // cleaned one up. `docker rm -f dgxrun_<id>` is idempotent and a no-op
           // for every other runtime.
-          try { await stopDgxrun(deploymentId); }
+          //
+          // HONOUR preserveContainer HERE TOO (#94). A multi-rank failure sends one
+          // cmd:undeploy per rank, and the FIRST one clears the store entry — so the
+          // second arrives with nothing tracked and lands here. Without this the
+          // orphan sweep `docker rm -f`s the container the first undeploy had just
+          // deliberately preserved, and the post-mortem evidence is gone anyway.
+          // Observed 2026-09-15 on the #91 gate-3 boot failure.
+          try { await stopDgxrun(deploymentId, { preserveContainer: sweepPreserve }); }
           catch (e) { console.warn(`[undeploy] orphan sweep error (continuing): ${e}`); }
           sendMsg("agent:deployment:status", {
             deploymentId,

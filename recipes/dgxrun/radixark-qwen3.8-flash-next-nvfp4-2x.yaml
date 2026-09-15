@@ -69,7 +69,15 @@ defaults:
   port: 8000
   host: 0.0.0.0
   tensor_parallel: 2
-  # 0.85. MEASURED, not chosen: at 0.87 the first TP2 boot attempt died with
+  # 0.80 FOR GATE 3 (graphs). The inductor autotune asks for a FIXED 47.69 GiB in
+  # one block — measured identical at max_num_batched_tokens 4096 AND 2048, so the
+  # workspace is NOT driven by batched tokens; that hypothesis is falsified. What
+  # it needs is simply that much FREE memory at compile time, and at gmu 0.85 only
+  # ~44.6 GiB was free — short by ~3 GiB. 0.80 frees ~6 GiB more.
+  # Cost: a smaller KV pool. Acceptable at max_model_len 32768; revisit when the
+  # context ceiling (gate 4) is raised, because the two compete for the same pool.
+  #
+  # 0.85 was itself MEASURED: at 0.87 the first TP2 boot attempt died with
   #   ValueError: Free memory on device cuda:0 (105.72/121.63 GiB) on startup is less
   #   than desired GPU memory utilization (0.87, 105.82 GiB)
   # — short by 0.1 GiB. vLLM's startup guard compares gmu*TOTAL against CUDA-VISIBLE
@@ -81,16 +89,27 @@ defaults:
   # gate, and this is additionally a MULTIMODAL model whose vision-encoder warmup
   # allocates OUTSIDE the profiled budget — the GLM-5.3-Flash recipe records that
   # same shape SIGKILLing a worker at 0.89 with 0.24 GiB of slack.
-  gpu_memory_utilization: 0.85
+  gpu_memory_utilization: 0.80
   # 32768 on the FIRST boot, not 262144. The native window is affordable, but multi-node
   # sm_121 has two documented wedges between 95K and 100K (vllm#54629 on 4x GB10, plus a
   # dual-Spark report near 95K). Gate 4 is where we find OUR number — raise this in steps
   # and record where it breaks. Do not open at 262K.
   max_model_len: 32768
-  # 16, not the official 256. GDN state is PER SEQUENCE (~108 MiB/seq at TP1), so
-  # max_num_seqs is a memory knob here, not just a throughput one.
-  max_num_seqs: 16
-  max_num_batched_tokens: 4096
+  # 32. MEASURED: at 16, aggregate decode saturated at ~180 tok/s and concurrency
+  # 32/64 added nothing but latency (TTFR 1.55s -> 7.2s -> 18.5s) because requests
+  # queued rather than ran. Raising this is the direct test of whether decode
+  # scales past 180.
+  # Still well under the official 256: GDN state is PER SEQUENCE (~108 MiB/seq at
+  # TP1), so this is a memory knob as much as a throughput one — and the documented
+  # GDN decode-kernel hang lives at concurrency ~32, which VLLM_GDN_DECODE_KERNEL=
+  # triton is what protects against (verified: a 32/64 sweep completed 240 requests
+  # with zero stalls).
+  max_num_seqs: 4
+  # 2048, halved from 4096 for GATE 3. The inductor autotune workspace scales with
+  # this: with graphs enabled at 4096 the compile step died asking for 47.69 GiB
+  # with ~45 GiB free. Halving it is the targeted lever — changing gmu as well
+  # would leave us unable to say which one mattered. Next step down is 1024.
+  max_num_batched_tokens: 2048
   served_model_name: qwen3.8-flash-next
 
 env:
@@ -115,10 +134,16 @@ env:
 # FLAGS THAT FAIL SILENTLY — the omissions below are load-bearing. Each one produces
 # wrong behaviour with NO error, so "it started and answered" does not clear any of them.
 #
-#   NO --speculative-config / MTP. vllm#55375 (MTP output corruption) merged FOUR HOURS
-#     after this image was cut. We run MTP on everything else in this repo; not here.
-#     Related trap: an accept-length pinned at its maximum is a CORRUPTION SIGNATURE, not
-#     health — one reported case read 3.00/3 while scoring 0/10.
+#   MTP IS NOW ON — TRIAL, and it must be VERIFIED not trusted. vllm#55375 (MTP output
+#     corruption) merged FOUR HOURS after this image was cut, so this image may carry the
+#     bug. The checkpoint has ONE mtp layer (`mtp.num_hidden_layers: 1`, one layer index
+#     in the weights), so num_speculative_tokens=1 is the matching value and the best
+#     case is ~2 tokens per forward.
+#     CORRUPTION SIGNATURE: accept-length pinned at its MAXIMUM is the bug, not health —
+#     one reported case read 3.00/3 while scoring 0/10. At k=1 that means a constant
+#     2.00/2. Check `vllm:spec_decode_*` metrics AND re-run GSM8K against our measured
+#     0.9666 before trusting any speedup. Revert to no --speculative-config if either
+#     signal is off.
 #   NO --enable-prefix-caching. Off for first boot (vllm#54173). When you do enable it,
 #     `--mamba-cache-mode align` is MANDATORY, and 'all' prefix caching raises
 #     NotImplementedError in models/qwen4_exp/nvidia/model.py:641.
@@ -142,6 +167,21 @@ env:
 #   max_num_batched_tokens (4096 -> 2048 -> 1024; the GLM-5.2 indexer prewarm had this
 #   exact shape) and an explicit cudagraph_capture_sizes list.
 #
+# WHY --compilation-config DISABLES COMPILE-TIME AUTOTUNE. With CUDA graphs on, boot
+#   died in `generate_and_run_autotune_block` (inductor wrapper codegen) asking for a
+#   FIXED 47.69 GiB. Two hypotheses were tested and BOTH FALSIFIED, so do not retry them:
+#     - max_num_batched_tokens 4096 -> 2048: allocation byte-identical (47.69 GiB).
+#       The workspace is NOT driven by batched tokens.
+#     - gpu_memory_utilization 0.85 -> 0.80: free memory UNCHANGED (44.63 -> 44.50 GiB).
+#       gmu governs the KV pool, which is not allocated until AFTER compilation, so it
+#       cannot affect what is free during compile.
+#   What is resident at compile time is the ~77 GiB of weights, leaving ~44.5 GiB — and
+#   the autotune wants 47.69 GiB, so it can never fit by starving it. The fix is to stop
+#   it benchmarking at compile time: `triton.autotune_at_compile_time: false` defers
+#   kernel selection to first execution. CUDA graphs are KEPT — this disables the
+#   compile-time benchmarking pass, not graph capture.
+#   NOTE this is a DIFFERENT autotune from --no-enable-flashinfer-autotune above.
+#
 # --reasoning-parser qwen3 is REQUIRED: without it the reasoning trace and a stray
 #   </think> leak into `content`.
 # reasoning_effort MUST be pinned to medium: the chat template defaults to `xhigh`, which
@@ -156,11 +196,12 @@ command: |
       --max-num-seqs {max_num_seqs} \
       --max-num-batched-tokens {max_num_batched_tokens} \
       --gpu-memory-utilization {gpu_memory_utilization} \
-      --enforce-eager \
       --enable-chunked-prefill \
       --no-enable-flashinfer-autotune \
+      --compilation-config '{"inductor_compile_config":{"triton.autotune_at_compile_time":false}}' \
       --enable-auto-tool-choice \
       --tool-call-parser qwen3_xml \
       --reasoning-parser qwen3 \
       --default-chat-template-kwargs '{"reasoning_effort":"medium"}' \
-      --limit-mm-per-prompt '{"image":8}'
+      --limit-mm-per-prompt '{"image":8}' \
+      --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
