@@ -84,10 +84,15 @@ defaults:
   # compilation. On 0.28 the autotune OOM was fixed by --compilation-config (see the
   # note further down; on 0.29 it is gone and the flag is dropped), never by this.
   # Do not reach for gmu the next time a compile-time allocation fails.
-  # It is kept at 0.80 rather than restored to 0.85 only because everything since
-  # gate 3 — graphs, MTP, two full GSM8K runs — was measured here, so raising it is
-  # a change to re-verify rather than a free win. Cost is a smaller KV pool, which
-  # matters for gate 4: context and gmu compete for the same memory.
+  # LOWERED TO 0.70 BY GATE 4. The extra ~12 GiB is HOST headroom per rank, which is
+  # what the long-context working set actually needs — see max_model_len below, where a
+  # 224K prompt at gmu 0.80 was OOM-killed by the kernel with the KV pool still 3.4x
+  # oversized. MEASURED to cost nothing: at max_model_len 32768, gmu 0.70 vs 0.80 gave
+  # decode 36.42/57.42/79.38 vs 38.49/56.20/83.39 at concurrency 1/2/4 — mixed signs,
+  # inside the +/-2-3% repeatability floor.
+  # UNTESTED COMBINATION: gmu 0.80 at max_model_len 131072. It would roughly double the
+  # KV pool and might suit a higher-concurrency variant, but it spends the headroom gate
+  # 4 identified as the binding resource. Measure before shipping it.
   #
   # 0.85 was itself MEASURED: at 0.87 the first TP2 boot attempt died with
   #   ValueError: Free memory on device cuda:0 (105.72/121.63 GiB) on startup is less
@@ -101,12 +106,43 @@ defaults:
   # gate, and this is additionally a MULTIMODAL model whose vision-encoder warmup
   # allocates OUTSIDE the profiled budget — the GLM-5.3-Flash recipe records that
   # same shape SIGKILLing a worker at 0.89 with 0.24 GiB of slack.
-  gpu_memory_utilization: 0.80
-  # 32768 on the FIRST boot, not 262144. The native window is affordable, but multi-node
-  # sm_121 has two documented wedges between 95K and 100K (vllm#54629 on 4x GB10, plus a
-  # dual-Spark report near 95K). Gate 4 is where we find OUR number — raise this in steps
-  # and record where it breaks. Do not open at 262K.
-  max_model_len: 32768
+  gpu_memory_utilization: 0.70
+  # 131072 — GATE 4's answer, measured 2026-09-15. Read the whole note before changing it.
+  #
+  # THE DOCUMENTED 95-100K WEDGE DOES NOT OCCUR HERE. vllm#54629 (4x GB10) and a
+  # dual-Spark report near 95K were the reason this opened at 32768. Needle probes
+  # sailed through 95,934 and 127,584 at full prefill speed. That risk is retired.
+  #
+  # THE REAL LIMIT IS HOST MEMORY, NOT KV AND NOT vLLM. GB10 unified memory means host
+  # pressure IS GPU pressure. Measured at gmu 0.80 / 262144: a 223,824-token prompt was
+  # OOM-KILLED by the kernel (`VLLM::Worker_TP invoked oom-killer`, global_oom, NVRM
+  # NV_ERR_NO_MEMORY) while the KV pool still had 1,376,622 tokens free. KV capacity was
+  # never the constraint; the prefill working set outside the pool was.
+  #
+  # WHY NOT THE NATIVE 262144. It works — 255,684 tokens retrieved correctly at gmu 0.70
+  # — but it is not free and not safe:
+  #   - throughput falls 15-27% on EVERY request, including 4096-token ones that never
+  #     touch the window (decode c1/c2/c4: 30.98/47.91/57.95 vs 36.42/57.42/79.38 at
+  #     32768, same gmu). This is fixed per-step overhead sized to the configured max.
+  #   - idle headroom on rank 1 drops to ZERO (gx10-02: 0 GiB available at 262144 vs
+  #     25 GiB at 131072), which is what turns a transient allocation into the OOM above.
+  #   - prefill collapses at the top of the window: 2652 -> 808 tok/s between 224K and
+  #     256K, a 3.3x slowdown for a 1.14x length increase. That is memory thrash, not
+  #     attention cost.
+  #
+  # WHY 131072 IS THE RIGHT NUMBER. The cost is a CLIFF, not a slope. At 131072 the
+  # throughput deltas vs 32768 are +4.9% / -7.5% / +6.3% — mixed signs, at the +/-2-3%
+  # repeatability floor of the sweep harness. So 4x the context is essentially free, and
+  # only the last doubling is expensive. Needle FOUND at 127,584 (and at depths 0.05,
+  # 0.5, 0.95 at 223,824). Both ranks keep >20 GiB idle headroom. KV 7.45 GiB =
+  # 479,232 tokens = 3.66x concurrency at full length.
+  #
+  # DCP DOES NOT APPLY, do not reach for it. That was the GLM-5.2 lever and this is not
+  # an MLA model: Qwen4Exp is 36 linear-attention (GDN) layers + 12 full-attention, and
+  # GDN state is recurrent per-sequence state with no KV to shard. num_key_value_heads=2
+  # already makes KV nearly free — the pool was 3.4x oversized when the OOM hit. DCP
+  # multiplies effective KV, which is the one resource we have a surplus of.
+  max_model_len: 131072
   # 4, deliberately LOW — this recipe targets the coding-agent scenario (2-4 streams,
   # large context), not max aggregate throughput. The concurrency ladder was measured
   # on the way here and is recorded so it is not re-run: at 16, aggregate decode
@@ -157,9 +193,18 @@ env:
 #     2.00/2. Check `vllm:spec_decode_*` metrics AND re-run GSM8K against our measured
 #     0.9666 before trusting any speedup. Revert to no --speculative-config if either
 #     signal is off.
-#   NO --enable-prefix-caching. Off for first boot (vllm#54173). When you do enable it,
-#     `--mamba-cache-mode align` is MANDATORY, and 'all' prefix caching raises
-#     NotImplementedError in models/qwen4_exp/nvidia/model.py:641.
+#   PREFIX CACHING IS ON, and omitting the flag is NOT how you turn it off. This block
+#     used to claim "NO --enable-prefix-caching. Off for first boot (vllm#54173)". That
+#     was wrong: vLLM V1 defaults it to ON, so the absence of the flag leaves it enabled.
+#     Verified on the engine — `enable_prefix_caching=True` in the V1 config line.
+#     Disabling it needs an explicit --no-enable-prefix-caching.
+#     No harm resulted: `--mamba-cache-mode align` is MANDATORY with prefix caching on,
+#     and vLLM applies it automatically for this architecture ("Mamba cache mode is set
+#     to 'align' for Qwen4ExpForConditionalGeneration by default when prefix caching is
+#     enabled"). So every measurement on this recipe — GSM8K 0.9674 included — was taken
+#     with prefix caching on and a correct cache mode.
+#     Still true: 'all' prefix caching raises NotImplementedError in
+#     models/qwen4_exp/nvidia/model.py:641.
 #   NO --kv-cache-dtype. The QSA backend declares supported_kv_cache_dtypes =
 #     ["auto", "bfloat16"] and enforces it at config time. NVFP4 KV fails silently —
 #     three independent GB10 measurements.
