@@ -77,13 +77,17 @@ defaults:
   port: 8000
   host: 0.0.0.0
   tensor_parallel: 2
-  # 0.80 FOR GATE 3 (graphs). The inductor autotune asks for a FIXED 47.69 GiB in
-  # one block — measured identical at max_num_batched_tokens 4096 AND 2048, so the
-  # workspace is NOT driven by batched tokens; that hypothesis is falsified. What
-  # it needs is simply that much FREE memory at compile time, and at gmu 0.85 only
-  # ~44.6 GiB was free — short by ~3 GiB. 0.80 frees ~6 GiB more.
-  # Cost: a smaller KV pool. Acceptable at max_model_len 32768; revisit when the
-  # context ceiling (gate 4) is raised, because the two compete for the same pool.
+  # 0.80. NOTE this did NOT fix the gate-3 autotune OOM, and the comment here used
+  # to claim it did — it was wrong and is corrected. MEASURED: dropping gmu 0.85 ->
+  # 0.80 left free memory at compile time essentially UNCHANGED (44.63 -> 44.50 GiB),
+  # because gmu governs the KV pool and the KV pool is not allocated until AFTER
+  # compilation. On 0.28 the autotune OOM was fixed by --compilation-config (see the
+  # note further down; on 0.29 it is gone and the flag is dropped), never by this.
+  # Do not reach for gmu the next time a compile-time allocation fails.
+  # It is kept at 0.80 rather than restored to 0.85 only because everything since
+  # gate 3 — graphs, MTP, two full GSM8K runs — was measured here, so raising it is
+  # a change to re-verify rather than a free win. Cost is a smaller KV pool, which
+  # matters for gate 4: context and gmu compete for the same memory.
   #
   # 0.85 was itself MEASURED: at 0.87 the first TP2 boot attempt died with
   #   ValueError: Free memory on device cuda:0 (105.72/121.63 GiB) on startup is less
@@ -103,20 +107,25 @@ defaults:
   # dual-Spark report near 95K). Gate 4 is where we find OUR number — raise this in steps
   # and record where it breaks. Do not open at 262K.
   max_model_len: 32768
-  # 32. MEASURED: at 16, aggregate decode saturated at ~180 tok/s and concurrency
-  # 32/64 added nothing but latency (TTFR 1.55s -> 7.2s -> 18.5s) because requests
-  # queued rather than ran. Raising this is the direct test of whether decode
-  # scales past 180.
+  # 4, deliberately LOW — this recipe targets the coding-agent scenario (2-4 streams,
+  # large context), not max aggregate throughput. The concurrency ladder was measured
+  # on the way here and is recorded so it is not re-run: at 16, aggregate decode
+  # saturated at ~180 tok/s and 32/64 added nothing but latency (TTFR 1.55s -> 7.2s
+  # -> 18.5s) because requests queued rather than ran; at 32 the engine genuinely held
+  # 32 sequences and still ran 240 requests with zero stalls.
+  # A separate chat3d-shaped recipe with a high max_num_seqs is the right home for
+  # that regime — do not raise this one to chase aggregate tok/s.
   # Still well under the official 256: GDN state is PER SEQUENCE (~108 MiB/seq at
   # TP1), so this is a memory knob as much as a throughput one — and the documented
   # GDN decode-kernel hang lives at concurrency ~32, which VLLM_GDN_DECODE_KERNEL=
   # triton is what protects against (verified: a 32/64 sweep completed 240 requests
   # with zero stalls).
   max_num_seqs: 4
-  # 2048, halved from 4096 for GATE 3. The inductor autotune workspace scales with
-  # this: with graphs enabled at 4096 the compile step died asking for 47.69 GiB
-  # with ~45 GiB free. Halving it is the targeted lever — changing gmu as well
-  # would leave us unable to say which one mattered. Next step down is 1024.
+  # 2048. As with gmu above, this did NOT fix the gate-3 autotune OOM and the comment
+  # here used to claim it would. MEASURED: the inductor autotune asked for a FIXED
+  # 47.69 GiB, BYTE-IDENTICAL at max_num_batched_tokens 4096 and 2048 — the workspace
+  # is not driven by batched tokens. Hypothesis falsified; do not try 1024.
+  # It stays at 2048 because it is what every measurement since gate 3 was taken at.
   max_num_batched_tokens: 2048
   served_model_name: qwen3.8-flash-next
 
@@ -171,20 +180,38 @@ env:
 #   max_num_batched_tokens (4096 -> 2048 -> 1024; the GLM-5.2 indexer prewarm had this
 #   exact shape) and an explicit cudagraph_capture_sizes list.
 #
-# WHY --compilation-config DISABLES COMPILE-TIME AUTOTUNE. With CUDA graphs on, boot
-#   died in `generate_and_run_autotune_block` (inductor wrapper codegen) asking for a
-#   FIXED 47.69 GiB. Two hypotheses were tested and BOTH FALSIFIED, so do not retry them:
+# THERE IS NO --compilation-config HERE, AND THAT IS DELIBERATE. On vLLM 0.28 this
+#   recipe carried
+#     --compilation-config '{"inductor_compile_config":{"triton.autotune_at_compile_time":false}}'
+#   because with CUDA graphs on, boot died in `generate_and_run_autotune_block`
+#   (inductor wrapper codegen) asking for a FIXED 47.69 GiB. Two hypotheses were tested
+#   and BOTH FALSIFIED, so do not retry them if it ever comes back:
 #     - max_num_batched_tokens 4096 -> 2048: allocation byte-identical (47.69 GiB).
 #       The workspace is NOT driven by batched tokens.
 #     - gpu_memory_utilization 0.85 -> 0.80: free memory UNCHANGED (44.63 -> 44.50 GiB).
 #       gmu governs the KV pool, which is not allocated until AFTER compilation, so it
 #       cannot affect what is free during compile.
-#   What is resident at compile time is the ~77 GiB of weights, leaving ~44.5 GiB — and
-#   the autotune wants 47.69 GiB, so it can never fit by starving it. The fix is to stop
-#   it benchmarking at compile time: `triton.autotune_at_compile_time: false` defers
-#   kernel selection to first execution. CUDA graphs are KEPT — this disables the
-#   compile-time benchmarking pass, not graph capture.
-#   NOTE this is a DIFFERENT autotune from --no-enable-flashinfer-autotune above.
+#   ~77 GiB of weights are resident at compile time leaving ~44.5 GiB against a fixed
+#   47.69 GiB request, so it could never fit by starving it.
+#
+#   ON 0.29 THE OOM IS GONE. Removed and re-tested on hardware 2026-09-15: boot reaches
+#   `Breakable CUDA graph enabled`, captures PIECEWISE 5 + FULL 3, init engine 47.02 s,
+#   KV 19.96 GiB / 898,228 tokens. No 47.69 GiB allocation anywhere in the log.
+#
+#   AND IT WAS NEVER COSTING THROUGHPUT. The suspicion that deferring kernel selection
+#   depressed single-stream decode — and explained part of the gap to SGLang's published
+#   64 tok/s — is FALSIFIED. Paired sweeps, coding-shaped pp4096/tg1024, MTP on:
+#            conc 1        conc 2        conc 4
+#     with    38.67        54.42         74.46
+#     w/o     38.49/37.69  56.20/56.95   83.39/80.74
+#   Single-stream moved less than the +/-2-3% run-to-run spread measured by repeating
+#   the sweep on one deployment. Prefill is unchanged (a 5% dip in the first run did not
+#   reproduce in the second — it was noise, not a cost). Concurrency 4 gains ~10%, which
+#   is ~3x the spread and looks real, but rests on a single control sample.
+#   So: dropped because it is no longer NEEDED, not because it was expensive. Look
+#   elsewhere for the SGLang gap.
+#   NOTE this was a DIFFERENT autotune from --no-enable-flashinfer-autotune above, which
+#   is still disabled.
 #
 # --reasoning-parser qwen3 is REQUIRED: without it the reasoning trace and a stray
 #   </think> leak into `content`.
@@ -202,7 +229,6 @@ command: |
       --gpu-memory-utilization {gpu_memory_utilization} \
       --enable-chunked-prefill \
       --no-enable-flashinfer-autotune \
-      --compilation-config '{"inductor_compile_config":{"triton.autotune_at_compile_time":false}}' \
       --enable-auto-tool-choice \
       --tool-call-parser qwen3_xml \
       --reasoning-parser qwen3 \
