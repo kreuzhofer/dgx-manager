@@ -1,8 +1,28 @@
-# @dgxrun/radixark-qwen3.8-flash-next-nvfp4-2x — Qwen3.8-Flash-Next at TP2 on TWO Sparks.
+# @dgxrun/radixark-qwen3.8-flash-next-nvfp4-c4-128k-mtp-2x — Qwen3.8-Flash-Next at TP2
+# on TWO Sparks. LONG-CONTEXT / LOW-CONCURRENCY variant, for coding agents.
 #
-# GATE-1 CONFIGURATION for #91. This is the "does it boot, is it correct" shape, not a
-# tuned serving recipe: the context window is deliberately small and prefix caching is
-# off. Raise things only after the gates pass, one at a time, and record what moved.
+# THE SCENARIO. A local coding agent: 2-4 streams at most, but a large window, because
+# the context holds a repository rather than a conversation. Optimised for single- and
+# dual-stream tokens/sec and for the biggest window that is free.
+#
+# THE SIBLING is @dgxrun/radixark-qwen3.8-flash-next-nvfp4-c16-32k-mtp-2x, the chat3d shape:
+# many short requests, aggregate throughput over per-stream latency. Same container,
+# model, TP topology and correctness flags — only the serving knobs differ. Only one can
+# hold the two-node pool at a time, and they publish the SAME served_model_name, so
+# deploy one in place of the other rather than both (see the note on that below).
+#
+# WHY THE SPLIT EXISTS, measured rather than assumed (#91 gate 4): the cost of context is
+# a CLIFF. Raising max_model_len taxes EVERY request, including short ones that never
+# touch the window, because the per-step overhead is sized to the configured maximum:
+#     32768    decode 36.42 / 57.42 / 79.38 tok/s at concurrency 1/2/4
+#    131072    decode 38.21 / 53.10 / 84.35   -> noise, the window is FREE
+#    262144    decode 30.98 / 47.91 / 57.95   -> -15% to -27%, and rank 1 hits 0 GiB free
+# So 128K costs nothing and 256K costs a quarter of the throughput. That is why this is
+# a separate recipe from the concurrent one rather than a flag on it.
+#
+# ALL GATES PASSED (#91). Boots at TP2, GSM8K 0.9674 flexible-extract over 1319 items,
+# CUDA graphs + MTP, needle retrieval verified at 127,584 tokens and at depths
+# 0.05/0.50/0.95 at 223,824. This is a tuned serving recipe, not a bring-up shape.
 #
 # WHAT THIS MODEL IS. `Qwen4ExpForConditionalGeneration` / `model_type: qwen4_exp` —
 # Qwen's preview of the Qwen4 architecture, and NOT a scaled-up Qwen3.8-27B (that is
@@ -36,11 +56,17 @@
 # Both measured on SGLang, so treat them as a cross-engine reference, not a like-for-like
 # vLLM baseline. A large shortfall means something here is wrong; an exact match is luck.
 #
-# CONTAINER. `:2026090501` is REQUIRED and is not interchangeable with the `:2026081501`
+# CONTAINER. `:2026091302` (vLLM 0.29.1rc1). NOT interchangeable with the `:2026081501`
 # used by the 27B recipes — that image reports `Qwen4Exp supported: False` (verified on
 # spark-01: it carries only the Qwen3_5 family). dgxrun never pulls, so the image must be
 # present on BOTH nodes before deploying, or launch fails fast with "image not found
-# locally". vLLM main in this image is 309 commits past the enabling merge vllm#53896.
+# locally".
+# The earlier `:2026090501` (vLLM 0.28) also works but needs the now-retired
+# `qwen4exp-ple-fp8-gate` mod to load the PLE table; 0.29 handles it natively. Do not
+# mix: the mod hard-fails on 0.29 because its patcher asserts 0.28 source text.
+# KNOWN BREAKAGE IN 0.29, harmless here: the b12x `instanttensor` loader plugin fails to
+# import (`file_source_tensor`). vLLM logs it and continues. It matters only for recipes
+# that pass --load-format instanttensor, which this one does not.
 #
 # NOT SET HERE, ON PURPOSE — dgxrun supplies them:
 #   --distributed-executor-backend mp   (dgxrun injects it, and REWRITES it if present)
@@ -52,7 +78,7 @@ model: RadixArk/Qwen3.8-Flash-Next-NVFP4
 runtime: vllm
 container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:2026091302
 cluster_only: true
-description: Qwen3.8-Flash-Next NVFP4 at TP2 on two Sparks — #91 gate-1 config, not yet a tuned serving recipe
+description: Qwen3.8-Flash-Next NVFP4 at TP2 — long-context coding-agent shape (128K window, 4 streams, MTP)
 
 # THE PLE QUANT GATE. This checkpoint's body is NVFP4 but its PLE n-gram table is
 # FP8 with one global BF16 scale — VERIFIED from the safetensors headers: 128
@@ -163,6 +189,11 @@ defaults:
   # is not driven by batched tokens. Hypothesis falsified; do not try 1024.
   # It stays at 2048 because it is what every measurement since gate 3 was taken at.
   max_num_batched_tokens: 2048
+  # SHARED with the c16-32k sibling, following the house convention (all five GLM-5.2
+  # variants publish `glm-5.2`). The gateway pools replicas by published name, so if both
+  # variants were ever deployed at once a request could land on either and silently get a
+  # 32768 window instead of 131072. Two Sparks and TP2 make that impossible today — only
+  # one variant fits — but split the names before that stops being true.
   served_model_name: qwen3.8-flash-next
 
 env:

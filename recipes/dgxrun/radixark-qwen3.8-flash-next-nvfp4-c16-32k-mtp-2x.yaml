@@ -1,0 +1,164 @@
+# @dgxrun/radixark-qwen3.8-flash-next-nvfp4-c16-32k-mtp-2x — Qwen3.8-Flash-Next at TP2 on TWO
+# Sparks. HIGH-CONCURRENCY / MODEST-CONTEXT variant, for chat3d.
+#
+# THE SCENARIO. chat3d's prompt-to-CAD traffic: many short-to-medium requests at once,
+# where aggregate tokens/sec across the pool matters more than any one stream's latency,
+# and a 32K window is ample. The opposite trade to the sibling recipe.
+#
+# THE SIBLING is @dgxrun/radixark-qwen3.8-flash-next-nvfp4-c4-128k-mtp-2x, the coding-agent
+# shape: 128K window, 4 streams, tuned for single-stream speed. Read that file first — it
+# carries the full background on this model (why TP2, why NVFP4 and never Int4, the PLE
+# quant gate, the container requirement, and every flag whose OMISSION is load-bearing).
+# This file documents only what DIFFERS.
+#
+# Only one variant can hold the two-node pool at a time, and both publish the same
+# served_model_name, so deploy this IN PLACE OF the other rather than alongside it.
+#
+# WHY A SEPARATE RECIPE RATHER THAN A FLAG (#91 gate 4). The cost of context is a CLIFF,
+# and it is charged on EVERY request — including short ones that never touch the window —
+# because the per-step overhead is sized to the configured maximum. Measured at gmu 0.70,
+# coding-shaped pp4096/tg1024, decode tok/s at concurrency 1/2/4:
+#     32768   36.42 / 57.42 / 79.38
+#    131072   38.21 / 53.10 / 84.35   (noise — 4x the window is free)
+#    262144   30.98 / 47.91 / 57.95   (-15% to -27%)
+# 32768 here is not a limitation, it is the point: this variant spends nothing on a window
+# chat3d does not use, and spends the memory on concurrent sequences instead.
+#
+# DIFFERENCES FROM THE SIBLING, each one measured:
+#   - max_num_seqs 4 -> 16
+#   - max_model_len 131072 -> 32768
+#   - gpu_memory_utilization 0.70 -> 0.80
+#   - MTP: KEPT. See MEASURED below — the obvious prior was wrong.
+# Everything else — container, model, TP2, the correctness flags, the env block — is
+# identical to the sibling and must stay that way.
+
+recipe_version: "2"
+runner: dgxrun
+model: RadixArk/Qwen3.8-Flash-Next-NVFP4
+runtime: vllm
+container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:2026091302
+cluster_only: true
+description: Qwen3.8-Flash-Next NVFP4 at TP2 — chat3d shape (32K window, 16 concurrent streams, MTP)
+
+# NO mods. The `qwen4exp-ple-fp8-gate` mod was required on :2026090501 (vLLM 0.28) and
+# would HARD-FAIL here: its patcher asserts 0.28 source text that 0.29 no longer has.
+# 0.29 reads `ple_embedding_dtype: "float8_e4m3fn"` from the checkpoint natively.
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 2
+  # 0.80, NOT the sibling's 0.70. Those are two different constraints, not a preference.
+  # The sibling lowers gmu to buy HOST headroom for a 128K prefill working set — at gmu
+  # 0.80 a 223,824-token prompt was OOM-killed by the kernel. At 32768 no prompt can get
+  # near that, so the headroom is not needed and the memory is better spent on KV for 16
+  # concurrent sequences.
+  # The arithmetic: 16 seqs x 32768 = 524,288 tokens worst case. gmu 0.70 gives only
+  # 336,353 (10.26x) — it would cap real concurrency BELOW max_num_seqs. gmu 0.80 MEASURED
+  # here gives 18.58 GiB = 852,931 tokens (26.03x), which covers 16 with room to spare.
+  # (Without MTP it is 22.2 GiB / 1,251,737 / 38.20x — the drafter costs ~3.6 GiB of KV,
+  # which is affordable at this window and pays for itself; see the MTP note below.)
+  # Do not raise to 0.85+: at 0.87 the first TP2 boot died because vLLM's startup guard
+  # compares gmu*TOTAL against CUDA-VISIBLE free, which on GB10 sits ~7 GiB below MemFree.
+  gpu_memory_utilization: 0.80
+  # 32768 — deliberately modest, see the cliff note in the header. This is the window
+  # chat3d actually uses, and paying for more would tax every request.
+  max_model_len: 32768
+  # 16. MEASURED on this cluster: aggregate decode saturates at ~180 tok/s from
+  # concurrency 16, and 32/64 add nothing but latency (TTFR 1.55s -> 7.2s -> 18.5s)
+  # because requests queue rather than run. 16 is the knee, not a guess.
+  # max_num_seqs 32 was also booted and ran 240 requests with ZERO stalls, which is how we
+  # know the documented GDN decode-kernel hang at ~32 resident sequences is genuinely
+  # prevented by VLLM_GDN_DECODE_KERNEL=triton below — but it bought no throughput.
+  # Note GDN state is PER SEQUENCE (~108 MiB/seq at TP1), so this is a memory knob too.
+  max_num_seqs: 16
+  # 2048. Do NOT assume this is a lever for compile-time memory: at gate 3 the inductor
+  # autotune allocation was BYTE-IDENTICAL at 4096 and 2048 (47.69 GiB). That hypothesis
+  # is falsified. It stays at 2048 because it is where every measurement was taken.
+  max_num_batched_tokens: 2048
+  # SHARED with the c4-128k sibling, following the house convention (all five GLM-5.2
+  # variants publish `glm-5.2`). The gateway pools replicas by published name, so if both
+  # variants were ever deployed at once a request could land on either and silently get a
+  # different context window. Two Sparks and TP2 make that impossible today — only one
+  # variant fits — but split the names before that stops being true.
+  served_model_name: qwen3.8-flash-next
+
+env:
+  # IDENTICAL to the sibling. Every entry here is load-bearing; see that file for why.
+  # sm_121a everywhere — the Sparks need the arch-specific build path.
+  TORCH_CUDA_ARCH_LIST: "12.1a"
+  CUTE_DSL_ARCH: "sm_121a"
+  # The default CUDA GDN decode kernel DETERMINISTICALLY HANGS the engine at
+  # concurrency ~32 with FP8 GDN projections. No error — requests just stall.
+  # This variant is the one that actually runs at that concurrency, so this is not
+  # optional here.
+  VLLM_GDN_DECODE_KERNEL: "triton"
+  VLLM_USE_DEEP_GEMM: "0"
+  # Keep JIT/autotune compile parallelism low; these boxes OOM before they run out of CPU.
+  MAX_JOBS: "2"
+  FLASHINFER_NVCC_THREADS: "1"
+  # First boot on a new arch can spend a LONG time in autotune/JIT and look like a hang.
+  # Do not shorten this because the log has gone quiet — that is the documented trap.
+  VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+
+# FLAGS THAT FAIL SILENTLY. The full catalogue lives in the sibling recipe; the ones that
+# bear on THIS variant specifically:
+#   --limit-mm-per-prompt '{"image":8}' is KEPT. chat3d is a prompt-to-CAD app and sends
+#     reference images; dropping it would silently cap multimodal input at 1 image.
+#   --reasoning-parser qwen3 is REQUIRED: without it the reasoning trace and a stray
+#     </think> leak into `content`.
+#   reasoning_effort MUST be pinned to medium: the chat template defaults to `xhigh`,
+#     which reasons past generous caps and returns EMPTY content.
+#   NO --kv-cache-dtype. The QSA backend declares supported_kv_cache_dtypes
+#     ["auto","bfloat16"]; NVFP4 KV fails SILENTLY on GB10 (three measurements).
+#   NO --enforce-eager. CUDA graphs are the throughput fix on this family and are no
+#     longer blocked — 0.29 boots with them and without the 0.28 autotune workaround.
+#   PREFIX CACHING IS ON and omitting a flag does not disable it: vLLM V1 defaults it to
+#     ON. That is WANTED here — chat3d's traffic shares system prompts, so cache hits are
+#     free throughput. `--mamba-cache-mode align` is mandatory with it and vLLM applies it
+#     automatically for this architecture.
+
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      --tensor-parallel-size {tensor_parallel} \
+      --max-model-len {max_model_len} \
+      --max-num-seqs {max_num_seqs} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --enable-chunked-prefill \
+      --no-enable-flashinfer-autotune \
+      --enable-auto-tool-choice \
+      --tool-call-parser qwen3_xml \
+      --reasoning-parser qwen3 \
+      --default-chat-template-kwargs '{"reasoning_effort":"medium"}' \
+      --limit-mm-per-prompt '{"image":8}' \
+      --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
+
+# MTP IS KEPT AT HIGH CONCURRENCY, AND THAT IS NOT THE OBVIOUS ANSWER.
+# The sibling GLM-5.2 concurrency recipe (zai-glm-5.2-quanttrio-int4-c16-64k-4x) REMOVES
+# MTP with sound reasoning: speculative decoding wins at batch=1 because decode is
+# memory-bound and spare compute verifies drafts for free, but should LOSE at high batch
+# because the engine becomes compute-bound and rejected drafts burn compute other requests
+# need. That prior was tested here rather than inherited, and it is WRONG for this model.
+#
+# A/B on this exact config, pp512/tg128, decode tok/s:
+#     conc     MTP on    MTP off    delta
+#        1      39.17      25.38    +35.2%
+#        4      83.68      77.28     +7.7%
+#       16     199.14     177.31    +11.0%
+#       32     201.49     178.16    +11.6%
+# MTP wins at EVERY rung, including past saturation. Draft acceptance under batch load is
+# 74.8% (vs 93.8% single-stream), so drafts are indeed rejected more when batching — just
+# not enough to overturn the win at k=1, where a rejected draft costs one wasted token
+# rather than several.
+#
+# THE ONE REAL COST is time-to-first-token, and if chat3d cares more about responsiveness
+# than aggregate throughput this is the knob to flip:
+#     conc 1    TTFR 356 ms with MTP vs 248 ms without
+#     conc 16   TTFR 1946 ms with MTP vs 1495 ms without
+# Turning it off also returns ~3.6 GiB to KV. Removing the flag needs a DELETE + recreate,
+# not a restart — a restart replays the stored recipe blob and can only change placeholder
+# VALUES, not add or remove flags.
