@@ -50,7 +50,7 @@ recipe_version: "2"
 runner: dgxrun
 model: RadixArk/Qwen3.8-Flash-Next-NVFP4
 runtime: vllm
-container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:2026090501
+container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:2026091302
 cluster_only: true
 description: Qwen3.8-Flash-Next NVFP4 at TP2 on two Sparks — #91 gate-1 config, not yet a tuned serving recipe
 
@@ -62,8 +62,16 @@ description: Qwen3.8-Flash-Next NVFP4 at TP2 on two Sparks — #91 gate-1 config
 # ModelOptNvFp4Config, so the PLE is built UNQUANTIZED and the load dies with
 #   ValueError: There is no module or parameter named 'ngram_embedding.weight_scale'
 # (observed here 2026-09-14; upstream vllm#54765). The mod widens that gate.
-mods:
-  - qwen4exp-ple-fp8-gate
+# NO mods. The `qwen4exp-ple-fp8-gate` mod was REQUIRED on :2026090501 (vLLM 0.28)
+# and must NOT be carried here. vLLM 0.29 restructured the PLE code into
+# `nvidia/ngram_embedding.py` and added an explicit `ple_embedding_dtype` hook that
+# short-circuits to the FP8 embedding method BEFORE any quant-config logic — and this
+# checkpoint already declares `ple_embedding_dtype: "float8_e4m3fn"` in text_config.
+# So 0.29 selects the right method natively. Re-adding the mod would HARD-FAIL every
+# deploy: its patcher asserts 0.28 source text that no longer exists, so run.sh exits 1.
+# NOTE upstream issue vllm#54765 is still OPEN and `ModelOptNvFp4Config` appears nowhere
+# in the 0.29 code — the symptom was fixed by a different route. Do not judge this by
+# the issue state.
 
 defaults:
   port: 8000
@@ -126,10 +134,6 @@ env:
   # First boot on a new arch can spend a LONG time in autotune/JIT and look like a hang.
   # Do not shorten this because the log has gone quiet — that is the documented trap.
   VLLM_ENGINE_READY_TIMEOUT_S: "3600"
-  # Arms the mod above. Deliberately opt-in: an NVFP4 checkpoint with a genuinely
-  # BF16 PLE would have that table misread as FP8, producing fluent WRONG output
-  # rather than an error. Only set it where the PLE dtype has been verified.
-  QWEN4EXP_PLE_FP8_GATE: "1"
 
 # FLAGS THAT FAIL SILENTLY — the omissions below are load-bearing. Each one produces
 # wrong behaviour with NO error, so "it started and answered" does not clear any of them.
