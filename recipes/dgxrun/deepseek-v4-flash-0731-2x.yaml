@@ -55,6 +55,17 @@ cluster_only: true
 # shipped in the agent bundle; a node whose agent predates it refuses the deploy.
 mods:
   - instanttensor-hybrid-draft-loader
+# DO NOT MOVE THIS RECIPE TO A vLLM 0.29 IMAGE WITHOUT RE-TESTING THE LOADER.
+# Observed 2026-09-15 on ghcr.io/spark-arena/dgx-vllm-eugr-nightly:2026091302
+# (vLLM 0.29.1rc1.dev17+gd2d649e67), while booting an unrelated recipe:
+#   File ".../b12x/integration/vllm/loader.py", line 16
+#     from vllm.model_executor.model_loader.weight_utils import (
+#   ImportError: cannot import name 'file_source_tensor'
+# vLLM logs the plugin failure and CONTINUES, so a recipe that does not ask for
+# instanttensor boots fine and the breakage is invisible. This recipe DOES ask for
+# it (--load-format instanttensor below), so the same image would leave it either
+# failing or silently falling back. The b12x package needs a build matching 0.29's
+# weight_utils before this tag moves.
 
 defaults:
   port: 8000
