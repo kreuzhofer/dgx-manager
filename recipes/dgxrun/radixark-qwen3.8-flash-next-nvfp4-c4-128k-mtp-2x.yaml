@@ -31,14 +31,30 @@
 # Also note `Qwen/Qwen3.8-Flash` does not exist as open weights — that is the Cloud API
 # product; the open checkpoint is `Qwen3.8-Flash-Next`.
 #
-# WHY TP2 AND NOT TP1/TP4. 180 B params, and 28 % of the checkpoint is a 51.2 B n-gram
+# WHY TP2 AND NOT TP1/TP4. 180 B params, and 38 % of the checkpoint (47.7 of 125.9 GiB,
+# measured) is a 51.2 B n-gram
 # (PLE) embedding table. That table is a `VocabParallelEmbedding` — SHARDED by TP, not
 # replicated — so tensor parallelism is what makes it fit at all:
 #
-#     1 Spark  NVFP4   101.7 GiB/rank   nothing left for KV; PLE offload needs unmerged vllm#53899
-#     2 Sparks NVFP4   ~63    GiB/rank   <-- this recipe (third-party dual-Spark ledger: 62.5 GB/node)
-#     2 Sparks FP8      86.4  GiB/rank   also fits; NVFP4 is staged and leaves more KV room
-#     4 Sparks BF16     83.8  GiB/rank   costs the whole cluster
+#     1 Spark  NVFP4   125.9 GiB/rank   IMPOSSIBLE — see below
+#     2 Sparks NVFP4    63.0 GiB/rank   <-- this recipe; +12.6 non-torch = 75.5 consumed, MEASURED
+#     2 Sparks FP8      86.4 GiB/rank   also fits; NVFP4 is staged and leaves more KV room
+#     4 Sparks BF16     83.8 GiB/rank   costs the whole cluster
+#
+# TP1 IS NOT A TRADE-OFF, IT IS ARITHMETICALLY IMPOSSIBLE. An earlier version of this
+# table said "1 Spark 101.7 GiB/rank, nothing left for KV; PLE offload needs unmerged
+# vllm#53899", which was an inherited third-party figure and is WRONG in two ways.
+#   1. 101.7 is BELOW the checkpoint itself. Measured from the safetensors index, total
+#      weights are 125.9 GiB (63.3 MoE expert shards + 47.7 PLE FP8 + 14.9 bf16 body).
+#      At TP1 nothing is sharded, so all 125.9 must be resident — that is 4.3 GiB over
+#      the 121.63 GiB device TOTAL and 19.7 GiB over the ~106.2 GiB actually free after
+#      the CUDA context. It fails at load, not at some context length.
+#   2. PLE OFFLOAD CANNOT RESCUE IT ON A SPARK. Offloading the 47.7 GiB table to "host
+#      memory" buys real capacity on a discrete GPU. GB10 has ONE coherent 128 GB pool
+#      shared by CPU and GPU, so there is nowhere to offload TO — it relocates bytes
+#      within the same DRAM. Do not spend time on vllm#53899 for this hardware.
+# The TP2 arithmetic closes against reality: 125.9/2 = 63.0 weights + ~12.6 non-torch
+# (CUDA context, NCCL buffers) = 75.6, and vLLM's boot line reports 75.53 GiB consumed.
 #
 # Pipeline parallel is HARD-REFUSED in code (`NotImplementedError`, models/config.py:879)
 # and TP must be a power of two, so TP2 and TP4 are the only options that exist.
