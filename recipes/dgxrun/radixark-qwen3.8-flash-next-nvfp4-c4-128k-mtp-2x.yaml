@@ -49,10 +49,17 @@
 #      At TP1 nothing is sharded, so all 125.9 must be resident — that is 4.3 GiB over
 #      the 121.63 GiB device TOTAL and 19.7 GiB over the ~106.2 GiB actually free after
 #      the CUDA context. It fails at load, not at some context length.
-#   2. PLE OFFLOAD CANNOT RESCUE IT ON A SPARK. Offloading the 47.7 GiB table to "host
-#      memory" buys real capacity on a discrete GPU. GB10 has ONE coherent 128 GB pool
-#      shared by CPU and GPU, so there is nowhere to offload TO — it relocates bytes
-#      within the same DRAM. Do not spend time on vllm#53899 for this hardware.
+#   2. PLE OFFLOAD TO HOST MEMORY CANNOT RESCUE IT. Offloading the 47.7 GiB table to
+#      "host memory" buys real capacity on a discrete GPU. On GB10 it cannot, and this is
+#      measurable rather than theoretical: /proc/meminfo MemTotal is 121.63 GiB and the
+#      CUDA device total vLLM reports is ALSO 121.63 GiB. They are the same bytes. There
+#      is no host pool sitting outside the device budget to move the table into.
+#      CAVEAT, so this is not overstated: the research doc cites a third-party 1-Spark
+#      result at 36.5 tok/s using vllm#53899. If host and device are one pool, that can
+#      only be paging the table to STORAGE, not to host DRAM — a real route, but a
+#      different trade (NVMe-speed sparse lookups) and one we have closed anyway, since
+#      swap is disabled fleet-wide. Treat single-Spark as "needs an unmerged PR AND swap
+#      re-enabled AND a large speed penalty", not as a configuration we can reach.
 # The TP2 arithmetic closes against reality: 125.9/2 = 63.0 weights + ~12.6 non-torch
 # (CUDA context, NCCL buffers) = 75.6, and vLLM's boot line reports 75.53 GiB consumed.
 #
