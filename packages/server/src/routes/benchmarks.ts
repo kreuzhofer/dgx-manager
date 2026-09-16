@@ -278,6 +278,18 @@ benchmarksRouter.post("/", async (req: Request, res: Response) => {
   if (!presetId && !customConfig) {
     return res.status(400).json({ error: "presetId or config is required" });
   }
+  // REJECT rather than silently prefer one (#20 §3). The preset branch below
+  // overwrites `config` wholesale, so a caller passing both got their config
+  // accepted and then discarded — a run lost to `numConcurrent` landing inside
+  // `config` alongside a presetId, with the stored record reading
+  // `numConcurrent: None`. Accepted-and-ignored is worse than refused: the
+  // caller has no way to tell it happened.
+  if (presetId && customConfig) {
+    return res.status(400).json({
+      error: "presetId and config are mutually exclusive — pass one. " +
+        "Per-run overrides (numConcurrent, timeout, systemInstruction) are top-level body fields.",
+    });
+  }
 
   const deployment = await prisma.deployment.findUnique({
     where: { id: deploymentId },

@@ -1,3 +1,20 @@
+/**
+ * Requests in flight when nothing says otherwise.
+ *
+ * This used to be 1, which serialized every run launched without an explicit
+ * override — and said nothing about it. MEASURED twice, from two different
+ * callers: a GPQA run at 194.8 s/item with a 9h28m ETA became 27.1 s/item at
+ * numConcurrent 8 (7.2x), and another at 404 s/item became ~103 s/item at 16.
+ * Nothing in the config, logs or UI distinguished the serialized run from a
+ * healthy one: no errors, GPU at 96%, steady progress (#20 §3).
+ *
+ * 8 rather than higher because the endpoint decides the real ceiling — a 32k
+ * reservation had vLLM admitting only ~8 of a requested 16 — so a bigger number
+ * buys queueing, not throughput. Override per run to match a deployment's
+ * actual --max-num-seqs.
+ */
+export const DEFAULT_NUM_CONCURRENT = 8;
+
 export type LatencyMode = "api" | "generation" | "none";
 
 export type BenchmarkConfig = {
@@ -142,6 +159,11 @@ function accuracyPresets(): BenchmarkPreset[] {
       applyChatTemplate: true,
       reasoning: true,
       seed: 42,
+      // Carried EXPLICITLY so the stored config records what the run used. It was
+      // absent from every preset, which meant an API caller who did not pass the
+      // override got a fully serialized run and no indication of it — 7.2x slower,
+      // and `numConcurrent: None` in the record (#20 §3).
+      numConcurrent: DEFAULT_NUM_CONCURRENT,
     };
     out.push({
       id: `acc-${b.idBase}-quick`,

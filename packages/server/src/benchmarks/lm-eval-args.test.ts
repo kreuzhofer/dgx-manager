@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AccuracyConfig } from "./presets.js";
+import { DEFAULT_NUM_CONCURRENT } from "./presets.js";
 import { buildLmEvalArgs, DEFAULT_TIMEOUT_S } from "./lm-eval-args.js";
 
 const base: AccuracyConfig = {
@@ -25,7 +26,7 @@ describe("buildLmEvalArgs", () => {
     const args = buildLmEvalArgs(base, target);
     expect(valueAfter(args, "--model")).toBe("local-chat-completions");
     expect(valueAfter(args, "--model_args")).toBe(
-      `base_url=http://10.0.0.1:8000/v1/chat/completions,model=m,num_concurrent=1,timeout=${DEFAULT_TIMEOUT_S},tokenized_requests=False`,
+      `base_url=http://10.0.0.1:8000/v1/chat/completions,model=m,num_concurrent=${DEFAULT_NUM_CONCURRENT},timeout=${DEFAULT_TIMEOUT_S},tokenized_requests=False`,
     );
     expect(valueAfter(args, "--tasks")).toBe("ifeval");
     expect(valueAfter(args, "--gen_kwargs")).toBe("max_gen_toks=2048");
@@ -59,16 +60,19 @@ describe("num_concurrent plumbing", () => {
   const base: AccuracyConfig = { tasks:["ifeval"], primaryTask:"ifeval", primaryMetric:"x", limit:null, numFewshot:null, maxGenToks:2048, applyChatTemplate:true, reasoning:false, seed:1 };
   const tgt = { baseUrl:"http://h/v1", modelName:"glm-5.2", outputDir:"/o" };
   const ma = (cfg: AccuracyConfig) => { const a=buildLmEvalArgs(cfg, tgt); return a[a.indexOf("--model_args")+1]; };
-  it("defaults to num_concurrent=1 when unset", () => {
-    expect(ma(base)).toContain("num_concurrent=1");
+  // Was 1, which silently serialized every run launched without an override:
+  // 194.8 s/item vs 27.1 at 8 on the same GPQA run, with nothing distinguishing
+  // the two in the config, the logs or the UI (#20 §3).
+  it(`defaults to num_concurrent=${DEFAULT_NUM_CONCURRENT} when unset`, () => {
+    expect(ma(base)).toContain(`num_concurrent=${DEFAULT_NUM_CONCURRENT}`);
   });
   it("uses the configured numConcurrent", () => {
     expect(ma({...base, numConcurrent:16})).toContain("num_concurrent=16");
   });
-  it("ignores a bogus numConcurrent (falls back to 1)", () => {
-    expect(ma({...base, numConcurrent:0})).toContain("num_concurrent=1");
-    expect(ma({...base, numConcurrent:-4})).toContain("num_concurrent=1");
-    expect(ma({...base, numConcurrent:2.5})).toContain("num_concurrent=1");
+  it("ignores a bogus numConcurrent (falls back to the default)", () => {
+    expect(ma({...base, numConcurrent:0})).toContain(`num_concurrent=${DEFAULT_NUM_CONCURRENT}`);
+    expect(ma({...base, numConcurrent:-4})).toContain(`num_concurrent=${DEFAULT_NUM_CONCURRENT}`);
+    expect(ma({...base, numConcurrent:2.5})).toContain(`num_concurrent=${DEFAULT_NUM_CONCURRENT}`);
   });
 });
 

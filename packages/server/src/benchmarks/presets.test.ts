@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AccuracyConfig, BENCHMARK_PRESETS, BenchmarkConfig, getPreset, listPresets } from "./presets.js";
+import { DEFAULT_NUM_CONCURRENT, AccuracyConfig, BENCHMARK_PRESETS, BenchmarkConfig, getPreset, listPresets } from "./presets.js";
 
 describe("BENCHMARK_PRESETS", () => {
   it("exposes the five throughput presets plus four tool-eval presets by id", () => {
@@ -225,3 +225,20 @@ describe("answer-format preset variant", () => {
   });
 });
 
+
+describe("accuracy presets carry an explicit concurrency (#20 §3)", () => {
+  // The value was absent from every accuracy preset, so a caller who did not
+  // pass the top-level override ran fully serialized AND the stored config read
+  // `numConcurrent: None` — nothing recorded that the run was 7.2x slower than
+  // it needed to be. Carrying it explicitly makes the record self-describing.
+  it("every accuracy preset states numConcurrent", () => {
+    const accuracy = listPresets().filter((p) => p.kind === "accuracy");
+    expect(accuracy.length).toBeGreaterThan(0);
+    for (const p of accuracy) {
+      expect(
+        (p.config as { numConcurrent?: number }).numConcurrent,
+        `${p.id} must state numConcurrent`,
+      ).toBe(DEFAULT_NUM_CONCURRENT);
+    }
+  });
+});

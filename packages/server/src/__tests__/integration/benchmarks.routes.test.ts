@@ -419,6 +419,27 @@ describe("POST /api/benchmarks", () => {
     expect(res.status).toBe(400);
   });
 
+  // #20 §3. The preset branch overwrites `config` wholesale, so passing both
+  // used to be accepted and then silently discarded — a real GPQA run was lost
+  // to `numConcurrent` being nested inside `config` next to a presetId, and the
+  // stored record read `numConcurrent: None` with no other sign. Refusing is
+  // recoverable; accepting-and-ignoring is not.
+  it("400s when presetId and config are both provided, instead of dropping one", async () => {
+    const d = await seedRunningDeployment();
+    const res = await request(makeApp())
+      .post("/api/benchmarks")
+      .send({
+        deploymentId: d.id,
+        presetId: "acc-gsm8k-full",
+        config: { numConcurrent: 16 },
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/mutually exclusive/i);
+    // And it must say where the override actually belongs.
+    expect(res.body.error).toMatch(/top-level/i);
+    expect(await prisma.benchmarkRun.count()).toBe(0);
+  });
+
   it("accepts a fully custom config", async () => {
     const d = await seedRunningDeployment();
     runMock.mockResolvedValue({

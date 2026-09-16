@@ -1,4 +1,5 @@
 import type { AccuracyConfig } from "./presets.js";
+import { DEFAULT_NUM_CONCURRENT } from "./presets.js";
 
 /**
  * Per-request timeout in seconds, always emitted so the effective value is
@@ -20,6 +21,12 @@ import type { AccuracyConfig } from "./presets.js";
  */
 export const DEFAULT_TIMEOUT_S = 1800;
 
+
+/** Sanitize to a positive integer; anything else means "unset". */
+export function resolveNumConcurrent(v: unknown): number {
+  return Number.isInteger(v) && (v as number) > 0 ? (v as number) : DEFAULT_NUM_CONCURRENT;
+}
+
 export type LmEvalTarget = {
   baseUrl: string;   // OpenAI base including /v1 (deployment or strip proxy)
   modelName: string; // vLLM served model id
@@ -37,11 +44,9 @@ export function buildLmEvalArgs(config: AccuracyConfig, target: LmEvalTarget): s
   // containing `,` or `=` could inject extra model_args. Real served ids are HF
   // repo ids so this is acceptable for now — revisit if names become arbitrary.
   // Concurrent requests. Sanitize to a positive int (it's interpolated into the
-  // comma-delimited model_args) and default to 1. Set higher (matching the eval
-  // deployment's --max-num-seqs) to batch requests against the eval recipe.
-  const nc = Number.isInteger(config.numConcurrent) && (config.numConcurrent as number) > 0
-    ? (config.numConcurrent as number)
-    : 1;
+  // comma-delimited model_args). Set higher, matching the eval deployment's
+  // --max-num-seqs, to batch harder against the eval recipe.
+  const nc = resolveNumConcurrent(config.numConcurrent);
   // Same sanitising as numConcurrent: it is interpolated into the comma-delimited
   // model_args, so a non-positive or fractional value falls back to the default.
   const to = Number.isInteger(config.timeout) && (config.timeout as number) > 0

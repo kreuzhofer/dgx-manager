@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterAll } from "vitest";
 import { DEFAULT_TIMEOUT_S } from "./lm-eval-args.js";
+import { DEFAULT_NUM_CONCURRENT } from "./presets.js";
 import { EventEmitter } from "node:events";
 
 // dispatch()'s module-level RUNNER const (in orchestrator.ts) is read once,
@@ -307,7 +308,7 @@ describe("runAccuracy", () => {
       expect(argv[1]).toContain(extra);
     }
     expect(argv[2]).toBe("lm_eval");
-    expect(argv).toContain(`base_url=http://127.0.0.1:5555/v1/chat/completions,model=m,num_concurrent=1,timeout=${DEFAULT_TIMEOUT_S},tokenized_requests=False`);
+    expect(argv).toContain(`base_url=http://127.0.0.1:5555/v1/chat/completions,model=m,num_concurrent=${DEFAULT_NUM_CONCURRENT},timeout=${DEFAULT_TIMEOUT_S},tokenized_requests=False`);
     expect(r.exitCode).toBe(0);
     expect(r.summary?.primaryScore).toBeCloseTo(50, 5);
     expect(closeMock).toHaveBeenCalledTimes(1);
@@ -328,7 +329,7 @@ describe("runAccuracy", () => {
 
     expect(startProxyMock).not.toHaveBeenCalled();
     const [, argv] = spawnMock.mock.calls[0];
-    expect(argv).toContain(`base_url=http://10.0.0.1:8000/v1/chat/completions,model=m,num_concurrent=1,timeout=${DEFAULT_TIMEOUT_S},tokenized_requests=False`);
+    expect(argv).toContain(`base_url=http://10.0.0.1:8000/v1/chat/completions,model=m,num_concurrent=${DEFAULT_NUM_CONCURRENT},timeout=${DEFAULT_TIMEOUT_S},tokenized_requests=False`);
     expect(r.summary).toBeNull(); // no result file → no summary
   });
 
