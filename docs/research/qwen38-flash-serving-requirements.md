@@ -18,6 +18,45 @@ elsewhere on this model.
 
 ---
 
+## ⚠️ MEASURED OUTCOME (2026-09-16) — read this before quoting anything below
+
+This document is the **pre-measurement research** from 2026-09-06 and is kept as written,
+so that what we predicted can be compared with what happened. The model has since been
+brought up, benchmarked and shipped (#91). Where the two disagree, **the measurements win**.
+
+**Shipped.** Two recipes, both TP2 on two Sparks, container `:2026091302` (vLLM 0.29.1rc1):
+
+| recipe | scenario | ctx | max_num_seqs | gmu |
+|---|---|---|---|---|
+| `radixark-qwen3.8-flash-next-nvfp4-c4-128k-mtp-2x` | coding agents | 131072 | 4 | 0.70 |
+| `radixark-qwen3.8-flash-next-nvfp4-c16-32k-mtp-2x` | chat3d | 32768 | 16 | 0.80 |
+
+**Predictions that were WRONG, and the measured value:**
+
+| § | predicted | measured |
+|---|---|---|
+| §1.3 | PLE table is **28 %** of the weights | **38 %** — 47.7 of 125.9 GiB (63.3 GiB MoE experts + 47.7 PLE FP8 + 14.9 bf16 body) |
+| §2.4 / §4.4 | "**One Spark works** — 36.5 tok/s — via vllm#53899 PLE CPU offload" | **Not reachable for us.** `MemTotal` is 121.63 GiB and the CUDA device total is *also* 121.63 GiB — the same bytes — so there is no host pool outside the device budget to offload into. Weights alone (125.9 GiB) exceed the device by 4.3 GiB and exceed free-after-CUDA-context by 19.7 GiB. The third-party result can only be paging to **storage**, and swap is disabled fleet-wide (`SwapTotal 0 kB`). |
+| §2.4 | 1 Spark NVFP4 = **101.7 GiB/rank** | **125.9 GiB** — the figure was below the checkpoint itself, so it could never have been a TP1 load |
+| §4.5 | "**MTP must be OFF** — #55375 not in this image" | Correct *for `:2026090501`*. On `:2026091302` the fix is in (ahead by 341 commits) and **MTP is ON in both recipes**: +35 % single-stream, +11 % at concurrency 16, GSM8K unchanged |
+| §4.x | context: "multi-node Sparks wedge around **95–100 K**" | **No wedge.** Needle retrieval clean through 95,934 and 191,334; 255,684 verified working. The real limit is host memory, not a context wall |
+
+**Things it got right and that saved real time:** the PLE quant-gate failure was predicted in §3.3
+almost exactly; `--reasoning-parser qwen3` and the `reasoning_effort` default; "do not reach for
+Int4"; and TP2 as the correct topology — though for a stronger reason than stated, since TP1 is
+arithmetically impossible rather than merely tight.
+
+**Measured serving numbers** (none of which existed for vLLM multi-Spark before this):
+
+- GSM8K flexible-extract **0.9674** (1319/1319), vs the publisher's SGLang reference 0.9727
+- decode **38.2 / 53.1 / 84.4** tok/s at concurrency 1/2/4 (coding-shaped, 4096/1024)
+- **199 tok/s** aggregate at concurrency 16 (chat-shaped, 512/128)
+- context **131072** shipped; the cost of context is a cliff, not a slope
+
+Full detail: #91, and the inline notes in both recipe files.
+
+---
+
 ## BOTTOM LINE
 
 **The name is wrong; the model exists under a different name; it fits our fleet far more easily
@@ -30,9 +69,9 @@ documented tendency for multi-node Sparks to wedge above ~95–100 K context.**
 |---|---|
 | **"Qwen3.8-Flash" exists as open weights** | **No.** `Qwen/Qwen3.8-Flash` 404s. Qwen3.8-Flash is the **Qwen Cloud API product**. The open-weight model is **`Qwen/Qwen3.8-Flash-Next`** (2026-08-24/26), Qwen's *"experimental preview of the architecture that will underpin Qwen4"*. (§1.1) |
 | **It is the larger sibling of Qwen3.8-27B** | **Yes, and it is a different architecture, not a scaled 27B.** 27B is `Qwen3_5ForConditionalGeneration`, 51.75 GiB. Flash-Next is `Qwen4ExpForConditionalGeneration`, **180.0 B params / 335.28 GiB at BF16**. (§1.2) |
-| **Parameter count is 125 B** | **Partly.** 125 B is the transformer. The checkpoint holds **179,999,981,459** params: 125 B body + **51.2 B n-gram (PLE) table** + 4 B MTP. The table is 28 % of the weights and drives every fit decision. (§1.3, §2.2) |
+| **Parameter count is 125 B** | **Partly.** 125 B is the transformer. The checkpoint holds **179,999,981,459** params: 125 B body + **51.2 B n-gram (PLE) table** + 4 B MTP. The table is 28 % of the weights and drives every fit decision. **[SUPERSEDED: measured 38 % — 47.7 of 125.9 GiB. See MEASURED OUTCOME above.]** (§1.3, §2.2) |
 | **Multimodal; can it take our 8 images per call** | **Yes.** 27-layer vision tower, images and video. vLLM's `limit_mm_per_prompt` defaults to **999 per modality**, so 8 images needs no flag. ~576 tokens per 768 px image `[inference]`. (§1.4) |
-| **Fits on one Spark** | **Only via an unmerged PR.** Smallest published NVFP4 build is 123.6 GiB against ~105 GiB of budget. One Spark works — 36.5 tok/s, third-party measured — but needs **vllm#53899 (PLE CPU offload), still open, not on `main`** (`vllm/v1/ple_offload/` 404s, `VLLM_PLE_CPU_OFFLOAD` absent from `envs.py`). (§2.4, §4.4) |
+| **Fits on one Spark** | **Only via an unmerged PR.** Smallest published NVFP4 build is 123.6 GiB against ~105 GiB of budget. One Spark works — 36.5 tok/s, third-party measured — but needs **vllm#53899 (PLE CPU offload), still open, not on `main`** **[SUPERSEDED: not reachable on our hardware — host and device are the same 121.63 GiB pool. See MEASURED OUTCOME above.]** (`vllm/v1/ple_offload/` 404s, `VLLM_PLE_CPU_OFFLOAD` absent from `envs.py`). (§2.4, §4.4) |
 | **Fits on 2 or 4 Sparks** | **Yes, and it is already being done.** The n-gram table is a `VocabParallelEmbedding` — **sharded by TP, not replicated** (verified in source, and confirmed by a dual-Spark ledger showing 62.5 GB/node for a 125.9 GiB checkpoint). TP2 FP8 = **86.4 GiB/rank**; TP4 BF16 = **83.8**; TP4 FP8 = **43.2**. (§2.3, §2.4) |
 | **Anyone running it multi-Spark already?** | **Yes — at least six independent reports.** vLLM TP2 on 2× GB10, vLLM TP4+EP on 4× GB10, SGLang TP2 on 2× GB10 at **64 tok/s single-stream**. Three of the six are bug reports, but in all of them the engine comes up and serves. (§2.6) |
 | **Fits on the RTX 5090** | **No, by 3×.** Smallest complete checkpoint on HF is 101.68 GiB against 32 GiB of discrete VRAM, and the offload trick that rescues one Spark depends on unified memory. (§2.7) |
