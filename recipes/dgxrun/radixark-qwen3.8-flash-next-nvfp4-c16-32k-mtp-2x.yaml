@@ -110,6 +110,16 @@ env:
 #     </think> leak into `content`.
 #   reasoning_effort MUST be pinned to medium: the chat template defaults to `xhigh`,
 #     which reasons past generous caps and returns EMPTY content.
+#     THIS IS ONLY A DEFAULT — a client can override it per request with
+#     `chat_template_kwargs`, and for judge/extraction traffic it SHOULD. Measured on a
+#     "rate 1-10, reply ONLY with JSON" prompt against this exact deployment:
+#         recipe default (medium)        96 gen tokens   2.7 s
+#         reasoning_effort: "low"        95 gen tokens   2.5 s   <- NOT a lever
+#         enable_thinking: false         15 gen tokens   0.5 s   <- 6x on both axes
+#         8 images + json_object + off   16 gen tokens   1.2 s
+#     `reasoning_effort` accepts ONLY xhigh/medium/low; any other value is a hard 400
+#     ("Unexpected reasoning effort none"), not a silent fallback. Use `enable_thinking:
+#     false` to turn reasoning off — there is no "none" effort level.
 #   NO --kv-cache-dtype. The QSA backend declares supported_kv_cache_dtypes
 #     ["auto","bfloat16"]; NVFP4 KV fails SILENTLY on GB10 (three measurements).
 #   NO --enforce-eager. CUDA graphs are the throughput fix on this family and are no
