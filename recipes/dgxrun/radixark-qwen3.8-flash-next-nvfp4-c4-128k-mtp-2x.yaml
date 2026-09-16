@@ -22,7 +22,8 @@
 #
 # ALL GATES PASSED (#91). Boots at TP2, GSM8K 0.9674 flexible-extract over 1319 items,
 # CUDA graphs + MTP, needle retrieval verified at 127,584 tokens and at depths
-# 0.05/0.50/0.95 at 223,824. This is a tuned serving recipe, not a bring-up shape.
+# 0.05/0.50/0.95 at 223,824, and vision verified (colour identity, spatial quadrant, and
+# all 8 images accepted). This is a tuned serving recipe, not a bring-up shape.
 #
 # WHAT THIS MODEL IS. `Qwen4ExpForConditionalGeneration` / `model_type: qwen4_exp` —
 # Qwen's preview of the Qwen4 architecture, and NOT a scaled-up Qwen3.8-27B (that is

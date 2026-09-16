@@ -138,6 +138,19 @@ command: |
       --limit-mm-per-prompt '{"image":8}' \
       --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
 
+# ACCURACY IS VERIFIED AT THIS RECIPE'S OWN BATCH DEPTH, which is the whole point of
+# this block. Every earlier GSM8K number for this model was taken at concurrency 4, and
+# vllm#55375 (MTP output corruption) triggers specifically on BATCHED prefill — so a
+# c16 recipe verified only at c4 was verified in the wrong regime. Measured on the SAME
+# engine, identical items and scorer, only the client batch depth differing:
+#     concurrency 16   0.9629 +/- 0.0052   n=1319   (empty 5, truncated 11, errors 0)
+#     concurrency  4   0.9620 +/- 0.0086   n=500
+#     paired on the shared 500: 0.9660 vs 0.9620, delta +0.0040 (paired stderr 0.0118)
+#     10 disagreements, split 6 / 4
+# A batching bug collapses ONE side; a near-even split is sampling noise. MTP draft
+# acceptance was 93.7% at c16 vs 93.8% at c4 — the corruption signature is acceptance
+# PEGGED near 100%, so this is the opposite of it. High batch is safe here.
+#
 # MTP IS KEPT AT HIGH CONCURRENCY, AND THAT IS NOT THE OBVIOUS ANSWER.
 # The sibling GLM-5.2 concurrency recipe (zai-glm-5.2-quanttrio-int4-c16-64k-4x) REMOVES
 # MTP with sound reasoning: speculative decoding wins at batch=1 because decode is
