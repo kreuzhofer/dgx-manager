@@ -320,6 +320,14 @@ model BenchmarkRun {
   // JSON-encoded AccuracyMetricInput[]: per-task/per-subtask breakdown for the
   // detail page (analogous to the JSON-string toolEvalSafetyWarnings).
   accuracyMetrics String?
+  // Completions that came back EMPTY and were scored as wrong (#20 §2). lm-eval
+  // substitutes a placeholder and scores the item wrong rather than erroring, so
+  // a run with empties reports a FLOOR while rendering as a clean number — 23 of
+  // 198 items on a GPQA run that published 81.31.
+  // NULLABLE ON PURPOSE: null means "this run predates counting", which is NOT
+  // the same as a measured 0. Reporting the former as the latter would assert
+  // something we never checked, which is the bug this field exists to fix.
+  nullCompletions Int?
   createdAt       DateTime @default(now())
   deployment      Deployment? @relation(fields: [deploymentId], references: [id], onDelete: SetNull)
   results         BenchmarkResult[]

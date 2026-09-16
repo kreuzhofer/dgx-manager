@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { prisma } from "../prisma.js";
 import { extractionFindingsFor } from "../benchmarks/extraction-failure.js";
+import { nullCompletionFindingFor } from "../benchmarks/null-completions.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import {
   BENCHMARK_PRESETS,
@@ -71,7 +72,15 @@ benchmarksRouter.get("/", async (req, res) => {
   });
   // Derived, not stored: a score whose extraction failed looks identical to a
   // genuine one, and deriving on read means historical runs are checked too.
-  res.json(runs.map((r) => ({ ...r, extractionFindings: extractionFindingsFor(r.accuracyMetrics) })));
+  res.json(runs.map((r) => ({
+    ...r,
+    extractionFindings: extractionFindingsFor(r.accuracyMetrics),
+    // Same reasoning, different failure: a score depressed by EMPTY completions
+    // also looks identical to a genuine one (#20 §2). The count is stored (it
+    // comes from the log, not the metrics) but the judgement is derived, so the
+    // threshold can change without a migration.
+    nullCompletionFinding: nullCompletionFindingFor(r.nullCompletions, r.accuracyScore, r.accuracyMetrics),
+  })));
 });
 
 /**
@@ -140,7 +149,11 @@ benchmarksRouter.get("/:id", async (req, res) => {
     },
   });
   if (!run) return res.status(404).json({ error: "not found" });
-  res.json({ ...run, extractionFindings: extractionFindingsFor(run.accuracyMetrics) });
+  res.json({
+    ...run,
+    extractionFindings: extractionFindingsFor(run.accuracyMetrics),
+    nullCompletionFinding: nullCompletionFindingFor(run.nullCompletions, run.accuracyScore, run.accuracyMetrics),
+  });
 });
 
 /**

@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { prisma } from "../prisma.js";
 import { SHARED_STORAGE } from "../env.js";
 import { broadcast as sseBroadcast } from "../sse.js";
@@ -8,14 +8,20 @@ import { type CapInvoker } from "./remote-runner.js";
 import { buildBenchyArgs } from "./args.js";
 import { buildToolEvalArgs } from "./tool-eval-args.js";
 import { decideFinalize } from "./finalize-outcome.js";
+import { countNullCompletions } from "./null-completions.js";
 import type { BenchmarkConfig, ToolEvalConfig, AccuracyConfig } from "./presets.js";
+
+/** Where a run's log lives. Pure — safe to call without creating anything. */
+export function benchmarkLogPath(runId: string): string {
+  return join(SHARED_STORAGE, "logs", "benchmarks", `${runId}.log`);
+}
 
 /** Deterministic per-run IO — identical in the route and at boot reattach. */
 export function benchmarkIo(runId: string) {
   const outputDir = join(SHARED_STORAGE, "benchmarks", runId);
   const logDir = join(SHARED_STORAGE, "logs", "benchmarks");
   mkdirSync(logDir, { recursive: true, mode: 0o777 });
-  const logPath = join(logDir, `${runId}.log`);
+  const logPath = benchmarkLogPath(runId);
   const onLog = (line: string) => {
     try { appendFileSync(logPath, line + "\n", { mode: 0o666 }); } catch { /* keep streaming */ }
     sseBroadcast({ type: "benchmark:log", payload: { runId, log: line } });
@@ -24,6 +30,20 @@ export function benchmarkIo(runId: string) {
     void prisma.benchmarkRun.update({ where: { id: runId }, data: { logOffset: offset } }).catch(() => {});
   };
   return { outputDir, resultPath: join(outputDir, "result.json"), onLog, onOffset };
+}
+
+/**
+ * Count empty completions for a finished run by re-reading its log.
+ *
+ * Returns null when the log cannot be read, which keeps the "never measured"
+ * case distinct from a measured zero — storing 0 here would claim we checked.
+ */
+function readNullCompletions(runId: string): number | null {
+  try {
+    return countNullCompletions(readFileSync(benchmarkLogPath(runId), "utf8"));
+  } catch {
+    return null;
+  }
 }
 
 export async function finishFailed(runId: string, message: string): Promise<void> {
@@ -51,6 +71,11 @@ export async function finalizeAccuracy(runId: string, r: Awaited<ReturnType<type
         rawOutput: r.rawOutput,
         accuracyScore: r.summary.primaryScore,
         accuracyMetrics: JSON.stringify(r.summary.metrics),
+        // #20 §2. Counted from the LOG rather than accumulated in onLog, so the
+        // number survives a manager restart mid-run — boot-reconcile reattaches
+        // running benchmarks, and an in-memory tally would silently reset to a
+        // partial count that looks like a complete one.
+        nullCompletions: readNullCompletions(runId),
       },
     });
     const final = await prisma.benchmarkRun.findUnique({ where: { id: runId } });
