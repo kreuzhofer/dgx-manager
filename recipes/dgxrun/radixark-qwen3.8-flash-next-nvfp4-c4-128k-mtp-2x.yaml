@@ -16,7 +16,7 @@
 # touch the window, because the per-step overhead is sized to the configured maximum:
 #     32768    decode 36.42 / 57.42 / 79.38 tok/s at concurrency 1/2/4
 #    131072    decode 38.21 / 53.10 / 84.35   -> noise, the window is FREE
-#    262144    decode 30.98 / 47.91 / 57.95   -> -15% to -27%, and rank 1 hits 0 GiB free
+#    262144    decode 30.98 / 47.91 / 57.95   -> -15% to -27%, and only ~4 GiB left free
 # So 128K costs nothing and 256K costs a quarter of the throughput. That is why this is
 # a separate recipe from the concurrent one rather than a flag on it.
 #
@@ -150,8 +150,20 @@ defaults:
   #   - throughput falls 15-27% on EVERY request, including 4096-token ones that never
   #     touch the window (decode c1/c2/c4: 30.98/47.91/57.95 vs 36.42/57.42/79.38 at
   #     32768, same gmu). This is fixed per-step overhead sized to the configured max.
-  #   - idle headroom on rank 1 drops to ZERO (gx10-02: 0 GiB available at 262144 vs
-  #     25 GiB at 131072), which is what turns a transient allocation into the OOM above.
+  #   - the long-context WORKING SET is ~18.5 GiB PER RANK and is never given back. It is
+  #     a high-water mark, not a leak: a 224K prompt takes available memory from ~23/27 GiB
+  #     down to ~4/8 GiB on the two ranks, 90 seconds of settling returns none of it, and a
+  #     SECOND 224K prompt costs nothing further. At 262144 that leaves ~4 GiB of slack,
+  #     which is the whole margin. (Both ranks behave IDENTICALLY here — an earlier note
+  #     claimed rank 1 was structurally heavier and that was wrong, measured from a single
+  #     reading taken seconds after a 256K prompt. The head does run ~4 GiB heavier, but
+  #     only because the API server and EngineCore live there.)
+  #   - THIS is the quantitative reason gmu 0.80 died: it left ~7 GiB of slack against an
+  #     ~18.5 GiB demand. gmu 0.70 leaves ~23 GiB, so it fits. Note the working set is
+  #     OUTSIDE the KV pool (KV is 7.52 GiB total and reads 0% used while the 18.5 GiB is
+  #     held), so gmu does not help by sizing KV — it helps by leaving more of the device
+  #     UNBUDGETED. vLLM says as much at boot: it offers `--kv-cache-memory=28.28 GiB` "to
+  #     fully utilize gpu memory", which is precisely the setting that recreates the OOM.
   #   - prefill collapses at the top of the window: 2652 -> 808 tok/s between 224K and
   #     256K, a 3.3x slowdown for a 1.14x length increase. That is memory thrash, not
   #     attention cost.

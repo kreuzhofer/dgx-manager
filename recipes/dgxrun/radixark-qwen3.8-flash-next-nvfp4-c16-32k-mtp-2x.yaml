@@ -49,10 +49,11 @@ defaults:
   host: 0.0.0.0
   tensor_parallel: 2
   # 0.80, NOT the sibling's 0.70. Those are two different constraints, not a preference.
-  # The sibling lowers gmu to buy HOST headroom for a 128K prefill working set — at gmu
-  # 0.80 a 223,824-token prompt was OOM-killed by the kernel. At 32768 no prompt can get
-  # near that, so the headroom is not needed and the memory is better spent on KV for 16
-  # concurrent sequences.
+  # The sibling lowers gmu to buy HOST headroom for a long-context prefill working set,
+  # MEASURED at ~18.5 GiB per rank and retained as a high-water mark once a big prompt has
+  # been served. At gmu 0.80 only ~7 GiB of slack was left and a 223,824-token prompt was
+  # OOM-killed by the kernel. At 32768 no prompt can get near that length, so the headroom
+  # is not needed and the memory is better spent on KV for 16 concurrent sequences.
   # The arithmetic: 16 seqs x 32768 = 524,288 tokens worst case. gmu 0.70 gives only
   # 336,353 (10.26x) — it would cap real concurrency BELOW max_num_seqs. gmu 0.80 MEASURED
   # here gives 18.58 GiB = 852,931 tokens (26.03x), which covers 16 with room to spare.
