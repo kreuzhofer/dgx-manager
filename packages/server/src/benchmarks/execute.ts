@@ -9,6 +9,7 @@ import { buildBenchyArgs } from "./args.js";
 import { buildToolEvalArgs } from "./tool-eval-args.js";
 import { decideFinalize } from "./finalize-outcome.js";
 import { countNullCompletions } from "./null-completions.js";
+import { explainFailure } from "./proxy-loss.js";
 import type { BenchmarkConfig, ToolEvalConfig, AccuracyConfig } from "./presets.js";
 
 /** Where a run's log lives. Pure — safe to call without creating anything. */
@@ -93,8 +94,23 @@ export async function finalizeAccuracy(runId: string, r: Awaited<ReturnType<type
       payload: { id: runId, status: "failed", error: outcome.reason },
     });
   } else {
-    await finishFailed(runId, outcome.kind === "fail" ? outcome.reason : "lm-eval produced no summary");
+    const bare = outcome.kind === "fail" ? outcome.reason : "lm-eval produced no summary";
+    // "lm-eval exited with code 1" is true and useless. When the log shows the
+    // job was refused at the manager's reasoning proxy, say THAT instead — the
+    // 2026-08-29 run needed a urllib3 traceback and docker events to explain
+    // (#22). Falls back to the bare reason when there is no evidence.
+    await finishFailed(runId, explainAccuracyFailure(runId, bare, current?.endpointUrl ?? null));
   }
+}
+
+/** Upgrade an accuracy failure reason using the run's own log, when it explains it. */
+function explainAccuracyFailure(runId: string, reason: string, endpointUrl: string | null): string {
+  let log = "";
+  try { log = readFileSync(benchmarkLogPath(runId), "utf8"); } catch { return reason; }
+  return explainFailure(reason, log, {
+    proxyHosts: [process.env.MANAGER_ADVERTISE_HOST, "127.0.0.1"],
+    endpointUrl,
+  });
 }
 
 export async function finalizeToolEval(runId: string, r: Awaited<ReturnType<typeof runToolEval>>): Promise<void> {
