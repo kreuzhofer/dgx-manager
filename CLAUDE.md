@@ -155,6 +155,21 @@ npx vitest run -t "substring"          # focus tests by name substring
 - **Medium risk** (new endpoints, new config knobs, validation changes): one integration test for the happy path + one for the error path; unit/property test any pure helper added.
 - **High risk** (admission control, multi-node coordination, anything affecting data persistence or money): property tests for the invariant + integration test for the failure mode + a hand-picked test mirroring the original incident if there was one.
 
+### If every DB-backed test dies at once
+
+`Module did not self-register: .../better_sqlite3.node` or `NODE_MODULE_VERSION`
+means the host's Node was upgraded and the native module was not rebuilt. It
+takes out every integration test at once (~281 failures) while the pure tests
+stay green, which looks alarming and is not a code problem:
+
+```bash
+npm rebuild better-sqlite3
+```
+
+Note the container has its own `node_modules`, so this only affects local runs.
+Distinguish it from the other mass-failure cause — CPU contention from running a
+build concurrently with `npm test` — by the error text, not the count.
+
 ### Don't claim done without `npm test` green
 
 Principle 1 ("Test-Driven Development") is now enforceable: every change should leave `npm test` passing. If a test cannot be added (e.g. genuinely environmental behavior on a real DGX), say so explicitly in the PR description and explain what manual verification was done instead.

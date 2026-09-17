@@ -202,10 +202,58 @@ describe("agent:deployment:status — publishing a name", () => {
   // cluster, so a failed report must fan a teardown to every rank. Extracting
   // this path out of the hub is exactly where that could have been dropped.
   it("fans a dgxrun teardown out when a rank reports failed", async () => {
-    const node = await prisma.node.create({
+    const head = await prisma.node.create({
       data: { name: "head", ipAddress: "10.0.0.9", status: "online" },
     });
+    const worker = await prisma.node.create({
+      data: { name: "worker", ipAddress: "10.0.0.10", status: "online" },
+    });
     const model = await prisma.model.create({ data: { name: "m-mp", runtime: "vllm" } });
+    const d = await prisma.deployment.create({
+      data: {
+        nodeId: head.id,
+        modelId: model.id,
+        status: "running",
+        port: 8000,
+        config: JSON.stringify({ runner: "dgxrun" }),
+        // MULTI-rank, because that is what this test is about. The fixture used
+        // to create a single node while asserting a fan-out, so it only passed
+        // while teardown fired unconditionally. Once #94 made a solo deployment
+        // skip teardown deliberately, the assertion had nothing to stand on.
+        clusterNodes: {
+          create: [
+            { nodeId: head.id, role: "head" },
+            { nodeId: worker.id, role: "worker" },
+          ],
+        },
+      },
+    });
+    const sendToAgent = vi.fn();
+
+    await handleDeploymentStatus(
+      { deploymentId: d.id, status: "failed", error: "rank 2 died" },
+      { hub: { sendToAgent } },
+    );
+
+    // EVERY rank, not just the reporter: the mp executor has no recovery, so a
+    // surviving rank left running holds the GPU for a cluster that is already dead.
+    expect(sendToAgent).toHaveBeenCalledWith(
+      head.id,
+      expect.objectContaining({ type: "cmd:undeploy" }),
+    );
+    expect(sendToAgent).toHaveBeenCalledWith(
+      worker.id,
+      expect.objectContaining({ type: "cmd:undeploy" }),
+    );
+  });
+
+  // The other half of the same rule, which had no coverage at all — the reason
+  // the stale fixture above went unnoticed.
+  it("does NOT tear down a single-rank dgxrun deployment, so the body survives", async () => {
+    const node = await prisma.node.create({
+      data: { name: "solo", ipAddress: "10.0.0.11", status: "online" },
+    });
+    const model = await prisma.model.create({ data: { name: "m-solo", runtime: "vllm" } });
     const d = await prisma.deployment.create({
       data: {
         nodeId: node.id,
@@ -218,14 +266,13 @@ describe("agent:deployment:status — publishing a name", () => {
     const sendToAgent = vi.fn();
 
     await handleDeploymentStatus(
-      { deploymentId: d.id, status: "failed", error: "rank 2 died" },
+      { deploymentId: d.id, status: "failed", error: "it died" },
       { hub: { sendToAgent } },
     );
 
-    expect(sendToAgent).toHaveBeenCalledWith(
-      node.id,
-      expect.objectContaining({ type: "cmd:undeploy" }),
-    );
+    // The agent's own health path stops a failed solo container; a coordinated
+    // teardown would only destroy the evidence of why it died (#94).
+    expect(sendToAgent).not.toHaveBeenCalled();
   });
 
   // A deployment that is up must never be failed by our inability to name it.
