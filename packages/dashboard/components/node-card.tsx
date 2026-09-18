@@ -4,6 +4,7 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
 import { isNodeInactive, nodeMetricsPlaceholder, showWakeButton } from "@/lib/node-power";
 import { Sparkline } from "./sparkline";
+import { describeThroughput, type ThroughputVerdict } from "@/lib/peer-throughput";
 
 interface NetInterfaceSample {
   name: string;
@@ -64,6 +65,25 @@ interface Node {
   metrics: { gpuUtil: number; vramUsed: number; tps: number | null; temperature: number | null }[];
 }
 
+/**
+ * "Online" is true and useless on a node running at half speed — that is the
+ * whole of #88. The badge sits next to the status dot because that is where
+ * someone looks to decide whether a node is healthy.
+ */
+function SlowBadge({ verdict }: { verdict: ThroughputVerdict | null }) {
+  const view = describeThroughput(verdict);
+  if (!view || view.tone !== "suspect") return null;
+
+  return (
+    <span
+      className="rounded bg-red-900/60 px-2 py-0.5 text-[10px] text-red-300"
+      title={view.detail}
+    >
+      {view.label}
+    </span>
+  );
+}
+
 const MAX_SAMPLES = 720;
 const DISPLAY_WINDOW = 360; // 30 minutes at 5s intervals
 
@@ -77,10 +97,17 @@ export function NodeCard({
   node,
   deployments = [],
   onMetrics,
+  throughput = null,
 }: {
   node: Node;
   deployments?: NodeDeployment[];
   onMetrics?: (handler: (sample: MetricSample) => void) => void;
+  /**
+   * Set when this node is serving behind its pool peers (#88). `status` and
+   * GPU utilization both read healthy on such a node — this badge is the only
+   * place the product says otherwise.
+   */
+  throughput?: ThroughputVerdict | null;
 }) {
   const [history, setHistory] = useState<MetricSample[]>([]);
   const historyRef = useRef<MetricSample[]>([]);
@@ -292,6 +319,7 @@ export function NodeCard({
           </div>
           <div className={`w-2 h-2 rounded-full ${statusColor}`} />
           <span className="text-xs text-gray-400 capitalize">{node.status}</span>
+          <SlowBadge verdict={throughput} />
         </div>
       </div>
 

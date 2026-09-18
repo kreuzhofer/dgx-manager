@@ -2,6 +2,7 @@ import { Router } from "express";
 import { prisma } from "../prisma.js";
 import { buildPoolView } from "../gateway/pool-view.js";
 import { outstandingFor } from "../gateway/inflight.js";
+import { assessThroughput } from "../health/peer-throughput.js";
 
 /**
  * Management view of the inference gateway.
@@ -27,6 +28,15 @@ export const gatewayViewRouter = Router();
  *       `serving: false` and the reason — `not-running`, `no-port`,
  *       `no-node-address` or `agent-offline` — so eligibility is visible before
  *       a request fails rather than only after.
+ *
+ *       Each member also carries a `throughput` verdict comparing its recent
+ *       serving rate against the other members of its pool — `ok`, `suspect`
+ *       (materially behind its peers) or `not-comparable` with a `reason`.
+ *       Computed on read from persisted metrics over the last hour; no GPU
+ *       work is performed. A member whose comparison would be meaningless —
+ *       a pool of one, mixed models, an idle member, a node running a second
+ *       deployment, or too few samples — reports `not-comparable` rather than
+ *       a verdict. See issue #88.
  *     responses:
  *       '200':
  *         description: Pools, their members, and why any member is not serving
@@ -53,6 +63,7 @@ gatewayViewRouter.get("/", async (req, res) => {
       publishedName: true,
       status: true,
       port: true,
+      modelId: true,
       model: { select: { runtime: true } },
       node: { select: { id: true, name: true, ipAddress: true } },
     },
@@ -75,5 +86,23 @@ gatewayViewRouter.get("/", async (req, res) => {
     outstandingFor,
   );
 
-  res.json({ baseUrl: gatewayBaseUrl(req.hostname), pools });
+  // Peer comparison hangs off the pool view because a pool is exactly the set
+  // of members running comparable work (#88). Computed on read from telemetry
+  // already persisted — no GPU work, nothing scheduled, nothing stored.
+  const throughput = await assessThroughput(
+    deployments.flatMap((d) => (d.publishedName === null ? [] : [{
+      deploymentId: d.id,
+      nodeId: d.node.id,
+      nodeName: d.node.name,
+      modelId: d.modelId,
+      publishedName: d.publishedName,
+    }])),
+  );
+
+  const withThroughput = pools.map((p) => ({
+    ...p,
+    members: p.members.map((m) => ({ ...m, throughput: throughput.get(m.deploymentId) ?? null })),
+  }));
+
+  res.json({ baseUrl: gatewayBaseUrl(req.hostname), pools: withThroughput });
 });
