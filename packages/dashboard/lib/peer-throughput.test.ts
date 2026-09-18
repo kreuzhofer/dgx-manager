@@ -56,6 +56,7 @@ describe("describeThroughput", () => {
       "idle",
       "multi-deployment-node",
       "model-mismatch",
+      "no-comparable-peers",
     ] as const;
 
     for (const reason of reasons) {

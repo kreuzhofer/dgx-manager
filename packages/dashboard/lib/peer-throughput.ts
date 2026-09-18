@@ -13,7 +13,8 @@ export type NotComparableReason =
   | "insufficient-samples"
   | "idle"
   | "multi-deployment-node"
-  | "model-mismatch";
+  | "model-mismatch"
+  | "no-comparable-peers";
 
 export interface ThroughputVerdict {
   state: ThroughputState;
@@ -40,6 +41,7 @@ const REASONS: Record<NotComparableReason, string> = {
   idle: "served nothing in the window",
   "multi-deployment-node": "another deployment shares this node, so its rate is a sum",
   "model-mismatch": "pool members are serving different models",
+  "no-comparable-peers": "no peer had a usable rate in the window",
 };
 
 const median = (xs: number[]): number | null => {
