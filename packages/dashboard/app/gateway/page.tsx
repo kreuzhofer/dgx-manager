@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
+import { describeThroughput, type ThroughputVerdict } from "@/lib/peer-throughput";
 
 interface PoolMember {
   deploymentId: string;
@@ -13,6 +14,8 @@ interface PoolMember {
   serving: boolean;
   reason?: string;
   detail?: string;
+  /** Peer-throughput verdict (#88). Null when the server could not judge. */
+  throughput: ThroughputVerdict | null;
 }
 
 interface Pool {
@@ -64,6 +67,38 @@ function CopyableUrl({ url }: { url: string }) {
         {state === "copied" ? "copied" : state === "failed" ? "copy failed — select it" : "copy"}
       </span>
     </button>
+  );
+}
+
+/**
+ * A member's throughput next to its peers'. A degraded node is the point: it
+ * reads `online` and ~95% busy everywhere else in the product, and only the
+ * comparison against its own pool shows it is doing half the work (#88).
+ */
+function ThroughputCell({ verdict }: { verdict: ThroughputVerdict | null }) {
+  const view = describeThroughput(verdict);
+  if (!view) return <span className="text-gray-600">—</span>;
+
+  if (view.tone === "suspect") {
+    return (
+      <div className="flex flex-col gap-0.5">
+        <span className="w-fit rounded bg-red-900/50 px-2 py-0.5 text-xs text-red-300">
+          {view.label}
+        </span>
+        {/* Rendered rather than hidden in a title: this is the comparison the
+            operator needs in order to believe, or dismiss, the flag. */}
+        <span className="text-xs text-gray-400">{view.detail}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-0.5">
+      <span className={`font-mono ${view.tone === "ok" ? "text-gray-300" : "text-gray-500"}`}>
+        {view.label}
+      </span>
+      {view.detail && <span className="text-xs text-gray-600">{view.detail}</span>}
+    </div>
   );
 }
 
@@ -154,6 +189,7 @@ export default function GatewayPage() {
                   <th className="px-4 py-2 font-medium">Runtime</th>
                   <th className="px-4 py-2 font-medium">Port</th>
                   <th className="px-4 py-2 font-medium">In flight</th>
+                  <th className="px-4 py-2 font-medium">Throughput</th>
                   <th className="px-4 py-2 font-medium">Status</th>
                 </tr>
               </thead>
@@ -174,6 +210,9 @@ export default function GatewayPage() {
                     </td>
                     <td className="px-4 py-2 font-mono text-gray-400">{m.port ?? "—"}</td>
                     <td className="px-4 py-2 font-mono text-gray-300">{m.inflight}</td>
+                    <td className="px-4 py-2">
+                      <ThroughputCell verdict={m.throughput} />
+                    </td>
                     <td className="px-4 py-2">
                       {m.serving ? (
                         <span className="rounded bg-green-900/50 px-2 py-0.5 text-xs text-green-300">

@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useSSE, type SseEvent } from "@/lib/sse";
 import { NodeCard } from "@/components/node-card";
+import { suspectedNodes, type PoolLike, type ThroughputVerdict } from "@/lib/peer-throughput";
 
 interface NodeMetric {
   gpuUtil: number;
@@ -69,6 +70,8 @@ export default function OverviewPage() {
   const [deployments, setDeployments] = useState<DeploymentSummary>({ total: 0, running: 0 });
   const [deploymentList, setDeploymentList] = useState<DeploymentInfo[]>([]);
   const [recipeCount, setRecipeCount] = useState(0);
+  // Nodes whose throughput is behind their pool peers (#88), by node name.
+  const [suspect, setSuspect] = useState<Map<string, ThroughputVerdict>>(new Map());
   const [loading, setLoading] = useState(true);
 
   // Map of nodeId -> metrics callback from NodeCard
@@ -79,8 +82,11 @@ export default function OverviewPage() {
       apiFetch<Node[]>("/api/nodes"),
       apiFetch<DeploymentInfo[]>("/api/deployments"),
       apiFetch<unknown[]>("/api/recipes"),
+      // The peer comparison is pool-shaped, so it comes from the gateway view.
+      // A failure here must not blank the overview: the badge is an extra.
+      apiFetch<{ pools: PoolLike[] }>("/api/gateway").catch(() => ({ pools: [] })),
     ])
-      .then(([n, d, r]) => {
+      .then(([n, d, r, g]) => {
         setNodes(n);
         setDeploymentList(d);
         setDeployments({
@@ -88,6 +94,7 @@ export default function OverviewPage() {
           running: d.filter((x) => x.status === "running").length,
         });
         setRecipeCount(r.length);
+        setSuspect(suspectedNodes(g.pools));
       })
       .catch(console.error)
       .finally(() => setLoading(false));
@@ -204,6 +211,7 @@ export default function OverviewPage() {
               key={node.id}
               node={node}
               deployments={nodeDeps}
+              throughput={suspect.get(node.name) ?? null}
               onMetrics={(handler) => {
                 metricsHandlers.current[node.id] = handler;
               }}
