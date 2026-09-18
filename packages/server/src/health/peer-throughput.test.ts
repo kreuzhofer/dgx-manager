@@ -111,6 +111,29 @@ describe("evaluatePool", () => {
     expect(verdicts.map((v) => v.reason)).toEqual(["model-mismatch", "model-mismatch"]);
   });
 
+  // Found by running this against the live cluster: spark-01 is the only
+  // member of its pool AND was idle, and reported "idle" — which reads as
+  // "come back when it is serving". It could not be compared either way, so
+  // the structural reason has to win over the transient one.
+  it("prefers the structural reason when a lone member is also idle", () => {
+    const [only] = evaluatePool([member({ nodeName: "spark-01", rates: [] })]);
+
+    expect(only.state).toBe("not-comparable");
+    expect(only.reason).toBe("single-member");
+  });
+
+  // Distinct from a pool of one: there ARE peers, they just cannot be used
+  // this window. Saying "this pool has one member" here would be a lie.
+  it("distinguishes a pool whose peers are all unusable from a pool of one", () => {
+    const [subject] = evaluatePool([
+      member({ nodeName: "spark-03", rates: steady(55) }),
+      member({ nodeName: "spark-04", rates: [] }),
+    ]);
+
+    expect(subject.state).toBe("not-comparable");
+    expect(subject.reason).toBe("no-comparable-peers");
+  });
+
   // ── Calibration guard ──────────────────────────────────────────────────
   //
   // Measured 2026-09-18 over the live two-member `qwen3.8-27b-nvfp4` pool:

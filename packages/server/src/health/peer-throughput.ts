@@ -37,7 +37,8 @@ export type NotComparableReason =
   | "insufficient-samples"
   | "idle"
   | "multi-deployment-node"
-  | "model-mismatch";
+  | "model-mismatch"
+  | "no-comparable-peers";
 
 export interface MemberVerdict {
   deploymentId: string;
@@ -96,11 +97,17 @@ export function evaluatePool(members: MemberInput[]): MemberVerdict[] {
     const ratio = rate !== null && peerMedian ? rate / peerMedian : null;
 
     const base = { deploymentId: m.deploymentId, node: m.nodeName, rate, peerRates, ratio };
+    // Structural reasons first: a lone member stays uncomparable however much
+    // traffic it takes, so reporting "idle" there would send someone to wait
+    // for a verdict that can never arrive.
+    if (members.length === 1) return { ...base, state: "not-comparable", reason: "single-member" };
     if (mixedModels) return { ...base, state: "not-comparable", reason: "model-mismatch" };
     if (!attributable(m)) return { ...base, state: "not-comparable", reason: "multi-deployment-node" };
     if (m.rates.length === 0) return { ...base, state: "not-comparable", reason: "idle" };
     if (!comparable(m)) return { ...base, state: "not-comparable", reason: "insufficient-samples" };
-    if (peerRates.length === 0) return { ...base, state: "not-comparable", reason: "single-member" };
+    // Peers exist but none of them are usable this window — not the same
+    // thing as having no peers at all.
+    if (peerRates.length === 0) return { ...base, state: "not-comparable", reason: "no-comparable-peers" };
 
     return { ...base, state: ratio !== null && ratio < SUSPECT_RATIO ? "suspect" : "ok" };
   });
