@@ -6,6 +6,7 @@ import { assessPool } from "./eligibility.js";
 import { selectLeastOutstanding } from "./selection.js";
 import { acquire, outstandingFor } from "./inflight.js";
 import { nextRotation } from "./rotation.js";
+import { deploymentModality, partitionByModality, PATH_MODALITY } from "./modality.js";
 import {
   BodyTooLargeError,
   FORWARDED_PATHS,
@@ -131,6 +132,7 @@ async function proxyInference(req: Request, res: Response, path: ForwardedPath):
       id: true,
       status: true,
       port: true,
+      config: true,
       node: { select: { id: true, name: true, ipAddress: true } },
     },
   });
@@ -145,10 +147,33 @@ async function proxyInference(req: Request, res: Response, path: ForwardedPath):
     return;
   }
 
+  // A published name resolves to a pool, but a pool only answers the surface
+  // its recipe declared. An image model handed a chat completion accepts the
+  // request and never finishes it, so the mismatch has to be refused here —
+  // a hang at the client is indistinguishable from a slow model.
+  const required = PATH_MODALITY[path as keyof typeof PATH_MODALITY];
+  const { matching, mismatched } = partitionByModality<(typeof candidates)[number]>(
+    candidates,
+    (c) => deploymentModality(c.config),
+    required,
+  );
+  if (matching.length === 0) {
+    const served = [...new Set(mismatched.map((c) => deploymentModality(c.config)))].sort();
+    openAiError(
+      res,
+      400,
+      `The model '${requested}' serves ${served.join(" and ")}, not ${required}. ` +
+        `Send this model to ${servingPathFor(served[0])} instead.`,
+      "invalid_request_error",
+      "modality_mismatch",
+    );
+    return;
+  }
+
   const agentHub = req.app.get("agentHub") as { isAgentOnline(nodeId: string): boolean } | undefined;
-  const nodeNames = new Map(candidates.map((c) => [c.node.id, c.node.name]));
+  const nodeNames = new Map(matching.map((c) => [c.node.id, c.node.name]));
   const pool = assessPool(
-    candidates.map((c) => ({
+    matching.map((c) => ({
       id: c.id,
       status: c.status,
       port: c.port,
@@ -211,11 +236,19 @@ async function proxyInference(req: Request, res: Response, path: ForwardedPath):
   }
 }
 
+/** The path a client should have used, named in a modality refusal. */
+function servingPathFor(modality: string): string {
+  return modality === "image" ? "POST /v1/images/generations" : "POST /v1/chat/completions";
+}
+
 gatewayRouter.post("/chat/completions", (req, res) =>
   proxyInference(req, res, FORWARDED_PATHS.chatCompletions),
 );
 gatewayRouter.post("/embeddings", (req, res) =>
   proxyInference(req, res, FORWARDED_PATHS.embeddings),
+);
+gatewayRouter.post("/images/generations", (req, res) =>
+  proxyInference(req, res, FORWARDED_PATHS.imagesGenerations),
 );
 
 /**

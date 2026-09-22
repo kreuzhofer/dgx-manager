@@ -110,3 +110,45 @@ describe("resolveDgxrunRecipeFile", () => {
     expect(resolveDgxrunRecipeFile("@dgxrun/", "/d")).toBeNull();
   });
 });
+
+const IMAGE = `runner: dgxrun
+arch: arm64
+modality: image
+cluster_only: false
+model: Qwen/Qwen-Image-2.1
+container: vllm/vllm-omni:qwen-image21-arm64-cu130
+defaults:
+  tensor_parallel: 1
+  port: 8091
+command: vllm serve {model} --omni`;
+
+describe("loadDgxrunCatalog modality", () => {
+  const deps = (files: Record<string, string>) => ({
+    readDir: () => Object.keys(files),
+    readFile: (p: string) => files[p.split("/").pop()!],
+  });
+
+  /** A recipe that declares `modality: image` is tagged image, so the gateway
+   *  routes /v1/images/generations to it and never offers it for chat. */
+  it("reads modality from the recipe", () => {
+    const r = loadDgxrunCatalog("/d", deps({ "qwen-image.yaml": IMAGE }));
+    expect(r[0].modality).toBe("image");
+  });
+
+  /** Backward compatibility, the same rule `arch` follows: every recipe written
+   *  before `modality:` existed serves text, so an absent field must keep
+   *  meaning exactly that. */
+  it("defaults modality to text when the recipe omits it", () => {
+    const r = loadDgxrunCatalog("/d", deps({ "glm.yaml": VALID }));
+    expect(r[0].modality).toBe("text");
+  });
+
+  /** An unrecognised modality drops the recipe rather than defaulting to text.
+   *  Silently serving an image model on the chat path is the failure this field
+   *  exists to prevent — the same reasoning as the arch guard. */
+  it("drops a recipe whose modality is unrecognised", () => {
+    const typo = IMAGE.replace("modality: image", "modality: imgae");
+    const r = loadDgxrunCatalog("/d", deps({ "typo.yaml": typo }));
+    expect(r).toEqual([]);
+  });
+});

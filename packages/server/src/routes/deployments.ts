@@ -512,6 +512,15 @@ deploymentsRouter.post("/", async (req, res) => {
   const masterPort = isDgxrun ? ((config?.masterPort as number) || DEFAULT_MASTER_PORT) : undefined;
 
   // Create deployment
+  // Modality travels in the config blob beside `runner`, so the gateway can
+  // route /v1/images/generations without re-reading the recipe on every
+  // request. Written only when it is not the default, so every existing
+  // blob keeps its exact bytes and `text` stays the absent-field meaning.
+  const catalogEntry = recipeFile
+    ? getDgxrunCatalog().find((r) => r.file === recipeFile)
+    : undefined;
+  const modality = catalogEntry?.modality ?? "text";
+
   const deployment = await prisma.deployment.create({
     data: {
       modelId: model.id,
@@ -525,7 +534,7 @@ deploymentsRouter.post("/", async (req, res) => {
         // `runner: "dgxrun"` marks the deployment so DELETE/status handlers fan
         // undeploy to every rank. The resolved recipe is persisted so a future
         // restart can re-fan without re-reading the source.
-        : { recipeFile, ...(isDgxrun ? { runner: "dgxrun", masterPort, dgxrunRecipe } : {}), ...config }),
+        : { recipeFile, ...(isDgxrun ? { runner: "dgxrun", masterPort, dgxrunRecipe } : {}), ...(modality !== "text" ? { modality } : {}), ...config }),
     },
   });
 

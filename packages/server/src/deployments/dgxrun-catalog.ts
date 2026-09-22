@@ -13,8 +13,17 @@ interface Recipe {
   cluster_only?: boolean;
   /** Narrowed at load time — an unrecognised value drops the recipe entirely. */
   arch: "amd64" | "arm64";
+  /** Which OpenAI surface this recipe serves. Narrowed at load time like
+   *  `arch`; an unrecognised value drops the recipe entirely. */
+  modality: Modality;
   defaults: Record<string, unknown>;
 }
+
+/** The OpenAI surfaces a recipe can serve. `text` covers chat + embeddings —
+ *  everything written before this field existed. Grows as vLLM-Omni's other
+ *  endpoints (/v1/videos, /v1/audio/speech) become worth routing. */
+export const MODALITIES = ["text", "image"] as const;
+export type Modality = (typeof MODALITIES)[number];
 
 export type CatalogRecipe = Recipe & { source: "dgxrun" };
 
@@ -65,6 +74,18 @@ export function loadDgxrunCatalog(dir: string, deps: CatalogDeps = {}): CatalogR
       console.warn(`[dgxrun-catalog] skip ${f}: arch must be amd64 or arm64, got ${JSON.stringify(o.arch)}`);
       continue;
     }
+    // Same contract as `arch` directly above: recipe-declared, defaulting to
+    // the pre-existing meaning, and an unrecognised value drops the recipe
+    // rather than defaulting. A typo'd modality that silently fell back to
+    // "text" would advertise an image model on /v1/chat/completions, where it
+    // would accept the request and never answer it.
+    const modality = o.modality === undefined ? "text" : o.modality;
+    if (!(MODALITIES as readonly unknown[]).includes(modality)) {
+      console.warn(
+        `[dgxrun-catalog] skip ${f}: modality must be one of ${MODALITIES.join(" | ")}, got ${JSON.stringify(o.modality)}`,
+      );
+      continue;
+    }
     const d = (o.defaults && typeof o.defaults === "object" ? o.defaults : {}) as Record<string, unknown>;
     out.push({
       file: `@dgxrun/${base}`,
@@ -74,6 +95,7 @@ export function loadDgxrunCatalog(dir: string, deps: CatalogDeps = {}): CatalogR
       container: "dgxrun",
       source: "dgxrun",
       arch,
+      modality: modality as Modality,
       cluster_only: o.cluster_only === undefined ? true : o.cluster_only === true,
       defaults: {
         tensor_parallel: d.tensor_parallel ?? 4,
