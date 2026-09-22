@@ -20,6 +20,51 @@ is the single most likely way to be wrong about this hardware.
 
 ---
 
+## ⚠️ MEASURED OUTCOME (2026-09-21) — read this before quoting anything below
+
+Everything from §1 down is the **pre-measurement research**, kept as written so predictions can be
+compared with what happened. It has since been run on real hardware. **Where the two disagree, the
+measurements win.**
+
+**Setup.** `dgx-spark-03` (GB10, 121 GiB usable), image `vllm/vllm-omni:qwen-image21-arm64-cu130`
+(26 GB on disk), vLLM 0.29.0, `vllm serve Qwen/Qwen-Image-2.1 --omni --port 8091`, single rank,
+weights on `/mnt/tank`. Container flags copied from a live dgxrun deploy (`--ipc=host`,
+`--network=host`, 32 GiB shm, `CAP_IPC_LOCK`, `/dev/infiniband`, `label=disable`). Run outside
+manager control as an unowned container — see the note at the end.
+
+| § | prediction | measured | verdict |
+| --- | --- | --- | --- |
+| §3 | cuDNN 9.20 may lack sm_121 kernels; upgrade to ≥9.24 | **works as shipped** — `Defaulting to diffusion attention backend CUDNN_ATTN (Blackwell sm_121, cuDNN 92000, head_dim 128)`, graphs captured, output correct | ❌ prediction too cautious |
+| §2 | sm_120 cubins should run on sm_121 by family compatibility | confirmed — no `no kernel image`, device init clean | ✅ |
+| §6 | ~30–60 s per 1024²/40 steps | **55.7 s cold, 52.9 s warm** | ✅ |
+| §6 | "≥~70 s" floor at 2048² `[inference]` | **271.2 s** | ❌ **~4× optimistic** |
+| §5 | BF16 fits in ~121 GiB, FP8 optional | peak **77 GiB** of 121 | ✅ |
+| §8.3 | readiness probe "probably free" | **free** — `/v1/models`, `/health`, `/metrics` all 200; `/v1/images/generations` 405 on GET (POST-only) | ✅ |
+| §4 | image has an ENTRYPOINT trap | **no entrypoint** — `Entrypoint: None`, command passes straight through | ❌ non-issue |
+
+**The 2K number, which did not previously exist anywhere:** **271.2 s** for 2048×2048 at 40 steps.
+That is **4.9× the 1024² cost** against a 4× pixel ratio — so it scales slightly worse than area,
+not catastrophically. My §6 arithmetic floor of ~70 s was wrong by ~4×, and it was wrong in the
+direction that flatters the model. Treat the scaled-floor method as discredited for diffusion.
+
+**Output correctness.** Verified numerically rather than by eye, because the encoder returns PNGs at
+**compression level 0** (IDAT ratio exactly 1.000), which looks alarming and is not: raw pixels
+compress to **0.519** and the mean horizontal neighbour delta is **1.33** (noise would be ~85).
+Alpha came back 254.9 ± 0.3 — a valid opaque RGBA surface. So: real images, not the silent-garbage
+failure mode #7759's open review warns about. This is *not* a check against a reference
+implementation — it rules out noise, not subtle drift.
+
+**Costs not in the original research.** First-touch weight download was **1179 s (19.7 min)** for
+31 GB onto `/mnt/tank` (~26 MB/s) — cached thereafter. Total cold start to serving was ~23 min, of
+which only ~3 min was load plus graph capture.
+
+**Operational note.** The probe ran as a container the manager does not own, which exposed a real
+gap: admission reads live metrics (`vram.ts:168`) so a *fresh* deploy is correctly refused, but
+`loadConflicts` builds its list from deployment rows, so the 409 names nothing (#101). Worse, on a
+**restart** `reclaimableMB = vramUsed − otherFootprint` credits an unowned container's memory to the
+restarting deployment, so the node reads as empty and the restart is admitted into contention. Tear
+down unowned probes before restarting anything on that node.
+
 ## §0 Verdict
 
 **Qwen-Image-2.1 is servable on the Sparks via vLLM-Omni, and the Sparks are the *better* host than
