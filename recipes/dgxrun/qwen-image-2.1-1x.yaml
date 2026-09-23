@@ -1,0 +1,132 @@
+# @dgxrun/qwen-image-2.1-1x — Qwen-Image-2.1 on ONE Spark. The first image model
+# in this catalog, and the first recipe to declare `modality: image`.
+#
+# WHAT THIS IS. A text-to-image diffusion model, not an LLM: a 7.1 B single-stream
+# DiT (32 layers, block-causal attention), a Qwen3-VL 8B text encoder, and a
+# 64-channel RGBA autoencoder at 16x spatial compression — so it emits real
+# transparency, RGBA out, not a matted PNG. Native 2K with no upscaler.
+#
+# IT DOES NOT SERVE CHAT. It answers /v1/images/generations (and /v1/images/edits).
+# Handed a chat completion it does not error — it accepts the request and never
+# finishes it. That is why `modality: image` exists: the gateway refuses the
+# mismatch rather than letting a client hang. See gateway/modality.ts.
+#
+# WHY vLLM-OMNI. Diffusion does not go through vLLM proper. `--omni` selects the
+# vllm-omni pipeline; the image below is vLLM 0.29.0 plus vllm-omni built from
+# the Qwen-Image-2.1 support PR.
+#
+# ⚠ THE arm64 QUESTION IS SETTLED — IT WAS NEVER REAL. A retracted claim in #116
+# held that vLLM-Omni was amd64-only and no Spark could run this. That came from
+# a stale NVIDIA Dynamo doc describing *Dynamo's own* container build, a gate
+# Dynamo removed in PR #7648 months earlier. vLLM-Omni compiles nothing and ships
+# py3-none-any wheels; upstream maintains its own DGX Spark recipe
+# (recipes/MiniMaxAI/MiniMax-H3-Spark-GB10.md, "Validated on: Host: DGX Spark
+# (GB10), aarch64"). Full write-up: docs/research/qwen-image-21-on-gb10.md.
+#
+# CONTAINER. Published multi-arch by upstream — no overlay, no build step, and
+# notably NO ENTRYPOINT, so the command below passes straight through. This is
+# the one dgxrun recipe that needs no image work at all.
+# Take the **cu130** tag, never cu129: on GB10, sm_120/sm_120f/sm_121 all run but
+# sm_120a fails, so a cu129 wheel silently loses its Marlin/CUTLASS-FP8 families.
+#
+# ⚠ NEVER CALL /v1/omni/sleep. Measured 2026-09-21: it defaults to level=2, which
+# DISCARDS weights, frees only 7.65 GiB of 81.91 resident, and then wake_up()
+# returns "not yet implemented: weights were discarded from GPU and reloading
+# from disk is not yet supported". A generation issued while asleep HANGS rather
+# than failing. The server is unrecoverable until restarted. There is no
+# park-and-release on this build — serving this model holds the node.
+#
+# TRANSPARENCY IS PROMPT-DRIVEN. There is no API parameter. Ask for it in words
+# ("This is an RGBA image with transparency... the background is transparent")
+# and the alpha channel comes back real: measured 66.2% fully transparent /
+# 33.3% fully opaque across 192 distinct alpha values, at no time cost.
+
+recipe_version: "2"
+runner: dgxrun
+arch: arm64
+modality: image
+cluster_only: false
+model: Qwen/Qwen-Image-2.1
+runtime: vllm
+container: vllm/vllm-omni:qwen-image21-arm64-cu130
+description: Qwen-Image-2.1 text-to-image on one GB10 Spark (RGBA, native 2K)
+
+defaults:
+  port: 8091
+  host: 0.0.0.0
+
+  # ONE rank. vLLM-Omni's sequence parallelism here is Ulysses-only — no ring
+  # attention, no pipeline parallelism — and tensor parallelism forces eager
+  # decode instead of CUDA graphs, which is the throughput fix on this model.
+  # A second Spark would cost graphs to buy sharding this does not need: the
+  # whole checkpoint is 30.9 GiB against ~121 GiB usable.
+  tensor_parallel: 1
+
+  # NOT a vLLM flag here — deliberately absent from the command, because the gmu
+  # guard is a KV-cache concept and this engine allocates no KV. Its ONLY effect
+  # is how much the manager's VRAM admission reserves for this deployment.
+  #
+  # So it must describe what the thing actually costs. Measured peak is 77 GiB of
+  # 121 at 2048x2048; 0.70 reserves ~85 GiB, which covers that with headroom and
+  # still leaves the node schedulable. An empty value here is NOT neutral: it is
+  # falsy, admission falls back to 0.85, and the deployment silently reserves
+  # ~105.9 GiB it never uses.
+  gpu_memory_utilization: 0.70
+
+command: |
+  vllm serve {model} \
+      --omni \
+      --host {host} \
+      --port {port}
+
+# ---------------------------------------------------------------------------------------
+# MEASURED ON HARDWARE — dgx-spark-03 (GB10, arm64), 2026-09-21, this exact image
+#
+#   Serves.                 vLLM 0.29.0, QwenImage21Pipeline resolved, single rank,
+#                           SP group sp_size=1 ulysses=1.
+#   Attention backend.      CUDNN_ATTN, selected automatically:
+#                             "Defaulting to diffusion attention backend CUDNN_ATTN
+#                              (Blackwell sm_121, cuDNN 92000, head_dim 128)"
+#                           Note 92000 = cuDNN 9.20, and NVIDIA does not document
+#                           CC 12.1 support until 9.24. It works anyway — decode
+#                           graphs captured, output correct. Pinning >=9.24 is cheap
+#                           insurance, not a fix for an observed failure.
+#   sm_121 kernels.         No "no kernel image" anywhere. The image carries
+#                           TORCH_CUDA_ARCH_LIST up to 12.0 only and runs on sm_121
+#                           through Blackwell family compatibility.
+#   Steps.                  The server's own default is ~50 (a bare {model,prompt}
+#                           request took 68.3 s). Every figure below uses an
+#                           explicit 40, which is the upstream reference. Steps are
+#                           a per-request field, not a recipe placeholder — there is
+#                           deliberately no `num_inference_steps` default here,
+#                           because the command block cannot pass one.
+#   Latency, 40 steps.      1024x1024  ->  55.7 s cold, 52.9 s warm
+#                           2048x2048  ->  271.2 s        <- 4.9x for 4x the pixels
+#                           RGBA 1024  ->  55.9 s         <- transparency is free
+#   Memory.                 Peak 77 GiB of 121 at 2048x2048. BF16 fits; FP8 optional.
+#   Cold start.             ~23 min first time, of which 1179 s (19.7 min) was the
+#                           31 GB weight download to /mnt/tank at ~26 MB/s. ~3 min
+#                           once cached — load plus graph capture.
+#   Endpoints.              /v1/models, /health, /metrics all 200, so the agent's
+#                           existing apiReady gate works unchanged.
+#   Output correctness.     Verified numerically, NOT against a reference. The server
+#                           returns PNGs at compression level 0, so an IDAT ratio of
+#                           exactly 1.000 looks like garbage and is not: raw pixels
+#                           compress to 0.519 and mean horizontal neighbour delta is
+#                           1.33 (noise would be ~85). This rules out the silent-
+#                           garbage mode the support PR's open review warns about;
+#                           it does not rule out subtle drift.
+#
+# NOT MEASURED — do not assume
+#   --served-model-name.    Deliberately omitted. Untested with --omni, and a custom
+#                           served name is how models have become unpoolable here
+#                           before. The published name is therefore the HF repo id,
+#                           "Qwen/Qwen-Image-2.1", which is what the gateway routes on.
+#   /v1/images/edits.       The endpoint exists. Never exercised.
+#   Multi-rank.             Upstream documents a two-host text-encoder-TP2 / DiT-USP2
+#                           shape for a sibling model. Not tried here.
+#   Concurrency.            One request at a time throughout. The support PR notes
+#                           --step-execution --max-num-seqs does not yet work.
+#
+# LICENSE. Qwen Research License — NON-COMMERCIAL only, plus a "Built with Qwen"
+# attribution requirement. Every other model in this catalog is Apache-2.0 or MIT.

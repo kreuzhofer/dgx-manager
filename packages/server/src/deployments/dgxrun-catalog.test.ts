@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { loadDgxrunCatalog, resolveDgxrunRecipeFile } from "./dgxrun-catalog.js";
+import { loadDgxrunCatalog, resolveDgxrunRecipeFile, parseModalityYaml } from "./dgxrun-catalog.js";
 
 const VALID = `runner: dgxrun
 model: CosmicRaisins/GLM-5.2-AWQ-INT4-15pct
@@ -108,5 +108,82 @@ describe("resolveDgxrunRecipeFile", () => {
     expect(resolveDgxrunRecipeFile("@dgxrun/../../etc/passwd", "/d")).toBeNull();
     expect(resolveDgxrunRecipeFile("@dgxrun/sub/evil", "/d")).toBeNull();
     expect(resolveDgxrunRecipeFile("@dgxrun/", "/d")).toBeNull();
+  });
+});
+
+const IMAGE = `runner: dgxrun
+arch: arm64
+modality: image
+cluster_only: false
+model: Qwen/Qwen-Image-2.1
+container: vllm/vllm-omni:qwen-image21-arm64-cu130
+defaults:
+  tensor_parallel: 1
+  port: 8091
+command: vllm serve {model} --omni`;
+
+describe("loadDgxrunCatalog modality", () => {
+  const deps = (files: Record<string, string>) => ({
+    readDir: () => Object.keys(files),
+    readFile: (p: string) => files[p.split("/").pop()!],
+  });
+
+  /** A recipe that declares `modality: image` is tagged image, so the gateway
+   *  routes /v1/images/generations to it and never offers it for chat. */
+  it("reads modality from the recipe", () => {
+    const r = loadDgxrunCatalog("/d", deps({ "qwen-image.yaml": IMAGE }));
+    expect(r[0].modality).toBe("image");
+  });
+
+  /** Backward compatibility, the same rule `arch` follows: every recipe written
+   *  before `modality:` existed serves text, so an absent field must keep
+   *  meaning exactly that. */
+  it("defaults modality to text when the recipe omits it", () => {
+    const r = loadDgxrunCatalog("/d", deps({ "glm.yaml": VALID }));
+    expect(r[0].modality).toBe("text");
+  });
+
+  /** An unrecognised modality drops the recipe rather than defaulting to text.
+   *  Silently serving an image model on the chat path is the failure this field
+   *  exists to prevent — the same reasoning as the arch guard. */
+  it("drops a recipe whose modality is unrecognised", () => {
+    const typo = IMAGE.replace("modality: image", "modality: imgae");
+    const r = loadDgxrunCatalog("/d", deps({ "typo.yaml": typo }));
+    expect(r).toEqual([]);
+  });
+});
+
+describe("parseModalityYaml", () => {
+  /** The catalog only sees `recipeFile` deploys. This reads the same bytes for
+   *  recipePath and inline recipeYaml, so an image model cannot enter the fleet
+   *  through a door that tags it text. */
+  it("reads modality from raw recipe YAML", () => {
+    expect(parseModalityYaml("runner: dgxrun\nmodality: image\n")).toEqual({ modality: "image" });
+  });
+
+  it("defaults to text when the key is absent", () => {
+    expect(parseModalityYaml("runner: dgxrun\n")).toEqual({ modality: "text" });
+  });
+
+  it("tolerates quoting and trailing whitespace", () => {
+    expect(parseModalityYaml('modality: "image"  \n')).toEqual({ modality: "image" });
+  });
+
+  /** An unrecognised value is an error, not a default — the direct-deploy paths
+   *  must be at least as strict as the catalog, which drops such a recipe. */
+  it("errors on an unrecognised modality rather than downgrading it", () => {
+    const r = parseModalityYaml("modality: imgae\n");
+    expect(r).toHaveProperty("error");
+    expect("error" in r && r.error).toContain("modality must be one of");
+  });
+
+  it("does not match a commented-out declaration", () => {
+    expect(parseModalityYaml("# modality: image\nrunner: dgxrun\n")).toEqual({ modality: "text" });
+  });
+
+  /** `modality` nested under another key is a different field. Matching it would
+   *  let an unrelated block silently change how the gateway routes. */
+  it("does not match an indented key inside a nested block", () => {
+    expect(parseModalityYaml("defaults:\n  modality: image\n")).toEqual({ modality: "text" });
   });
 });

@@ -6,6 +6,7 @@ import { assessPool } from "./eligibility.js";
 import { selectLeastOutstanding } from "./selection.js";
 import { acquire, outstandingFor } from "./inflight.js";
 import { nextRotation } from "./rotation.js";
+import { deploymentModality, partitionByModality, PATH_MODALITY, servingPathFor } from "./modality.js";
 import {
   BodyTooLargeError,
   FORWARDED_PATHS,
@@ -131,6 +132,7 @@ async function proxyInference(req: Request, res: Response, path: ForwardedPath):
       id: true,
       status: true,
       port: true,
+      config: true,
       node: { select: { id: true, name: true, ipAddress: true } },
     },
   });
@@ -145,10 +147,33 @@ async function proxyInference(req: Request, res: Response, path: ForwardedPath):
     return;
   }
 
+  // A published name resolves to a pool, but a pool only answers the surface
+  // its recipe declared. An image model handed a chat completion accepts the
+  // request and never finishes it, so the mismatch has to be refused here —
+  // a hang at the client is indistinguishable from a slow model.
+  const required = PATH_MODALITY[path];
+  const { matching, mismatched } = partitionByModality(
+    candidates,
+    (c) => deploymentModality(c.config),
+    required,
+  );
+  if (matching.length === 0) {
+    const served = deploymentModality(mismatched[0].config);
+    openAiError(
+      res,
+      400,
+      `The model '${requested}' serves ${served}, not ${required}. ` +
+        `Send this model to ${servingPathFor(served)} instead.`,
+      "invalid_request_error",
+      "modality_mismatch",
+    );
+    return;
+  }
+
   const agentHub = req.app.get("agentHub") as { isAgentOnline(nodeId: string): boolean } | undefined;
-  const nodeNames = new Map(candidates.map((c) => [c.node.id, c.node.name]));
+  const nodeNames = new Map(matching.map((c) => [c.node.id, c.node.name]));
   const pool = assessPool(
-    candidates.map((c) => ({
+    matching.map((c) => ({
       id: c.id,
       status: c.status,
       port: c.port,
@@ -216,6 +241,9 @@ gatewayRouter.post("/chat/completions", (req, res) =>
 );
 gatewayRouter.post("/embeddings", (req, res) =>
   proxyInference(req, res, FORWARDED_PATHS.embeddings),
+);
+gatewayRouter.post("/images/generations", (req, res) =>
+  proxyInference(req, res, FORWARDED_PATHS.imagesGenerations),
 );
 
 /**

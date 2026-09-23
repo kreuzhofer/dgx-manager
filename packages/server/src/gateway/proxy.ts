@@ -130,6 +130,7 @@ export function forwardableHeaders(headers: http.IncomingHttpHeaders): Record<st
 export const FORWARDED_PATHS = {
   chatCompletions: "/v1/chat/completions",
   embeddings: "/v1/embeddings",
+  imagesGenerations: "/v1/images/generations",
 } as const;
 
 export type ForwardedPath = (typeof FORWARDED_PATHS)[keyof typeof FORWARDED_PATHS];
