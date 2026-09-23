@@ -104,6 +104,29 @@ forwarded, so client credentials never reach a node.
 **This is a decision, not an oversight.** Revisiting it means authenticating the
 management API too; doing the gateway alone would buy very little.
 
+## Amendment (2026-09-23) — modality joins the routing key
+
+Decision 1 assumed one surface: every deployment answered chat or embeddings, so
+the published name alone selected a pool and the path was incidental. Serving an
+image model (#116) broke that assumption in the worst available way — not with an
+error, but with a hang. `vllm-omni` accepts a chat completion against a diffusion
+model and never completes it.
+
+So the routing key is now *(published name, modality)*. A recipe declares
+`modality:`; it is parsed from the recipe YAML at deploy time for every deploy
+source, stored on the deployment, and checked before a member is chosen. A
+mismatch is refused with 400 `modality_mismatch` naming the correct path, and
+nothing is forwarded.
+
+This does not weaken Decision 2: the allowlist still admits only paths the
+gateway serves, and modality narrows that further rather than widening it. It
+does not touch Decision 3.
+
+What was deliberately **not** done: filtering the model list by modality. The
+gateway cannot tell an image client from a chat client, so filtering would hide
+the model from exactly the caller that wants it. The list stays complete and the
+refusal carries the information instead.
+
 ## Consequences
 
 - Two tables, an API, an unmounted proxy module, and a placeholder page were

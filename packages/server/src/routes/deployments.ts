@@ -18,7 +18,7 @@ import { maxOutMemoryForDeploy, parseMaxOutMemYaml } from "../deployments/maxout
 import { sshExec } from "../ssh/executor.js";
 import { resolveDgxrunRecipe, type DgxrunResolvedRecipe } from "../deployments/dgxrun-recipe.js";
 import { buildDgxrunDeploys, DEFAULT_MASTER_PORT } from "../deployments/dgxrun-dispatch.js";
-import { resolveDgxrunRecipeFile, getDgxrunCatalog, DGXRUN_RECIPES_DIR } from "../deployments/dgxrun-catalog.js";
+import { resolveDgxrunRecipeFile, getDgxrunCatalog, DGXRUN_RECIPES_DIR, parseModalityYaml, type Modality } from "../deployments/dgxrun-catalog.js";
 import { deploymentEndpointUrl, resolveServedModelName } from "../benchmarks/endpoint.js";
 import { buildClaudeLaunchSnippet, CLAUDE_AUTH_TOKEN } from "../deployments/claude-launch.js";
 import { runtimeAllowedOnNode, evalNodeRejectionMessage } from "../nodes/role.js";
@@ -252,6 +252,11 @@ deploymentsRouter.post("/", async (req, res) => {
   // recipe here, so the reclaim step falls back to probing the head node's
   // sparkrun cache. See the maxoutmem block further down.
   let maxOutMemFlag: boolean | undefined;
+  // Which OpenAI surface this deployment will serve. Parsed from the recipe
+  // YAML rather than the catalog, because the catalog only covers `recipeFile`
+  // — a `recipePath` or inline `recipeYaml` image deploy would otherwise be
+  // tagged `text` and have chat routed at it.
+  let modality: Modality = "text";
   if (!isOllama) {
     let recipeText: string | undefined;
     if (inlineRecipeYaml) {
@@ -267,6 +272,11 @@ deploymentsRouter.post("/", async (req, res) => {
     }
     if (recipeText) {
       maxOutMemFlag = parseMaxOutMemYaml(recipeText);
+      const parsedModality = parseModalityYaml(recipeText);
+      if ("error" in parsedModality) {
+        return res.status(400).json({ error: parsedModality.error });
+      }
+      modality = parsedModality.modality;
       const resolved = resolveDgxrunRecipe(recipeText);
       if (resolved.isDgxrun && resolved.error) {
         return res.status(400).json({ error: resolved.error });
@@ -512,14 +522,6 @@ deploymentsRouter.post("/", async (req, res) => {
   const masterPort = isDgxrun ? ((config?.masterPort as number) || DEFAULT_MASTER_PORT) : undefined;
 
   // Create deployment
-  // Modality travels in the config blob beside `runner`, so the gateway can
-  // route /v1/images/generations without re-reading the recipe on every
-  // request. Written only when it is not the default, so every existing
-  // blob keeps its exact bytes and `text` stays the absent-field meaning.
-  const catalogEntry = recipeFile
-    ? getDgxrunCatalog().find((r) => r.file === recipeFile)
-    : undefined;
-  const modality = catalogEntry?.modality ?? "text";
 
   const deployment = await prisma.deployment.create({
     data: {
@@ -534,7 +536,18 @@ deploymentsRouter.post("/", async (req, res) => {
         // `runner: "dgxrun"` marks the deployment so DELETE/status handlers fan
         // undeploy to every rank. The resolved recipe is persisted so a future
         // restart can re-fan without re-reading the source.
-        : { recipeFile, ...(isDgxrun ? { runner: "dgxrun", masterPort, dgxrunRecipe } : {}), ...(modality !== "text" ? { modality } : {}), ...config }),
+        : {
+            recipeFile,
+            ...(isDgxrun ? { runner: "dgxrun", masterPort, dgxrunRecipe } : {}),
+            ...config,
+            // AFTER ...config, deliberately. `config` is unvalidated request
+            // body; spreading it last would let a caller send
+            // `config:{modality:"text"}` against an image recipe and turn the
+            // gateway's modality guard off, which is the never-answered chat
+            // request this whole field exists to prevent. Derived from the
+            // recipe, so the recipe wins.
+            ...(modality !== "text" ? { modality } : {}),
+          }),
     },
   });
 
@@ -867,7 +880,9 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
   const overrides = (req.body && typeof req.body === "object" && req.body.config && typeof req.body.config === "object")
     ? req.body.config as Record<string, unknown>
     : {};
-  const RESERVED = new Set(["recipeFile", "runtime", "modelName", "modelType"]);
+  // `modality` is derived from the recipe, never caller-supplied — same reason
+  // the POST path spreads it after `...config`.
+  const RESERVED = new Set(["recipeFile", "runtime", "modelName", "modelType", "modality"]);
   for (const k of Object.keys(overrides)) {
     if (RESERVED.has(k)) delete overrides[k];
   }
@@ -975,7 +990,7 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
 
     // `config` is the persisted blob, so it carries dgxrun bookkeeping alongside
     // the user's recipe params. Those keys are not recipe placeholders — strip them.
-    const BOOKKEEPING = new Set(["runner", "masterPort", "dgxrunRecipe", "recipeFile"]);
+    const BOOKKEEPING = new Set(["runner", "masterPort", "dgxrunRecipe", "recipeFile", "modality"]);
     const params: Record<string, string | number> = {};
     for (const [k, v] of Object.entries(config)) {
       if (BOOKKEEPING.has(k)) continue;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { loadDgxrunCatalog, resolveDgxrunRecipeFile } from "./dgxrun-catalog.js";
+import { loadDgxrunCatalog, resolveDgxrunRecipeFile, parseModalityYaml } from "./dgxrun-catalog.js";
 
 const VALID = `runner: dgxrun
 model: CosmicRaisins/GLM-5.2-AWQ-INT4-15pct
@@ -150,5 +150,40 @@ describe("loadDgxrunCatalog modality", () => {
     const typo = IMAGE.replace("modality: image", "modality: imgae");
     const r = loadDgxrunCatalog("/d", deps({ "typo.yaml": typo }));
     expect(r).toEqual([]);
+  });
+});
+
+describe("parseModalityYaml", () => {
+  /** The catalog only sees `recipeFile` deploys. This reads the same bytes for
+   *  recipePath and inline recipeYaml, so an image model cannot enter the fleet
+   *  through a door that tags it text. */
+  it("reads modality from raw recipe YAML", () => {
+    expect(parseModalityYaml("runner: dgxrun\nmodality: image\n")).toEqual({ modality: "image" });
+  });
+
+  it("defaults to text when the key is absent", () => {
+    expect(parseModalityYaml("runner: dgxrun\n")).toEqual({ modality: "text" });
+  });
+
+  it("tolerates quoting and trailing whitespace", () => {
+    expect(parseModalityYaml('modality: "image"  \n')).toEqual({ modality: "image" });
+  });
+
+  /** An unrecognised value is an error, not a default — the direct-deploy paths
+   *  must be at least as strict as the catalog, which drops such a recipe. */
+  it("errors on an unrecognised modality rather than downgrading it", () => {
+    const r = parseModalityYaml("modality: imgae\n");
+    expect(r).toHaveProperty("error");
+    expect("error" in r && r.error).toContain("modality must be one of");
+  });
+
+  it("does not match a commented-out declaration", () => {
+    expect(parseModalityYaml("# modality: image\nrunner: dgxrun\n")).toEqual({ modality: "text" });
+  });
+
+  /** `modality` nested under another key is a different field. Matching it would
+   *  let an unrelated block silently change how the gateway routes. */
+  it("does not match an indented key inside a nested block", () => {
+    expect(parseModalityYaml("defaults:\n  modality: image\n")).toEqual({ modality: "text" });
   });
 });

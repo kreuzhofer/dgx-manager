@@ -58,6 +58,34 @@ implementation — it rules out noise, not subtle drift.
 31 GB onto `/mnt/tank` (~26 MB/s) — cached thereafter. Total cold start to serving was ~23 min, of
 which only ~3 min was load plus graph capture.
 
+**Transparency — the headline feature — works, and is free.** `[verified]` There is no API
+parameter; it is prompt-driven (*"This is an RGBA image with transparency… the background is
+transparent"*). Measured on the same node: alpha mean **85.9** across **192 distinct values**,
+**66.2% fully transparent / 33.3% fully opaque**, versus 254.9 with 2 values for an opaque prompt.
+Wall time **55.9 s**, indistinguishable from the opaque run — RGBA costs nothing.
+
+**⚠ `/v1/omni/sleep` is a trap, not a way to park the model.** `[verified]` It requires `stage_ids`
+(a bare `{}` is a 400), and then **defaults to level=2, which discards weights**. It freed only
+**7.65 GiB of 81.91 GiB resident** (`allocator_freed 0.00, physical_freed 7.65, rank_residual
+81.91`) — a cache reclaim. `wake_up()` then returns *"not yet implemented: weights were discarded
+from GPU and reloading from disk is not yet supported. Use sleep(level=1) instead"*, and a
+generation issued while asleep **hangs** rather than failing (killed at 200 s). The server is
+unrecoverable until restarted. **There is no park-and-release: serving this model holds the node**,
+which is the fact the "is it worth a Spark" question turns on.
+
+**Served through the product, end to end.** `[verified]` Deployed from the committed recipe via
+`POST /api/deployments`, reaching `running` with `publishedName: Qwen/Qwen-Image-2.1`. A chat
+completion to it is refused 400 `modality_mismatch` without reaching the node; an image generated
+**through the gateway** took **55.9 s**, indistinguishable from hitting the node directly, so the
+proxy hop costs nothing measurable even while streaming a 4 MB base64 body.
+
+**OpenAI client compatibility.** `[verified]` The response is OpenAI-shaped (`created`, `data[0]`
+with `b64_json`, plus `revised_prompt`/`url` as nulls) and a bare `{model, prompt}` works. Two
+caveats for real clients: **`response_format: "url"` is rejected** (*"Only 'b64_json' or 'file'
+response format is supported"*) — and `url` is OpenAI's own default for images; and a default
+request takes **68.3 s** (the server's own step default is ~50), which exceeds the 30–60 s timeout
+many chat clients ship with. The gateway imposes no timeout, so that failure is client-side.
+
 **Operational note.** The probe ran as a container the manager does not own, which exposed a real
 gap: admission reads live metrics (`vram.ts:168`) so a *fresh* deploy is correctly refused, but
 `loadConflicts` builds its list from deployment rows, so the 409 names nothing (#101). Worse, on a
@@ -320,8 +348,12 @@ Ordered so the cheapest thing that could kill it runs first.
 2. **Generate at 2048².** The number nobody has. This is the decision.
 3. **Check output correctness, not just that it ran** — PR #7759 has open review findings on
    KV-cache aliasing and condition-latent ordering, which are silent-wrong-output classes, not
-   crashes. Verify RGBA transparency actually round-trips.
-4. Only then: recipe, gateway path, and whether it earns a Spark.
+   crashes. ✅ Done: transparency round-trips (see the measured block), and output was verified
+   numerically against noise. Still NOT done: comparison against a reference implementation, which
+   is the only thing that would catch subtle drift.
+4. ✅ Done: recipe committed, gateway path shipped. **Open: whether it earns a Spark** — at
+   ~55 s per 1024² image and 271 s at 2K, with no way to park the model, this holds a node
+   outright.
 
 ---
 

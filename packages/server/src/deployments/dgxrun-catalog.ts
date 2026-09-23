@@ -25,7 +25,39 @@ interface Recipe {
 export const MODALITIES = ["text", "image"] as const;
 export type Modality = (typeof MODALITIES)[number];
 
+/** The one place the membership test lives — it was written three ways across
+ *  two files, and a narrowing predicate is what every caller actually wanted. */
+export function isModality(v: unknown): v is Modality {
+  return typeof v === "string" && (MODALITIES as readonly string[]).includes(v);
+}
+
 export type CatalogRecipe = Recipe & { source: "dgxrun" };
+
+/**
+ * Read `modality:` out of raw recipe YAML.
+ *
+ * Separate from the catalog loader because the catalog only covers `recipeFile`
+ * deploys. A `recipePath` or inline `recipeYaml` deploy never passes through it,
+ * and tagging those `text` by default would route chat at an image model — the
+ * hang this field exists to prevent. The manager already holds the YAML for all
+ * three sources, so this reads the same bytes the agent will run.
+ *
+ * Absent means `text`. An unrecognised value is an ERROR rather than a default:
+ * the catalog drops such a recipe, and the direct-deploy paths must be at least
+ * as strict, or declaring `modality: imgae` would be a silent downgrade.
+ */
+export function parseModalityYaml(text: string): { modality: Modality } | { error: string } {
+  // Column 0 only: `modality` is a top-level key, and a nested one (say under
+  // `defaults:`) is a different field entirely. Accepting indentation would let
+  // an unrelated block silently change how the gateway routes the deployment.
+  const m = /^modality[ \t]*:[ \t]*["']?([A-Za-z0-9_-]+)["']?[ \t]*$/m.exec(text);
+  if (!m) return { modality: "text" };
+  const value = m[1];
+  if (!isModality(value)) {
+    return { error: `modality must be one of ${MODALITIES.join(" | ")}, got ${JSON.stringify(value)}` };
+  }
+  return { modality: value };
+}
 
 interface CatalogDeps {
   readDir?: (d: string) => string[];
@@ -80,7 +112,7 @@ export function loadDgxrunCatalog(dir: string, deps: CatalogDeps = {}): CatalogR
     // "text" would advertise an image model on /v1/chat/completions, where it
     // would accept the request and never answer it.
     const modality = o.modality === undefined ? "text" : o.modality;
-    if (!(MODALITIES as readonly unknown[]).includes(modality)) {
+    if (!isModality(modality)) {
       console.warn(
         `[dgxrun-catalog] skip ${f}: modality must be one of ${MODALITIES.join(" | ")}, got ${JSON.stringify(o.modality)}`,
       );
@@ -95,7 +127,7 @@ export function loadDgxrunCatalog(dir: string, deps: CatalogDeps = {}): CatalogR
       container: "dgxrun",
       source: "dgxrun",
       arch,
-      modality: modality as Modality,
+      modality,
       cluster_only: o.cluster_only === undefined ? true : o.cluster_only === true,
       defaults: {
         tensor_parallel: d.tensor_parallel ?? 4,

@@ -62,16 +62,16 @@ defaults:
   # whole checkpoint is 30.9 GiB against ~121 GiB usable.
   tensor_parallel: 1
 
-  # NOT pinned, and deliberately absent from the command. vLLM's gmu guard is a
-  # KV-cache concept; this engine allocates no KV. Peak was 77 GiB of 121 at
-  # 2048x2048 with the default, so there is nothing to tune yet. Revisit only if
-  # a second workload has to share the node.
-  gpu_memory_utilization: ""
-
-  # Diffusion steps, not tokens. 40 is the upstream reference and what every
-  # measurement below used. Callers override per-request via
-  # `num_inference_steps`; this is only the recipe's documented baseline.
-  num_inference_steps: 40
+  # NOT a vLLM flag here — deliberately absent from the command, because the gmu
+  # guard is a KV-cache concept and this engine allocates no KV. Its ONLY effect
+  # is how much the manager's VRAM admission reserves for this deployment.
+  #
+  # So it must describe what the thing actually costs. Measured peak is 77 GiB of
+  # 121 at 2048x2048; 0.70 reserves ~85 GiB, which covers that with headroom and
+  # still leaves the node schedulable. An empty value here is NOT neutral: it is
+  # falsy, admission falls back to 0.85, and the deployment silently reserves
+  # ~105.9 GiB it never uses.
+  gpu_memory_utilization: 0.70
 
 command: |
   vllm serve {model} \
@@ -94,6 +94,12 @@ command: |
 #   sm_121 kernels.         No "no kernel image" anywhere. The image carries
 #                           TORCH_CUDA_ARCH_LIST up to 12.0 only and runs on sm_121
 #                           through Blackwell family compatibility.
+#   Steps.                  The server's own default is ~50 (a bare {model,prompt}
+#                           request took 68.3 s). Every figure below uses an
+#                           explicit 40, which is the upstream reference. Steps are
+#                           a per-request field, not a recipe placeholder — there is
+#                           deliberately no `num_inference_steps` default here,
+#                           because the command block cannot pass one.
 #   Latency, 40 steps.      1024x1024  ->  55.7 s cold, 52.9 s warm
 #                           2048x2048  ->  271.2 s        <- 4.9x for 4x the pixels
 #                           RGBA 1024  ->  55.9 s         <- transparency is free

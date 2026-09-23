@@ -6,7 +6,7 @@ import { assessPool } from "./eligibility.js";
 import { selectLeastOutstanding } from "./selection.js";
 import { acquire, outstandingFor } from "./inflight.js";
 import { nextRotation } from "./rotation.js";
-import { deploymentModality, partitionByModality, PATH_MODALITY } from "./modality.js";
+import { deploymentModality, partitionByModality, PATH_MODALITY, servingPathFor } from "./modality.js";
 import {
   BodyTooLargeError,
   FORWARDED_PATHS,
@@ -151,19 +151,19 @@ async function proxyInference(req: Request, res: Response, path: ForwardedPath):
   // its recipe declared. An image model handed a chat completion accepts the
   // request and never finishes it, so the mismatch has to be refused here —
   // a hang at the client is indistinguishable from a slow model.
-  const required = PATH_MODALITY[path as keyof typeof PATH_MODALITY];
-  const { matching, mismatched } = partitionByModality<(typeof candidates)[number]>(
+  const required = PATH_MODALITY[path];
+  const { matching, mismatched } = partitionByModality(
     candidates,
     (c) => deploymentModality(c.config),
     required,
   );
   if (matching.length === 0) {
-    const served = [...new Set(mismatched.map((c) => deploymentModality(c.config)))].sort();
+    const served = deploymentModality(mismatched[0].config);
     openAiError(
       res,
       400,
-      `The model '${requested}' serves ${served.join(" and ")}, not ${required}. ` +
-        `Send this model to ${servingPathFor(served[0])} instead.`,
+      `The model '${requested}' serves ${served}, not ${required}. ` +
+        `Send this model to ${servingPathFor(served)} instead.`,
       "invalid_request_error",
       "modality_mismatch",
     );
@@ -234,11 +234,6 @@ async function proxyInference(req: Request, res: Response, path: ForwardedPath):
   } finally {
     release();
   }
-}
-
-/** The path a client should have used, named in a modality refusal. */
-function servingPathFor(modality: string): string {
-  return modality === "image" ? "POST /v1/images/generations" : "POST /v1/chat/completions";
 }
 
 gatewayRouter.post("/chat/completions", (req, res) =>

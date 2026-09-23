@@ -405,3 +405,104 @@ describe("POST /api/deployments/:id/restart — dgxrun runner", () => {
     }
   });
 });
+
+/**
+ * The deploy-time half of modality routing. The gateway tests prove routing is
+ * correct GIVEN a blob; these prove the blob is written correctly, which is the
+ * half a code review found untested.
+ */
+describe("modality is derived from the recipe and not caller-supplied", () => {
+  const IMAGE_YAML = [
+    "runner: dgxrun",
+    "modality: image",
+    "cluster_only: false",
+    "model: Qwen/Qwen-Image-2.1",
+    "container: vllm/vllm-omni:probe",
+    "defaults:",
+    "  port: 8091",
+    "  host: 0.0.0.0",
+    "  tensor_parallel: 1",
+    "command: vllm serve {model} --omni",
+  ].join("\n");
+
+  async function blobFor(id: string) {
+    const row = await prisma.deployment.findUnique({ where: { id } });
+    return JSON.parse(row!.config!) as Record<string, unknown>;
+  }
+
+  it("tags an image recipe deployed by recipeFile", async () => {
+    await wipeAll();
+    const ids = await seedCluster(1); // solo: send `nodeId`, a 1-element nodeIds 400s (#35)
+    mkdirSync(RECIPES_DIR, { recursive: true });
+    writeFileSync(join(RECIPES_DIR, "img-probe.yaml"), IMAGE_YAML);
+
+    const res = await request(makeApp(makeStubHub().hub))
+      .post("/api/deployments")
+      .send({ nodeId: ids[0], recipeFile: "@dgxrun/img-probe" });
+
+    expect(res.status).toBe(201);
+    expect((await blobFor(res.body.id)).modality).toBe("image");
+  });
+
+  /** `config` is unvalidated request body. Spreading it last would let a caller
+   *  send `config:{modality:"text"}` against an image recipe and switch the
+   *  gateway's guard off — the never-answered chat request the field exists to
+   *  prevent. The recipe must win. */
+  it("ignores a caller's attempt to override the derived modality", async () => {
+    await wipeAll();
+    const ids = await seedCluster(1); // solo: send `nodeId`, a 1-element nodeIds 400s (#35)
+    mkdirSync(RECIPES_DIR, { recursive: true });
+    writeFileSync(join(RECIPES_DIR, "img-probe.yaml"), IMAGE_YAML);
+
+    const res = await request(makeApp(makeStubHub().hub))
+      .post("/api/deployments")
+      .send({ nodeId: ids[0], recipeFile: "@dgxrun/img-probe", config: { modality: "text" } });
+
+    expect(res.status).toBe(201);
+    expect((await blobFor(res.body.id)).modality).toBe("image");
+  });
+
+  /** The catalog only covers `recipeFile`. An inline-YAML image deploy that fell
+   *  back to `text` would have chat routed at it — same hang, different door. */
+  it("tags an image recipe deployed by inline recipeYaml", async () => {
+    await wipeAll();
+    const ids = await seedCluster(1); // solo: send `nodeId`, a 1-element nodeIds 400s (#35)
+
+    const res = await request(makeApp(makeStubHub().hub))
+      .post("/api/deployments")
+      .send({ nodeId: ids[0], recipeYaml: IMAGE_YAML });
+
+    expect(res.status).toBe(201);
+    expect((await blobFor(res.body.id)).modality).toBe("image");
+  });
+
+  /** A typo'd modality is refused outright rather than silently downgraded to
+   *  text, matching what the catalog loader does with the same mistake. */
+  it("refuses a recipe whose modality is unrecognised", async () => {
+    await wipeAll();
+    const ids = await seedCluster(1); // solo: send `nodeId`, a 1-element nodeIds 400s (#35)
+
+    const res = await request(makeApp(makeStubHub().hub))
+      .post("/api/deployments")
+      .send({ nodeId: ids[0], recipeYaml: IMAGE_YAML.replace("modality: image", "modality: imgae") });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("modality must be one of");
+  });
+
+  /** Backward compatibility: a recipe with no modality is text, and the key is
+   *  omitted from the blob entirely so existing rows stay byte-identical. */
+  it("omits the key for a text recipe", async () => {
+    await wipeAll();
+    const ids = await seedCluster(2);
+    mkdirSync(RECIPES_DIR, { recursive: true });
+    writeFileSync(join(RECIPES_DIR, "glm-probe.yaml"), DGXRUN_YAML);
+
+    const res = await request(makeApp(makeStubHub().hub))
+      .post("/api/deployments")
+      .send({ nodeIds: ids, recipeFile: "@dgxrun/glm-probe" });
+
+    expect(res.status).toBe(201);
+    expect(Object.keys(await blobFor(res.body.id))).not.toContain("modality");
+  });
+});

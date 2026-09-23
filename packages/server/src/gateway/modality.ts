@@ -1,4 +1,5 @@
-import { MODALITIES, type Modality } from "../deployments/dgxrun-catalog.js";
+import { MODALITIES, isModality, type Modality } from "../deployments/dgxrun-catalog.js";
+import { FORWARDED_PATHS, type ForwardedPath } from "./proxy.js";
 
 /**
  * Which OpenAI surface a deployment serves, and which surface a request wants.
@@ -40,15 +41,57 @@ export function deploymentModality(config: string | null | undefined): Modality 
     return "text";
   }
   const m = parsed?.modality;
-  return (MODALITIES as readonly unknown[]).includes(m) ? (m as Modality) : "text";
+  if (m === undefined) return "text";
+  if (isModality(m)) return m;
+  // Falling back is right — a blob we cannot read must not take the gateway
+  // down — but Principle 3 requires the fallback be observable, not silent.
+  // Warned once per distinct value so a wedged deployment cannot flood the log
+  // on every request it serves.
+  warnUnknownModalityOnce(m);
+  return "text";
 }
 
-/** The OpenAI paths the gateway forwards, and the modality each requires. */
+const warnedModalities = new Set<string>();
+function warnUnknownModalityOnce(value: unknown): void {
+  const key = JSON.stringify(value) ?? String(value);
+  if (warnedModalities.has(key)) return;
+  warnedModalities.add(key);
+  console.warn(
+    `[gateway] deployment config declares an unrecognised modality ${key}; ` +
+      `routing it as text. Expected one of ${MODALITIES.join(" | ")}.`,
+  );
+}
+
+/** Test seam: the warn-once cache is module state and must not leak between tests. */
+export function resetModalityWarnings(): void {
+  warnedModalities.clear();
+}
+
+/**
+ * The OpenAI paths the gateway forwards, and the modality each requires.
+ *
+ * `satisfies Record<ForwardedPath, Modality>` is the point of this shape: add a
+ * fourth entry to FORWARDED_PATHS without one here and this stops compiling.
+ * Without it the lookup silently yields `undefined`, every member mismatches,
+ * and the caller is told the model "serves text, not undefined".
+ */
 export const PATH_MODALITY = {
-  "/v1/chat/completions": "text",
-  "/v1/embeddings": "text",
-  "/v1/images/generations": "image",
-} as const satisfies Record<string, Modality>;
+  [FORWARDED_PATHS.chatCompletions]: "text",
+  [FORWARDED_PATHS.embeddings]: "text",
+  [FORWARDED_PATHS.imagesGenerations]: "image",
+} as const satisfies Record<ForwardedPath, Modality>;
+
+/**
+ * The path a client should have used for this modality, named in a refusal.
+ *
+ * Derived from PATH_MODALITY rather than hardcoded, so it cannot drift from the
+ * routing table and a modality with no serving path says so instead of guessing
+ * chat.
+ */
+export function servingPathFor(modality: Modality): string {
+  const hit = Object.entries(PATH_MODALITY).find(([, m]) => m === modality);
+  return hit ? `POST ${hit[0]}` : `no path this gateway serves`;
+}
 
 /**
  * Split a pool by whether its members can serve this path.

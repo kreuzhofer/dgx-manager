@@ -58,6 +58,31 @@ name may be served by any member. A pool of one is the ordinary case; a pool
 forms implicitly when a second deployment claims the same published name, and
 dissolves when it stops.
 
+### Modality
+
+Which OpenAI surface a deployment can serve: `text` (chat and embeddings) or
+`image`. Declared by the recipe, derived from it at deploy time, and carried on
+the deployment — never supplied by the caller, because it is a property of the
+model, not of the request.
+
+It exists because a published name alone stopped being enough to route. An image
+engine handed a chat completion does **not** refuse it: it accepts the request
+and never finishes it, so the caller sees a hang rather than an error. The
+routing key is therefore *(published name, modality)*, and a request whose path
+wants a modality the pool does not serve is refused at the gateway, before any
+node is contacted, naming the path the caller should have used.
+
+An unrecognised modality is refused rather than defaulted — at recipe load, and
+again at deploy — because a typo silently meaning `text` would advertise an
+image model on the chat path, which is the exact hang the field prevents. An
+*absent* modality does mean `text`, which is the only thing every recipe written
+before the field existed could have been.
+
+The model list is deliberately **not** filtered by modality. Filtering would
+make an image model undiscoverable to the image clients that want it, and the
+gateway cannot tell which kind of client is asking. Discovery stays complete;
+the refusal is what teaches a client it picked the wrong surface.
+
 ### Runner
 
 The mechanism that launches a deployment's runtime on a node and supervises it
