@@ -400,9 +400,41 @@ describe("POST /api/deployments/:id/restart — dgxrun runner", () => {
     const { hub, sent } = makeStubHub();
     await request(makeApp(hub)).post(`/api/deployments/${created.body.id}/restart`).send({});
     const params = sent[0].message.payload.params as Record<string, unknown>;
-    for (const k of ["runner", "dgxrunRecipe", "masterPort", "recipeFile"]) {
+    for (const k of ["runner", "dgxrunRecipe", "masterPort", "recipeFile", "authorisedGpuMem"]) {
       expect(params).not.toHaveProperty(k);
     }
+  });
+
+  // #118: the share a restart may credit itself with is persisted on the row.
+  // A dgxrun recipe's default is the only place this one comes from, and the
+  // restart path's REQUEST chain cannot see it — it reads the sparkrun catalog
+  // only, so it resolves 0.85 for every dgxrun row. A no-op restart must
+  // therefore leave the stored share alone rather than re-derive it, or it
+  // silently downgrades 0.88 → 0.85 and under-credits the next restart.
+  it("records the recipe's gpu_memory_utilization as the authorised share, and a no-op restart does not downgrade it", async () => {
+    await wipeAll();
+    const ids = await seedCluster(2);
+    const created = await request(makeApp(makeStubHub().hub))
+      .post("/api/deployments")
+      .send({ nodeIds: ids, recipeYaml: DGXRUN_YAML });
+    expect(created.status).toBe(201);
+    const readShare = async () =>
+      JSON.parse((await prisma.deployment.findUnique({ where: { id: created.body.id } }))!.config!)
+        .authorisedGpuMem;
+
+    expect(await readShare()).toBe(0.88);
+
+    await request(makeApp(makeStubHub().hub))
+      .post(`/api/deployments/${created.body.id}/restart`)
+      .send({});
+    expect(await readShare()).toBe(0.88);
+
+    // An explicit override is the one thing that does move it: the restart was
+    // just admitted at the new share.
+    await request(makeApp(makeStubHub().hub))
+      .post(`/api/deployments/${created.body.id}/restart`)
+      .send({ config: { gpuMem: 0.94 } });
+    expect(await readShare()).toBe(0.94);
   });
 });
 

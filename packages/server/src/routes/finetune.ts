@@ -1219,7 +1219,16 @@ finetuneRouter.post("/:id/deploy", async (req, res) => {
       // route can dispatch cmd:finetune:deploy with the original variant
       // (bf16 vs fp8). Without this, restarts default to bf16 even for
       // deployments originally launched as fp8.
-      config: JSON.stringify({ ...config, localModelPath: modelPath, artifactVariant: variant }),
+      // authorisedGpuMem AFTER ...config: it is the share a later restart may
+      // credit itself with, so the admission check above is its only author —
+      // a caller who could set it would be writing their own reclaim
+      // allowance (#118, ADR 0004).
+      config: JSON.stringify({
+        ...config,
+        localModelPath: modelPath,
+        artifactVariant: variant,
+        authorisedGpuMem: gpuMemForAdmission,
+      }),
     },
   });
 

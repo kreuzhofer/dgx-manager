@@ -97,6 +97,7 @@ async function wipeAll() {
   await prisma.clusterNode.deleteMany({});
   await prisma.deployment.deleteMany({});
   await prisma.metricSnapshot.deleteMany({});
+  await prisma.fineTuneClusterNode.deleteMany({});
   await prisma.fineTuneJob.deleteMany({});
   await prisma.model.deleteMany({});
   await prisma.node.deleteMany({});
@@ -271,7 +272,7 @@ describe("POST /api/deployments/:id/restart — VRAM admission self-exclusion (k
     expect((sentMessages[0].message as { type: string }).type).toBe("cmd:deploy");
   });
 
-  it("still 409s when the resident VRAM is held by a DIFFERENT deployment (reclaim is scoped to self)", async () => {
+  it("still 409s when the resident VRAM is held by a DIFFERENT deployment (reclaim is capped by the restart's own authorised share)", async () => {
     await wipeAll();
 
     await prisma.node.create({
@@ -302,7 +303,18 @@ describe("POST /api/deployments/:id/restart — VRAM admission self-exclusion (k
       },
     });
 
-    // The small deployment we restart only owns ~4 GB.
+    // The small deployment we restart is a tiny embedding model, authorised for
+    // 0.05 of the node — ~6 GB.
+    //
+    // This test used to bound the reclaim by subtracting the other deployment's
+    // recorded memory. That subtraction is gone (#118, ADR 0004 Decision 3): the
+    // column it summed holds the whole NODE's reading for vLLM and dgxrun, so
+    // co-resident deployments over-counted each other into a spurious refusal.
+    // The protection it provided now comes from the authorised share instead —
+    // which is why the share has to be a real one here. A deployment authorised
+    // for most of the node would be credited most of the node, and admitted;
+    // that over-credit is bounded and accepted (ADR 0004 Decision 4), where the
+    // old rule's was unbounded.
     const model = await prisma.model.create({
       data: { name: "small-model", runtime: "vllm" },
     });
@@ -312,7 +324,7 @@ describe("POST /api/deployments/:id/restart — VRAM admission self-exclusion (k
         modelId: model.id,
         status: "running",
         port: 8000,
-        config: JSON.stringify({ port: 8000 }),
+        config: JSON.stringify({ port: 8000, gpuMem: 0.05, authorisedGpuMem: 0.05 }),
         vramActual: 4_000,
       },
     });
@@ -326,12 +338,408 @@ describe("POST /api/deployments/:id/restart — VRAM admission self-exclusion (k
 
     expect(res.status).toBe(409);
     expect(res.body.shortfalls).toHaveLength(1);
-    // Only the small deployment's own footprint is reclaimable; the other
-    // ~90 GB stays counted, so the node is still short — and the conflict list
-    // names the OTHER deployment, not the one being restarted.
+    // Credited 6 GB — its own share — not the 95 GB the node is reading. The
+    // other ~90 GB stays counted, so the node is still short, and the conflict
+    // list names the OTHER deployment rather than the one being restarted.
+    expect(res.body.shortfalls[0].vramUsedMB).toBe(95_000 - Math.round(124_546 * 0.05));
     expect(
       res.body.shortfalls[0].conflicts.map((c: { name: string }) => c.name),
     ).toContain("big-resident");
     expect(sentMessages).toHaveLength(0);
+  });
+});
+
+/**
+ * kreuzhofer/dgx-manager#118 — a restart used to be credited with ALL
+ * unattributed memory on its node, so a node busy with a training run read as
+ * empty and the restart was admitted however full the node was.
+ *
+ * The rule now: a restart is credited at most its **authorised share** of the
+ * node (`round(vramTotal × its saved gpu_memory_utilization)`). Everything else
+ * in the node reading counts against it. See ADR 0004 and CONTEXT.md § Node
+ * memory.
+ *
+ * Every node below is 120 GB so the arithmetic is readable: the safety margin
+ * is 5% = 6 GB, and a share of 0.25 is 30 GB.
+ */
+const NODE_TOTAL_MB = 120_000;
+const MARGIN_MB = 6_000;
+
+async function seedNode(id: string, name: string, vramUsedMB: number | null) {
+  await prisma.node.create({
+    data: { id, name, ipAddress: `192.168.44.${36 + Number(id.slice(-1))}`, vramTotal: NODE_TOTAL_MB, status: "online" },
+  });
+  if (vramUsedMB !== null) {
+    await prisma.metricSnapshot.create({
+      data: { nodeId: id, vramUsed: vramUsedMB, gpuUtil: 0, timestamp: new Date() },
+    });
+  }
+}
+
+/** A training job on `nodeId`. Holding columns are the caller's to set. */
+async function seedFineTuneJob(
+  nodeId: string,
+  displayName: string,
+  holding: { status?: string; mergeStatus?: string | null; quantizationStatus?: string | null },
+) {
+  return prisma.fineTuneJob.create({
+    data: {
+      nodeId,
+      displayName,
+      baseModel: "Qwen/Qwen3.8-27B",
+      method: "lora",
+      dataset: "b-mc2/sql-create-context",
+      status: holding.status ?? "running",
+      mergeStatus: holding.mergeStatus ?? null,
+      quantizationStatus: holding.quantizationStatus ?? null,
+    },
+  });
+}
+
+/** A vLLM deployment on `nodeId` carrying `authorisedGpuMem` in its config blob. */
+async function seedDeployment(opts: {
+  nodeId: string;
+  modelName: string;
+  status?: string;
+  config: Record<string, unknown>;
+  vramActual?: number | null;
+}) {
+  const model = await prisma.model.create({
+    data: { name: opts.modelName, runtime: "vllm" },
+  });
+  return prisma.deployment.create({
+    data: {
+      nodeId: opts.nodeId,
+      modelId: model.id,
+      status: opts.status ?? "running",
+      port: 8000,
+      config: JSON.stringify(opts.config),
+      vramActual: opts.vramActual ?? null,
+    },
+  });
+}
+
+type ConflictBody = { id: string; name: string | null; status: string; kind: string };
+
+describe("POST /api/deployments/:id/restart — unattributed memory counts against the restart (#118)", () => {
+  it("refuses a restart on a node a running fine-tune job has filled", async () => {
+    await wipeAll();
+    // spark-01 reads 118 GB used. None of it is a deployment: a LoRA run is
+    // training there. The manager has a FineTuneJob row for it but, before
+    // this fix, no admission path looked at one.
+    await seedNode("node-1", "dgx-spark-01", 118_000);
+    await seedFineTuneJob("node-1", "sql-lora-27b", { status: "running" });
+
+    // The deployment being restarted is stopped and holds nothing. It was
+    // authorised for 0.25 of the node — 30 GB — so that is the most it can be
+    // credited with, leaving 88 GB counted against it: 32 GB free, 36 GB
+    // needed. Under the old rule the whole 118 GB was credited to it, the node
+    // computed as empty, and this restart was admitted.
+    const dep = await seedDeployment({
+      nodeId: "node-1",
+      modelName: "small-served-model",
+      status: "stopped",
+      config: { port: 8000, gpuMem: 0.25, authorisedGpuMem: 0.25 },
+    });
+
+    const { hub, sentMessages } = makeStubHub(RECIPE);
+    const res = await request(makeApp(hub)).post(`/api/deployments/${dep.id}/restart`).send({});
+
+    expect(res.status).toBe(409);
+    expect(res.body.shortfalls).toHaveLength(1);
+    expect(res.body.shortfalls[0].vramUsedMB).toBe(118_000 - 30_000);
+    expect(res.body.shortfalls[0].vramThresholdMB).toBe(30_000 + MARGIN_MB);
+    // The refusal names the training run, and says it is one.
+    const conflicts = res.body.shortfalls[0].conflicts as ConflictBody[];
+    expect(conflicts.map((c) => c.name)).toEqual(["sql-lora-27b"]);
+    expect(conflicts[0].kind).toBe("finetune");
+    expect(conflicts[0].status).toBe("running");
+    expect(res.body.error).toContain("sql-lora-27b");
+    expect(res.body.error).toContain("fine-tune");
+    // Nothing was launched.
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it("counts a merging job as a holder — merging loads the base model", async () => {
+    await wipeAll();
+    await seedNode("node-1", "dgx-spark-01", 118_000);
+    await seedFineTuneJob("node-1", "merge-in-flight", {
+      status: "completed",
+      mergeStatus: "running",
+    });
+    const dep = await seedDeployment({
+      nodeId: "node-1",
+      modelName: "small-served-model",
+      status: "stopped",
+      config: { port: 8000, gpuMem: 0.25, authorisedGpuMem: 0.25 },
+    });
+
+    const { hub } = makeStubHub(RECIPE);
+    const res = await request(makeApp(hub)).post(`/api/deployments/${dep.id}/restart`).send({});
+
+    expect(res.status).toBe(409);
+    const conflicts = res.body.shortfalls[0].conflicts as ConflictBody[];
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0].name).toBe("merge-in-flight");
+    // The rendered status is the activity holding the memory, not the job's
+    // `status` column, which reads "completed" here.
+    expect(conflicts[0].status).toBe("merging");
+  });
+
+  it("counts a quantizing job as a holder", async () => {
+    await wipeAll();
+    await seedNode("node-1", "dgx-spark-01", 118_000);
+    await seedFineTuneJob("node-1", "fp8-quantize", {
+      status: "completed",
+      mergeStatus: "completed",
+      quantizationStatus: "quantizing",
+    });
+    const dep = await seedDeployment({
+      nodeId: "node-1",
+      modelName: "small-served-model",
+      status: "stopped",
+      config: { port: 8000, gpuMem: 0.25, authorisedGpuMem: 0.25 },
+    });
+
+    const { hub } = makeStubHub(RECIPE);
+    const res = await request(makeApp(hub)).post(`/api/deployments/${dep.id}/restart`).send({});
+
+    expect(res.status).toBe(409);
+    const conflicts = res.body.shortfalls[0].conflicts as ConflictBody[];
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0].name).toBe("fp8-quantize");
+    expect(conflicts[0].status).toBe("quantizing");
+  });
+
+  it("does not name a finished job as a holder", async () => {
+    await wipeAll();
+    await seedNode("node-1", "dgx-spark-01", 118_000);
+    // Nothing in flight: trained, merged, quantized. Whatever is holding the
+    // node's 118 GB, it is not this job — so it must not be blamed.
+    await seedFineTuneJob("node-1", "all-done", {
+      status: "completed",
+      mergeStatus: "completed",
+      quantizationStatus: "quantized",
+    });
+    const dep = await seedDeployment({
+      nodeId: "node-1",
+      modelName: "small-served-model",
+      status: "stopped",
+      config: { port: 8000, gpuMem: 0.25, authorisedGpuMem: 0.25 },
+    });
+
+    const { hub } = makeStubHub(RECIPE);
+    const res = await request(makeApp(hub)).post(`/api/deployments/${dep.id}/restart`).send({});
+
+    // Still refused — the memory is still there, unattributed — but with no
+    // holder named rather than the wrong one.
+    expect(res.status).toBe(409);
+    expect(res.body.shortfalls[0].conflicts).toEqual([]);
+  });
+
+  it("counts a multi-node training run on the worker node it occupies", async () => {
+    await wipeAll();
+    await seedNode("node-1", "dgx-spark-01", 118_000);
+    await seedNode("node-2", "dgx-spark-02", 0);
+    // Head is node-2; node-1 is a worker. A worker node is held by the job
+    // just as the head is.
+    const job = await seedFineTuneJob("node-2", "tp2-training", { status: "running" });
+    await prisma.fineTuneClusterNode.createMany({
+      data: [
+        { jobId: job.id, nodeId: "node-2", role: "head" },
+        { jobId: job.id, nodeId: "node-1", role: "worker" },
+      ],
+    });
+    const dep = await seedDeployment({
+      nodeId: "node-1",
+      modelName: "small-served-model",
+      status: "stopped",
+      config: { port: 8000, gpuMem: 0.25, authorisedGpuMem: 0.25 },
+    });
+
+    const { hub } = makeStubHub(RECIPE);
+    const res = await request(makeApp(hub)).post(`/api/deployments/${dep.id}/restart`).send({});
+
+    expect(res.status).toBe(409);
+    const conflicts = res.body.shortfalls[0].conflicts as ConflictBody[];
+    expect(conflicts.map((c) => c.name)).toEqual(["tp2-training"]);
+    expect(conflicts[0].kind).toBe("finetune");
+  });
+
+  it("credits a restart only for its SAVED share — a higher gpuMem override sizes the request, not the reclaim", async () => {
+    await wipeAll();
+    // The deployment is resident and the node reads 100 GB. It was authorised
+    // for 0.5 (60 GB); the caller restarts it at 0.9 (108 GB + 6 GB margin).
+    await seedNode("node-1", "dgx-spark-01", 100_000);
+    const dep = await seedDeployment({
+      nodeId: "node-1",
+      modelName: "grown-model",
+      config: { port: 8000, gpuMem: 0.5, authorisedGpuMem: 0.5 },
+    });
+
+    const { hub, sentMessages } = makeStubHub(RECIPE);
+    const res = await request(makeApp(hub))
+      .post(`/api/deployments/${dep.id}/restart`)
+      .send({ config: { gpuMem: 0.9 } });
+
+    // Reclaim is 60 GB, not 100 GB: 40 GB still counted, 80 GB free, 114 GB
+    // needed. Had the override sized the reclaim too, the whole 100 GB would
+    // have been credited and the node would have read empty.
+    expect(res.status).toBe(409);
+    expect(res.body.shortfalls[0].vramUsedMB).toBe(100_000 - 60_000);
+    expect(res.body.shortfalls[0].vramThresholdMB).toBe(108_000 + MARGIN_MB);
+    expect(res.body.gpuMemoryUtilization).toBe(0.9);
+    // The refusal points at the lever that gets a disagreeing user through it.
+    expect(res.body.error).toContain("gpuMem");
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it("does not spuriously refuse a restart when two deployments on one node both record the node-wide reading", async () => {
+    await wipeAll();
+    // vLLM and dgxrun deployments record the whole node's reading in
+    // `vramActual`, so two of them on one node each claim all 95 GB. The
+    // subtraction that used to bound the reclaim summed those, clamped the
+    // reclaim to zero, and refused a restart for memory that WAS its own —
+    // #1's symptom from the opposite direction.
+    await seedNode("node-1", "dgx-spark-01", 95_000);
+    const a = await seedDeployment({
+      nodeId: "node-1",
+      modelName: "co-resident-a",
+      config: { port: 8001, gpuMem: 0.8, authorisedGpuMem: 0.8 },
+      vramActual: 95_000,
+    });
+    const b = await seedDeployment({
+      nodeId: "node-1",
+      modelName: "co-resident-b",
+      config: { port: 8000, gpuMem: 0.8, authorisedGpuMem: 0.8 },
+      vramActual: 95_000,
+    });
+
+    // Either of them, not just one: the defect was symmetric.
+    for (const dep of [a, b]) {
+      const { hub, sentMessages } = makeStubHub(RECIPE);
+      const res = await request(makeApp(hub)).post(`/api/deployments/${dep.id}/restart`).send({});
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("restarting");
+      expect(sentMessages).toHaveLength(1);
+    }
+  });
+
+  it("leaves a fresh deploy's arithmetic alone, but lets it name the training run holding the node", async () => {
+    await wipeAll();
+    // A fresh deploy reclaims nothing, so the node reading is used as-is and
+    // the over-commit is refused exactly as before. What changes is that the
+    // 409 can now say what holds the memory instead of arriving with an empty
+    // conflict list (#101).
+    await seedNode("node-1", "dgx-spark-01", 60_000);
+    await seedFineTuneJob("node-1", "sql-lora-27b", { status: "running" });
+
+    const { hub, sentMessages } = makeStubHub(RECIPE);
+    const res = await request(makeApp(hub))
+      .post("/api/deployments")
+      .send({ nodeId: "node-1", recipeFile: RECIPE.file });
+
+    expect(res.status).toBe(409);
+    expect(res.body.shortfalls[0].vramUsedMB).toBe(60_000);
+    const conflicts = res.body.shortfalls[0].conflicts as ConflictBody[];
+    expect(conflicts.map((c) => c.name)).toEqual(["sql-lora-27b"]);
+    expect(conflicts[0].kind).toBe("finetune");
+    expect(sentMessages).toHaveLength(0);
+  });
+});
+
+describe("POST /api/deployments — the authorised share is persisted, not implicit (#118)", () => {
+  it("records the share admission resolved for the deployment", async () => {
+    await wipeAll();
+    await seedNode("node-1", "dgx-spark-01", 0);
+
+    const { hub } = makeStubHub(RECIPE);
+    const res = await request(makeApp(hub))
+      .post("/api/deployments")
+      .send({ nodeId: "node-1", recipeFile: RECIPE.file });
+
+    expect(res.status).toBe(201);
+    const row = await prisma.deployment.findUniqueOrThrow({ where: { id: res.body.id } });
+    // The recipe default, resolved at admission time — the deployment's claim
+    // is now explicit on the row instead of being re-derived from a catalog
+    // that refreshes on its own schedule.
+    expect(JSON.parse(row.config!).authorisedGpuMem).toBe(0.85);
+  });
+
+  it("records the caller's override when one sizes the request", async () => {
+    await wipeAll();
+    await seedNode("node-1", "dgx-spark-01", 0);
+
+    const { hub } = makeStubHub(RECIPE);
+    const res = await request(makeApp(hub))
+      .post("/api/deployments")
+      .send({ nodeId: "node-1", recipeFile: RECIPE.file, config: { gpuMem: 0.5 } });
+
+    expect(res.status).toBe(201);
+    const row = await prisma.deployment.findUniqueOrThrow({ where: { id: res.body.id } });
+    expect(JSON.parse(row.config!).authorisedGpuMem).toBe(0.5);
+  });
+
+  it("ignores an authorisedGpuMem supplied in the request body", async () => {
+    await wipeAll();
+    await seedNode("node-1", "dgx-spark-01", 0);
+
+    const { hub } = makeStubHub(RECIPE);
+    const res = await request(makeApp(hub))
+      .post("/api/deployments")
+      .send({
+        nodeId: "node-1",
+        recipeFile: RECIPE.file,
+        // A caller who could set this would be writing their own reclaim
+        // allowance — the admission check must be the only author of it.
+        config: { gpuMem: 0.5, authorisedGpuMem: 0.99 },
+      });
+
+    expect(res.status).toBe(201);
+    const row = await prisma.deployment.findUniqueOrThrow({ where: { id: res.body.id } });
+    expect(JSON.parse(row.config!).authorisedGpuMem).toBe(0.5);
+  });
+
+  it("ignores an authorisedGpuMem supplied to a restart", async () => {
+    await wipeAll();
+    await seedNode("node-1", "dgx-spark-01", 20_000);
+    const dep = await seedDeployment({
+      nodeId: "node-1",
+      modelName: "grown-model",
+      config: { port: 8000, gpuMem: 0.5, authorisedGpuMem: 0.5 },
+    });
+
+    const { hub } = makeStubHub(RECIPE);
+    const res = await request(makeApp(hub))
+      .post(`/api/deployments/${dep.id}/restart`)
+      // A caller who could raise this would widen the reclaim every subsequent
+      // restart is granted — the check's own bound, set by the caller.
+      .send({ config: { authorisedGpuMem: 0.99 } });
+
+    expect(res.status).toBe(200);
+    const row = await prisma.deployment.findUniqueOrThrow({ where: { id: dep.id } });
+    expect(JSON.parse(row.config!).authorisedGpuMem).toBe(0.5);
+  });
+
+  it("carries the share forward when a restart is admitted at a new one", async () => {
+    await wipeAll();
+    await seedNode("node-1", "dgx-spark-01", 20_000);
+    const dep = await seedDeployment({
+      nodeId: "node-1",
+      modelName: "grown-model",
+      config: { port: 8000, gpuMem: 0.5, authorisedGpuMem: 0.5 },
+    });
+
+    const { hub } = makeStubHub(RECIPE);
+    const res = await request(makeApp(hub))
+      .post(`/api/deployments/${dep.id}/restart`)
+      .send({ config: { gpuMem: 0.7 } });
+
+    expect(res.status).toBe(200);
+    const row = await prisma.deployment.findUniqueOrThrow({ where: { id: dep.id } });
+    // Admitted at 0.7, so 0.7 is what it is authorised for from now on —
+    // otherwise the NEXT restart would be under-credited and refused for
+    // memory that is its own.
+    expect(JSON.parse(row.config!).authorisedGpuMem).toBe(0.7);
   });
 });

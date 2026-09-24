@@ -386,6 +386,12 @@ deploymentsRouter.post("/", async (req, res) => {
   }
 
   let vramEstimate = 0;
+  // The share of each node this deployment is authorised to request, as
+  // resolved by the admission check below. Persisted onto the row so a later
+  // restart can bound its reclaim by it instead of re-deriving it from a recipe
+  // catalog that refreshes on its own schedule (#118, ADR 0004). Stays
+  // undefined for Ollama, which has no share and no admission check.
+  let authorisedGpuMem: number | undefined;
 
   // Compute VRAM the deployment would request, for the response body and
   // for the admission check. For Ollama it's based on the model's listed
@@ -486,6 +492,7 @@ deploymentsRouter.post("/", async (req, res) => {
     }
 
     const gpuMemUtil = (config?.gpuMem as number) || (dgxrunRecipe?.defaults?.gpu_memory_utilization as number) || (recipe?.defaults?.gpu_memory_utilization as number) || 0.85;
+    authorisedGpuMem = gpuMemUtil;
     const shortfalls = await checkVllmVramAdmission(checkNodeIds, gpuMemUtil);
     if (shortfalls.length > 0) {
       return res.status(409).json({
@@ -547,6 +554,11 @@ deploymentsRouter.post("/", async (req, res) => {
             // request this whole field exists to prevent. Derived from the
             // recipe, so the recipe wins.
             ...(modality !== "text" ? { modality } : {}),
+            // Likewise after `...config`, and for the same reason: this is the
+            // share a restart may credit itself with, so a caller able to set it
+            // would be writing their own reclaim allowance. The admission check
+            // above is its only author.
+            authorisedGpuMem,
           }),
     },
   });
@@ -823,10 +835,13 @@ deploymentsRouter.delete("/:id", async (req, res) => {
  *       to the head-node agent. Merges caller-supplied `config` overrides over the saved
  *       config, allowing fixes like lowering `max_model_len` after an OOM without deleting
  *       and re-creating the deployment. Reserved fields (`recipeFile`, `runtime`,
- *       `modelName`, `modelType`) cannot be overridden — they identify the deployment.
+ *       `modelName`, `modelType`) cannot be overridden — they identify the deployment —
+ *       and neither can `authorisedGpuMem`, which admission writes for itself.
  *       Also accepts a `displayName` override to change the vLLM served-model-name.
- *       Runs the same VRAM admission check as the initial deploy. Status moves to
- *       `restarting` while the agent is working.
+ *       Runs the same VRAM admission check as the initial deploy, with one difference:
+ *       a `gpuMem` override sizes the request but never the reclaim, which stays bounded
+ *       by the share the deployment was already authorised for (#118, ADR 0004). Status
+ *       moves to `restarting` while the agent is working.
  *     parameters:
  *       - in: path
  *         name: id
@@ -839,7 +854,7 @@ deploymentsRouter.delete("/:id", async (req, res) => {
  *           schema:
  *             type: object
  *             properties:
- *               config: { type: object, description: "Config overrides (port, gpuMem, maxModelLen, tensorParallel, artifactVariant…). Reserved: recipeFile, runtime, modelName, modelType." }
+ *               config: { type: object, description: "Config overrides (port, gpuMem, maxModelLen, tensorParallel, artifactVariant…). Reserved: recipeFile, runtime, modelName, modelType, authorisedGpuMem." }
  *               displayName: { type: string, nullable: true, description: "New vLLM --served-model-name / dashboard label. Must be unique among active deployments." }
  *     responses:
  *       '200':
@@ -882,11 +897,20 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
     : {};
   // `modality` is derived from the recipe, never caller-supplied — same reason
   // the POST path spreads it after `...config`.
-  const RESERVED = new Set(["recipeFile", "runtime", "modelName", "modelType", "modality"]);
+  const RESERVED = new Set([
+    "recipeFile", "runtime", "modelName", "modelType", "modality",
+    // The share a restart may credit itself with. A caller able to set it would
+    // be writing their own reclaim allowance; the admission check below is its
+    // only author (#118, ADR 0004).
+    "authorisedGpuMem",
+  ]);
   for (const k of Object.keys(overrides)) {
     if (RESERVED.has(k)) delete overrides[k];
   }
   const config = { ...savedConfig, ...overrides };
+  // Whether the persisted blob needs rewriting. Caller overrides are one reason;
+  // a re-resolved authorised share (below) is the other.
+  let configDirty = Object.keys(overrides).length > 0;
 
   if (typeof overrides.artifactVariant !== "undefined" && !isValidVariantSlug(overrides.artifactVariant)) {
     return res.status(400).json({
@@ -930,25 +954,66 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
 
   const isOllamaRestart = config.runtime === "ollama";
 
-  // Same pre-flight VRAM check as the deploy POST. Excludes the deployment
-  // being restarted from the conflict list (it's about to be relaunched, so
-  // its own VRAM usage shouldn't count against itself).
+  // Same pre-flight VRAM check as the deploy POST, with one extra number: the
+  // share this deployment was ALREADY authorised for. Two different values are
+  // in play and confusing them is how #118 happened —
+  //
+  //   requested — what the caller is asking for now (overrides win). Sizes the
+  //               reservation the node has to clear.
+  //   authorised — what the deployment was granted when it was created. Bounds
+  //               how much of the node reading is credited back to it as memory
+  //               it is about to release. Restarting at a bigger share must not
+  //               widen what the deployment is credited for, so the override is
+  //               deliberately absent from this side.
+  //
+  // `authorisedGpuMem` is persisted by the POST path; the recipe-default chain
+  // behind it recovers a share for rows created before that (ADR 0004 accepts
+  // that a refreshed catalog can drift an old row's recovered share).
   if (!isOllamaRestart) {
     const agentHub: AgentHub = req.app.get("agentHub");
     const recipe = config.recipeFile
       ? agentHub.getRecipes().find((r) => r.file === config.recipeFile)
       : undefined;
-    const gpuMemUtil = (config.gpuMem as number) || (recipe?.defaults?.gpu_memory_utilization as number) || 0.85;
+    const recipeGpuMem = recipe?.defaults?.gpu_memory_utilization as number | undefined;
+    const requestedGpuMemUtil = (config.gpuMem as number) || recipeGpuMem || 0.85;
+    // The authorised chain also reaches the dgxrun recipe persisted in the blob.
+    // `recipe` above is the sparkrun catalog only, so without this term every
+    // dgxrun row predating `authorisedGpuMem` recovers a flat 0.85 while its
+    // recipe actually runs at 0.88–0.94 — an under-credit, and #1's symptom.
+    const savedDgxrunGpuMem = (savedConfig.dgxrunRecipe as { defaults?: { gpu_memory_utilization?: number } } | undefined)
+      ?.defaults?.gpu_memory_utilization;
+    const authorisedGpuMemUtil =
+      (savedConfig.authorisedGpuMem as number)
+      || (savedConfig.gpuMem as number)
+      || savedDgxrunGpuMem
+      || recipeGpuMem
+      || 0.85;
     const checkNodeIds = deployment.clusterMode
       ? deployment.clusterNodes.map((cn) => cn.nodeId)
       : [deployment.nodeId];
-    const shortfalls = await checkVllmVramAdmission(checkNodeIds, gpuMemUtil, deployment.id);
+    const shortfalls = await checkVllmVramAdmission(checkNodeIds, requestedGpuMemUtil, {
+      deploymentId: deployment.id,
+      authorisedGpuMemUtil,
+    });
     if (shortfalls.length > 0) {
       return res.status(409).json({
         error: `Not enough VRAM on ${shortfalls.length} of ${checkNodeIds.length} node(s): ${vramShortfallMessage(shortfalls)}`,
         shortfalls,
-        gpuMemoryUtilization: gpuMemUtil,
+        gpuMemoryUtilization: requestedGpuMemUtil,
       });
+    }
+    // A caller-supplied override — and ONLY that — changes what the deployment is
+    // authorised for: it was just admitted at the new share, so a later restart
+    // should be credited up to it rather than the old one.
+    //
+    // Gated on the override's presence rather than on the resolved value
+    // differing, because the request chain above cannot see a dgxrun or
+    // fine-tune recipe's default and falls back to 0.85 for those rows. Comparing
+    // values would let an ordinary no-op restart quietly DOWNGRADE a 0.88 share
+    // to 0.85 and re-arm the under-credit on the next restart.
+    if (overrides.gpuMem !== undefined) {
+      config.authorisedGpuMem = requestedGpuMemUtil;
+      configDirty = true;
     }
   }
   // dgxrun deployments must be re-fanned per rank, exactly as the POST path does.
@@ -990,7 +1055,11 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
 
     // `config` is the persisted blob, so it carries dgxrun bookkeeping alongside
     // the user's recipe params. Those keys are not recipe placeholders — strip them.
-    const BOOKKEEPING = new Set(["runner", "masterPort", "dgxrunRecipe", "recipeFile", "modality"]);
+    const BOOKKEEPING = new Set([
+      "runner", "masterPort", "dgxrunRecipe", "recipeFile", "modality",
+      // Admission bookkeeping, not a recipe placeholder.
+      "authorisedGpuMem",
+    ]);
     const params: Record<string, string | number> = {};
     for (const [k, v] of Object.entries(config)) {
       if (BOOKKEEPING.has(k)) continue;
@@ -1026,7 +1095,7 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
         // deployment or change its recipe — so the name the runtime answers to
         // must be discovered again rather than inherited.
         publishedName: null,
-        ...(Object.keys(overrides).length > 0 ? { config: JSON.stringify(config) } : {}),
+        ...(configDirty ? { config: JSON.stringify(config) } : {}),
         ...(newDisplayName !== deployment.displayName ? { displayName: newDisplayName } : {}),
       },
     });
@@ -1108,7 +1177,7 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
       publishedName: null,
       // Persist the merged config so future restarts (or the agent's own
       // reconciliation) see the updated overrides.
-      ...(Object.keys(overrides).length > 0 ? { config: JSON.stringify(config) } : {}),
+      ...(configDirty ? { config: JSON.stringify(config) } : {}),
       ...(newDisplayName !== deployment.displayName ? { displayName: newDisplayName } : {}),
     },
   });
