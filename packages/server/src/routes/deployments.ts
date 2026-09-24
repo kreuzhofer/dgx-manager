@@ -4,7 +4,7 @@ import { prisma } from "../prisma.js";
 import { SHARED_STORAGE } from "../env.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import type { AgentHub } from "../ws/agent-hub.js";
-import { checkVllmVramAdmission, resolveAuthorisedShare, vramShortfallMessage } from "../admission/vram.js";
+import { checkVllmVramAdmission, DEFAULT_GPU_MEM_UTIL, firstUsableShare, isUsableShare, vramShortfallMessage } from "../admission/vram.js";
 import { checkRecipeArchAdmission, recipeArchMismatchMessage } from "../admission/recipe-arch.js";
 import { readCatalog as readOllamaCatalog } from "../ollama/catalog-store.js";
 import { ollamaVramEstimateMB } from "../ollama/vram-estimate.js";
@@ -491,7 +491,7 @@ deploymentsRouter.post("/", async (req, res) => {
       }
     }
 
-    const gpuMemUtil = (config?.gpuMem as number) || (dgxrunRecipe?.defaults?.gpu_memory_utilization as number) || (recipe?.defaults?.gpu_memory_utilization as number) || 0.85;
+    const gpuMemUtil = (config?.gpuMem as number) || (dgxrunRecipe?.defaults?.gpu_memory_utilization as number) || (recipe?.defaults?.gpu_memory_utilization as number) || DEFAULT_GPU_MEM_UTIL;
     authorisedGpuMem = gpuMemUtil;
     const shortfalls = await checkVllmVramAdmission(checkNodeIds, gpuMemUtil);
     if (shortfalls.length > 0) {
@@ -838,10 +838,12 @@ deploymentsRouter.delete("/:id", async (req, res) => {
  *       `modelName`, `modelType`) cannot be overridden — they identify the deployment —
  *       and neither can `authorisedGpuMem`, which admission writes for itself.
  *       Also accepts a `displayName` override to change the vLLM served-model-name.
- *       Runs the same VRAM admission check as the initial deploy, with one difference:
- *       a `gpuMem` override sizes the request but never the reclaim, which stays bounded
- *       by the share the deployment was already authorised for (#118, ADR 0004). Status
- *       moves to `restarting` while the agent is working.
+ *       Runs the same VRAM admission check as the initial deploy, against the share the
+ *       deployment's own recipe declares — sparkrun, dgxrun or a fine-tune's training
+ *       recipe (#122) — with one difference: a `gpuMem` override sizes the request but
+ *       never the reclaim, which stays bounded by the share the deployment was already
+ *       authorised for (#118, ADR 0004). Status moves to `restarting` while the agent
+ *       is working.
  *     parameters:
  *       - in: path
  *         name: id
@@ -860,7 +862,7 @@ deploymentsRouter.delete("/:id", async (req, res) => {
  *       '200':
  *         description: '{ status: "restarting" }'
  *       '400':
- *         description: Invalid artifactVariant or displayName
+ *         description: Invalid gpuMem, artifactVariant, or displayName
  *       '404':
  *         description: Deployment not found
  *       '409':
@@ -911,6 +913,20 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
   // Whether the persisted blob needs rewriting. Caller overrides are one reason;
   // a re-resolved authorised share (below) is the other.
   let configDirty = Object.keys(overrides).length > 0;
+
+  // `gpuMem` is the number admission checks against and the lever a refusal
+  // points at (#122, ADR 0004 Decision 5), so an unreadable one must not reach
+  // the arithmetic: it used to sail through as `Math.round(total * "abc")` and
+  // produce a 409 whose every figure serialised as null — a refusal nobody can
+  // act on. The MERGED value is checked, not just this request's override,
+  // because a share stored by an earlier hand-rolled deploy is just as
+  // unreadable, and substituting a recipe default for it would check one number
+  // while the launch honoured another.
+  if (typeof config.gpuMem !== "undefined" && !isUsableShare(config.gpuMem)) {
+    return res.status(400).json({
+      error: `Invalid gpuMem: must be a number greater than 0 and at most 1 (got ${JSON.stringify(config.gpuMem)})`,
+    });
+  }
 
   if (typeof overrides.artifactVariant !== "undefined" && !isValidVariantSlug(overrides.artifactVariant)) {
     return res.status(400).json({
@@ -985,31 +1001,48 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
       ? agentHub.getRecipes().find((r) => r.file === config.recipeFile)
       : undefined;
     const recipeGpuMem = recipe?.defaults?.gpu_memory_utilization as number | undefined;
-    const requestedGpuMemUtil = (config.gpuMem as number) || recipeGpuMem || 0.85;
-    // Where the authorised share is recovered from, in priority order. The order
-    // is the domain knowledge; `resolveAuthorisedShare` owns only "the first of
-    // these that could be a share", and is unit-tested for that.
+
+    // What each recipe source declares, listed in the order the LAUNCH honours
+    // them. `recipe` above is the sparkrun catalog keyed on `config.recipeFile`,
+    // and two runtimes are invisible to it: dgxrun, whose resolved recipe lives
+    // in the row's own blob (and is what the re-fan below replays), and
+    // fine-tune, whose recipe lives on the FineTuneJob so the row carries no
+    // `recipeFile` at all. Both chains below end in these three; they differ only
+    // in what comes first.
     //
-    // The last three terms exist because `recipe` above is the sparkrun catalog
-    // keyed on `config.recipeFile`, and two runtimes are invisible to it: dgxrun
-    // (whose resolved recipe lives in the row's own blob) and fine-tune (whose
-    // recipe lives on the FineTuneJob, so the row has no `recipeFile` at all).
-    // Without them every such row predating `authorisedGpuMem` recovers a flat
-    // 0.85 while its recipe actually runs at 0.88–0.94 — an under-credit, and
-    // #1's symptom returning (#118, #123).
+    // The live dgxrun catalog is deliberately not consulted: a dgxrun restart
+    // without a persisted `dgxrunRecipe` is refused outright further down, so a
+    // row that can restart at all always has the saved one.
     const savedDgxrunGpuMem = (savedConfig.dgxrunRecipe as { defaults?: { gpu_memory_utilization?: number } } | undefined)
       ?.defaults?.gpu_memory_utilization;
-    const authorisedGpuMemUtil = resolveAuthorisedShare([
+    const trainingRecipeGpuMem = trainingRecipe?.deploy?.gpu_memory_utilization;
+
+    // Both chains end in these and differ only in what they put first, which is
+    // the whole distinction between the two numbers.
+    const recipeDeclaredShares = [savedDgxrunGpuMem, trainingRecipeGpuMem, recipeGpuMem];
+
+    // Sizes the reservation the node has to clear. Before #122 it saw only the
+    // sparkrun catalog, so every dgxrun and fine-tune restart was checked against
+    // 0.85 while its container ran at 0.88–0.94.
+    //
+    // For dgxrun this now matches the launch exactly: the re-fan below replays
+    // `config.dgxrunRecipe`, and an override beats a recipe default there as it
+    // does here. For a fine-tune row it deliberately does NOT: the agent reads
+    // `config.gpuMem ?? 0.85` from the persisted blob and never opens the training
+    // recipe, so a row predating #118 is CHECKED against the recipe's share and
+    // LAUNCHED at 0.85. That is an over-check, the safe direction, and the reason
+    // the two disagree is worth its own issue rather than a wider change here.
+    const requestedGpuMemUtil = firstUsableShare([config.gpuMem, ...recipeDeclaredShares]);
+
+    // Bounds the reclaim. Recovered from what the row itself records first, so a
+    // recipe edited since the deploy cannot widen an existing claim; the recipe
+    // terms are the fallback for rows predating `authorisedGpuMem` (#118, #123).
+    const authorisedGpuMemUtil = firstUsableShare([
       // What the deploy path granted this row. Written since #118.
       savedConfig.authorisedGpuMem,
       // How a row predating that recorded an explicit share.
       savedConfig.gpuMem,
-      // The dgxrun recipe, resolved into the row's blob at deploy time.
-      savedDgxrunGpuMem,
-      // A fine-tune's training recipe, live from the agent catalog.
-      trainingRecipe?.deploy?.gpu_memory_utilization,
-      // The sparkrun catalog, for a row that does carry a recipeFile.
-      recipeGpuMem,
+      ...recipeDeclaredShares,
     ]);
     const checkNodeIds = deployment.clusterMode
       ? deployment.clusterNodes.map((cn) => cn.nodeId)
@@ -1030,10 +1063,13 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
     // should be credited up to it rather than the old one.
     //
     // Gated on the override's presence rather than on the resolved value
-    // differing, because the request chain above cannot see a dgxrun or
-    // fine-tune recipe's default and falls back to 0.85 for those rows. Comparing
-    // values would let an ordinary no-op restart quietly DOWNGRADE a 0.88 share
-    // to 0.85 and re-arm the under-credit on the next restart.
+    // differing. #122 removed the original reason for that — the request chain
+    // could not see a dgxrun or fine-tune recipe, so a no-op restart re-derived
+    // 0.85 and DOWNGRADED a stored 0.88 — but the gate is still right for the
+    // mirror-image reason: a training recipe is read live from the agent catalog
+    // and can be edited after a deploy, so comparing values would let a raised
+    // recipe default silently WIDEN a stored claim, which ADR 0004 Decision 3
+    // forbids. Only the caller may move it.
     if (overrides.gpuMem !== undefined) {
       config.authorisedGpuMem = requestedGpuMemUtil;
       configDirty = true;

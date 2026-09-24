@@ -648,6 +648,68 @@ describe("POST /api/deployments/:id/restart — unattributed memory counts again
   });
 });
 
+/**
+ * #122 made `gpuMem` the lever a refusal points at, and the number admission
+ * checks against. An unreadable one used to reach the arithmetic and produce a
+ * 409 whose every figure serialised as `null` — a refusal nobody can act on.
+ * Validated at the boundary now, the way the route already validates
+ * `artifactVariant`.
+ */
+describe("POST /api/deployments/:id/restart — the gpuMem override is validated at the boundary", () => {
+  it.each([
+    ["a non-numeric string", "abc"],
+    ["a numeric string", "0.9"],
+    ["more than a whole node", 1.5],
+    ["zero", 0],
+    ["a negative share", -0.5],
+    ["null", null],
+  ])("refuses %s with a 400 rather than admitting on a nonsense number", async (_why, gpuMem) => {
+    await wipeAll();
+    await seedNode("node-1", "dgx-spark-01", 0);
+    const dep = await seedDeployment({
+      nodeId: "node-1",
+      modelName: "some-model",
+      config: { port: 8000, gpuMem: 0.5, authorisedGpuMem: 0.5 },
+    });
+
+    const { hub, sentMessages } = makeStubHub(RECIPE);
+    const res = await request(makeApp(hub))
+      .post(`/api/deployments/${dep.id}/restart`)
+      .send({ config: { gpuMem } });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("gpuMem");
+    expect(sentMessages).toHaveLength(0);
+    // And the row's authorised share is untouched by a rejected request.
+    const row = await prisma.deployment.findUniqueOrThrow({ where: { id: dep.id } });
+    expect(JSON.parse(row.config!).authorisedGpuMem).toBe(0.5);
+  });
+
+  // A share that is readable passes the boundary and is then judged on the merits.
+  // 1 is a legitimate share and still cannot be admitted — a whole node plus the
+  // safety margin exceeds the node — which is a 409, not a 400.
+  it.each([
+    [0.5, 200],
+    [0.88, 200],
+    [1, 409],
+  ])("accepts %s and lets admission decide it (%i)", async (gpuMem, expected) => {
+    await wipeAll();
+    await seedNode("node-1", "dgx-spark-01", 0);
+    const dep = await seedDeployment({
+      nodeId: "node-1",
+      modelName: "some-model",
+      config: { port: 8000, gpuMem: 0.5, authorisedGpuMem: 0.5 },
+    });
+
+    const { hub } = makeStubHub(RECIPE);
+    const res = await request(makeApp(hub))
+      .post(`/api/deployments/${dep.id}/restart`)
+      .send({ config: { gpuMem } });
+
+    expect(res.status).toBe(expected);
+  });
+});
+
 describe("POST /api/deployments — the authorised share is persisted, not implicit (#118)", () => {
   it("records the share admission resolved for the deployment", async () => {
     await wipeAll();

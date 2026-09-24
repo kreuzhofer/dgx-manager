@@ -405,6 +405,86 @@ describe("POST /api/deployments/:id/restart — dgxrun runner", () => {
     }
   });
 
+  /**
+   * #122 — what the restart asks admission to clear.
+   *
+   * The request chain read only the sparkrun catalog, keyed on
+   * `config.recipeFile`. A dgxrun recipe is invisible to it, so every dgxrun
+   * restart without an explicit override was checked against 0.85 while the
+   * container it then launched used the recipe's own share. Real recipes here
+   * declare 0.88, 0.94 and 0.70; on a 122,502 MB GB10 that is up to ~11 GB of
+   * under-check, which is the headroom the safety margin exists to defend.
+   *
+   * Nodes are 122,502 MB, so the margin is 6,125 MB, the recipe's 0.88 is
+   * 107,802 MB and the old 0.85 fallback 104,127 MB. The node reads 118,000 MB,
+   * which is the band where those two disagree.
+   */
+  it("admits against the recipe's share, not the 0.85 fallback", async () => {
+    await wipeAll();
+    const ids = await seedCluster(2);
+    const created = await request(makeApp(makeStubHub().hub))
+      .post("/api/deployments")
+      .send({ nodeIds: ids, recipeYaml: DGXRUN_YAML });
+    expect(created.status).toBe(201);
+
+    // The head node is nearly full, and something the manager DOES have a row
+    // for holds part of it, so the refusal has a holder to name.
+    await prisma.metricSnapshot.create({
+      data: { nodeId: ids[0], vramUsed: 118_000, gpuUtil: 0, timestamp: new Date() },
+    });
+    const coResidentModel = await prisma.model.create({
+      data: { name: "qwen3-embedding:8b", runtime: "ollama" },
+    });
+    await prisma.deployment.create({
+      data: {
+        nodeId: ids[0],
+        modelId: coResidentModel.id,
+        status: "running",
+        port: 11434,
+        config: JSON.stringify({ runtime: "ollama", modelName: "qwen3-embedding:8b" }),
+      },
+    });
+
+    const { hub, sent } = makeStubHub();
+    const res = await request(makeApp(hub))
+      .post(`/api/deployments/${created.body.id}/restart`)
+      .send({});
+
+    // Reclaim is the authorised 0.88 (107,802), leaving 10,198 counted and
+    // 112,304 free. The recipe's 0.88 needs 113,927 and is refused; the 0.85
+    // fallback needed only 110,252 and was admitted.
+    expect(res.status).toBe(409);
+    expect(res.body.gpuMemoryUtilization).toBe(0.88);
+    expect(res.body.shortfalls[0].vramThresholdMB).toBe(113_927);
+    expect(res.body.shortfalls[0].vramUsedMB).toBe(118_000 - 107_802);
+    // A refusal this change makes more common has to stay actionable: it names
+    // what holds the memory, and the lever that gets a disagreeing user through.
+    expect(res.body.error).toContain("qwen3-embedding:8b");
+    expect(res.body.error).toContain("config.gpuMem");
+    expect(sent).toHaveLength(0);
+  });
+
+  it("still lets an explicit gpuMem override size the request", async () => {
+    await wipeAll();
+    const ids = await seedCluster(2);
+    const created = await request(makeApp(makeStubHub().hub))
+      .post("/api/deployments")
+      .send({ nodeIds: ids, recipeYaml: DGXRUN_YAML });
+    await prisma.metricSnapshot.create({
+      data: { nodeId: ids[0], vramUsed: 118_000, gpuUtil: 0, timestamp: new Date() },
+    });
+
+    const { hub, sent } = makeStubHub();
+    const res = await request(makeApp(hub))
+      .post(`/api/deployments/${created.body.id}/restart`)
+      .send({ config: { gpuMem: 0.8 } });
+
+    // The caller asked for less than the recipe declares, which is exactly the
+    // lever the refusal above points at: 0.8 needs 104,127 against 112,304 free.
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(2);
+  });
+
   // #118: the share a restart may credit itself with is persisted on the row.
   // A dgxrun recipe's default is the only place this one comes from, and the
   // restart path's REQUEST chain cannot see it — it reads the sparkrun catalog

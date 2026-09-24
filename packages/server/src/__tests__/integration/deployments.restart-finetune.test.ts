@@ -300,12 +300,15 @@ const RECIPE_NO_SHARE: StubTrainingRecipe = {
  * and no `authorisedGpuMem` unless the caller supplies them — on a node already
  * reading `NODE_READING_MB`.
  */
-async function seedFineTuneDeploymentWithConfig(config: Record<string, unknown>) {
+async function seedFineTuneDeploymentWithConfig(
+  config: Record<string, unknown>,
+  readingMB: number = NODE_READING_MB,
+) {
   const node = await prisma.node.create({
     data: { name: "n1", status: "online", vramTotal: NODE_TOTAL_MB, ipAddress: "10.0.0.10" },
   });
   await prisma.metricSnapshot.create({
-    data: { nodeId: node.id, vramUsed: NODE_READING_MB, gpuUtil: 0, timestamp: new Date() },
+    data: { nodeId: node.id, vramUsed: readingMB, gpuUtil: 0, timestamp: new Date() },
   });
   const job = await prisma.fineTuneJob.create({
     data: {
@@ -339,20 +342,50 @@ async function seedFineTuneDeploymentWithConfig(config: Record<string, unknown>)
 
 describe("POST /api/deployments/:id/restart — the share a fine-tune deployment recovers (#123)", () => {
   it("recovers the training recipe's share, so a restart is not refused for memory that is its own", async () => {
-    const { deployment } = await seedFineTuneDeploymentWithConfig({});
+    // Reads 118,000 rather than the 124,000 the refusals below use. #122 made the
+    // REQUEST reach the training recipe too, so both sides of this case now
+    // resolve 0.9 and the band where the authorised term is observable moved down
+    // with them. Verified to still redden without the term: at 0.85 authorised the
+    // node computes 118,800 free against 121,600 needed.
+    const { deployment } = await seedFineTuneDeploymentWithConfig({}, 118_000);
     const { hub, sent } = makeStubHub(RECIPE_AT_090);
 
     const res = await request(makeApp(hub))
       .post(`/api/deployments/${deployment.id}/restart`)
       .send({});
 
-    // Credited 115,200 of the 124,000 the node reads, leaving 8,800 counted and
-    // 119,200 free against the 115,200 needed. Recovering 0.85 instead credits
+    // Credited 115,200 of the 118,000 the node reads, leaving 2,800 counted and
+    // 125,200 free against the 121,600 needed. Recovering 0.85 instead credits
     // only 108,800, and the restart 409s.
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("restarting");
     expect(sent).toHaveLength(1);
     expect(sent[0].message.type).toBe("cmd:finetune:deploy");
+  });
+
+  /**
+   * #122 — the other half of the same dead link. The REQUEST chain could not see
+   * a training recipe either, so a fine-tune restart was checked against 0.85
+   * while the container it launched used the recipe's share. #118 and #123 fixed
+   * what a restart is CREDITED; this is what it is CHECKED against.
+   */
+  it("asks admission to clear the training recipe's share, not the 0.85 fallback", async () => {
+    const { deployment } = await seedFineTuneDeploymentWithConfig({}, 124_000);
+    const { hub, sent } = makeStubHub(RECIPE_AT_090);
+
+    const res = await request(makeApp(hub))
+      .post(`/api/deployments/${deployment.id}/restart`)
+      .send({});
+
+    // Credited its authorised 0.9 (115,200), leaving 8,800 counted and 119,200
+    // free. The recipe's 0.9 needs 121,600 and is refused; the 0.85 fallback
+    // needed only 115,200 and was admitted.
+    expect(res.status).toBe(409);
+    expect(res.body.gpuMemoryUtilization).toBe(0.9);
+    expect(res.body.shortfalls[0].vramThresholdMB).toBe(121_600);
+    expect(res.body.shortfalls[0].vramUsedMB).toBe(124_000 - 115_200);
+    expect(res.body.error).toContain("config.gpuMem");
+    expect(sent).toHaveLength(0);
   });
 
   // The refusals, which is where the chain ORDER is observable: each row differs
@@ -367,13 +400,14 @@ describe("POST /api/deployments/:id/restart — the share a fine-tune deployment
       requested: 0.85,
     },
     {
-      // `authorisedGpuMem` feeds the authorised chain ONLY: the request still
-      // resolves 0.85, which is what makes the two independently observable.
+      // `authorisedGpuMem` feeds the authorised chain ONLY. The request falls
+      // through it to the training recipe's 0.9 (#122), so this row shows the two
+      // chains resolving to genuinely different numbers from one row.
       why: "lets a stored authorisedGpuMem win over the recipe, even when it is smaller",
       config: { authorisedGpuMem: 0.5 },
       recipe: RECIPE_AT_090,
       shareMB: 64_000,
-      requested: 0.85,
+      requested: 0.9,
     },
     {
       // A saved `gpuMem`, by contrast, is the first term of BOTH chains — it is
@@ -394,9 +428,10 @@ describe("POST /api/deployments/:id/restart — the share a fine-tune deployment
 
     expect(res.status).toBe(409);
     expect(res.body.shortfalls[0].vramUsedMB).toBe(NODE_READING_MB - shareMB);
-    // The REQUEST side stays untouched by this change: it never reaches the
-    // training recipe, so it resolves 0.85 unless the row itself named a share.
-    // Widening it is #122's subject, not this one.
+    // The requested share is resolved independently of the authorised one, from a
+    // chain that skips the row's `authorisedGpuMem` entirely — so these rows show
+    // the two landing on genuinely different numbers (#122 gave the request chain
+    // the training recipe; before it, every row here resolved 0.85).
     expect(res.body.gpuMemoryUtilization).toBe(requested);
     expect(sent).toHaveLength(0);
   });

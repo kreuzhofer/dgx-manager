@@ -161,30 +161,42 @@ export function fineTuneHoldingStatus(job: {
 export const DEFAULT_GPU_MEM_UTIL = 0.85;
 
 /**
- * Pick the **authorised share** out of an ordered list of candidates: the first
- * one that could actually be a share, else {@link DEFAULT_GPU_MEM_UTIL}.
+ * Whether a value can be a share of a node at all: a finite number above zero
+ * and at most one whole node.
+ *
+ * A zero cannot be a real share — vLLM will not serve at it — so together with
+ * the bounds this rejects everything a share is not. Exported because the route
+ * validates a caller's `gpuMem` override against exactly this rule before it can
+ * reach any arithmetic.
+ */
+export function isUsableShare(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= 1;
+}
+
+/**
+ * Pick a share out of an ordered list of candidates: the first {@link
+ * isUsableShare}, else {@link DEFAULT_GPU_MEM_UTIL}.
  *
  * The order is the caller's to state, because it is domain knowledge rather than
- * arithmetic — what a deployment's own row records comes before what its recipe
- * declares, so a recipe edited since the deploy can never widen an existing
- * deployment's claim. The chain is ordered, not a maximum.
+ * arithmetic. Both of the restart route's chains end in the same recipe terms and
+ * differ only in what they put first — the caller's override for the share being
+ * *requested*, the row's own record for the share it was *authorised* for. That
+ * second ordering is what stops a recipe edited since the deploy from widening an
+ * existing deployment's claim: the chain is ordered, not a maximum.
  *
- * A candidate counts only when it is a finite number in (0, 1]. Anything else —
- * a zero, a negative, a 5, a string from a hand-edited blob — cannot be a real
- * authorised share (vLLM cannot serve at 0), so its only source is corruption
- * and the next candidate down is the better guess. That guess is bounded by what
- * a fresh deploy of the same recipe would be permitted to request, which is the
- * residual gap ADR 0004 Decision 4 already accepts.
+ * An unusable candidate is skipped rather than honoured. Anything present but
+ * unreadable is corruption — the route rejects a caller's override outright, so
+ * what reaches here is a stored value whose meaning is already lost — and the
+ * next candidate down is the better guess. That guess is bounded by what a fresh
+ * deploy of the same recipe would be permitted to request, which is the residual
+ * gap ADR 0004 Decision 4 already accepts.
  *
  * Lives here rather than in the route so the resolution order is unit-testable
  * without a database, the split `computeVramShortfall` established.
  */
-export function resolveAuthorisedShare(candidates: readonly unknown[]): number {
+export function firstUsableShare(candidates: readonly unknown[]): number {
   for (const candidate of candidates) {
-    if (typeof candidate !== "number") continue;
-    if (!Number.isFinite(candidate)) continue;
-    if (candidate <= 0 || candidate > 1) continue;
-    return candidate;
+    if (isUsableShare(candidate)) return candidate;
   }
   return DEFAULT_GPU_MEM_UTIL;
 }
