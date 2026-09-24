@@ -4,7 +4,7 @@ import { prisma } from "../prisma.js";
 import { SHARED_STORAGE } from "../env.js";
 import { broadcast as sseBroadcast } from "../sse.js";
 import type { AgentHub } from "../ws/agent-hub.js";
-import { checkVllmVramAdmission, vramShortfallMessage } from "../admission/vram.js";
+import { checkVllmVramAdmission, resolveAuthorisedShare, vramShortfallMessage } from "../admission/vram.js";
 import { checkRecipeArchAdmission, recipeArchMismatchMessage } from "../admission/recipe-arch.js";
 import { readCatalog as readOllamaCatalog } from "../ollama/catalog-store.js";
 import { ollamaVramEstimateMB } from "../ollama/vram-estimate.js";
@@ -954,6 +954,17 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
 
   const isOllamaRestart = config.runtime === "ollama";
 
+  // Resolved here, above the admission check, because two things downstream need
+  // it: the authorised share, and the deploy container in the
+  // cmd:finetune:deploy branch. A fine-tune deployment keeps no recipeFile in its
+  // config — the recipe lives on the FineTuneJob — which is why it needs a lookup
+  // of its own. Runs for any restart of a fine-tune-backed model, including an
+  // Ollama one that then ignores it; it is an in-memory catalog read.
+  const ftJob = deployment.model.finetuneJob;
+  const trainingRecipe = ftJob?.recipeFile
+    ? agentHub.getTrainingRecipes().find((r) => r.file === ftJob.recipeFile)
+    : undefined;
+
   // Same pre-flight VRAM check as the deploy POST, with one extra number: the
   // share this deployment was ALREADY authorised for. Two different values are
   // in play and confusing them is how #118 happened —
@@ -970,24 +981,36 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
   // behind it recovers a share for rows created before that (ADR 0004 accepts
   // that a refreshed catalog can drift an old row's recovered share).
   if (!isOllamaRestart) {
-    const agentHub: AgentHub = req.app.get("agentHub");
     const recipe = config.recipeFile
       ? agentHub.getRecipes().find((r) => r.file === config.recipeFile)
       : undefined;
     const recipeGpuMem = recipe?.defaults?.gpu_memory_utilization as number | undefined;
     const requestedGpuMemUtil = (config.gpuMem as number) || recipeGpuMem || 0.85;
-    // The authorised chain also reaches the dgxrun recipe persisted in the blob.
-    // `recipe` above is the sparkrun catalog only, so without this term every
-    // dgxrun row predating `authorisedGpuMem` recovers a flat 0.85 while its
-    // recipe actually runs at 0.88–0.94 — an under-credit, and #1's symptom.
+    // Where the authorised share is recovered from, in priority order. The order
+    // is the domain knowledge; `resolveAuthorisedShare` owns only "the first of
+    // these that could be a share", and is unit-tested for that.
+    //
+    // The last three terms exist because `recipe` above is the sparkrun catalog
+    // keyed on `config.recipeFile`, and two runtimes are invisible to it: dgxrun
+    // (whose resolved recipe lives in the row's own blob) and fine-tune (whose
+    // recipe lives on the FineTuneJob, so the row has no `recipeFile` at all).
+    // Without them every such row predating `authorisedGpuMem` recovers a flat
+    // 0.85 while its recipe actually runs at 0.88–0.94 — an under-credit, and
+    // #1's symptom returning (#118, #123).
     const savedDgxrunGpuMem = (savedConfig.dgxrunRecipe as { defaults?: { gpu_memory_utilization?: number } } | undefined)
       ?.defaults?.gpu_memory_utilization;
-    const authorisedGpuMemUtil =
-      (savedConfig.authorisedGpuMem as number)
-      || (savedConfig.gpuMem as number)
-      || savedDgxrunGpuMem
-      || recipeGpuMem
-      || 0.85;
+    const authorisedGpuMemUtil = resolveAuthorisedShare([
+      // What the deploy path granted this row. Written since #118.
+      savedConfig.authorisedGpuMem,
+      // How a row predating that recorded an explicit share.
+      savedConfig.gpuMem,
+      // The dgxrun recipe, resolved into the row's blob at deploy time.
+      savedDgxrunGpuMem,
+      // A fine-tune's training recipe, live from the agent catalog.
+      trainingRecipe?.deploy?.gpu_memory_utilization,
+      // The sparkrun catalog, for a row that does carry a recipeFile.
+      recipeGpuMem,
+    ]);
     const checkNodeIds = deployment.clusterMode
       ? deployment.clusterNodes.map((cn) => cn.nodeId)
       : [deployment.nodeId];
@@ -1109,12 +1132,9 @@ deploymentsRouter.post("/:id/restart", async (req, res) => {
   // Fine-tune deployments route through cmd:finetune:deploy — they have no
   // recipeFile in saved config (the recipe lives on the FineTuneJob), and
   // the agent's finetune handler reads jobId/modelPath/baseModel/recipeFile
-  // from the payload directly. Detect by the model row's finetuneJobId FK.
-  const ftJob = deployment.model.finetuneJob;
+  // from the payload directly. `ftJob` is the model row's finetuneJobId FK,
+  // resolved above the admission check because the authorised share needs it too.
   if (ftJob && !isOllamaRestart) {
-    const trainingRecipe = ftJob.recipeFile
-      ? agentHub.getTrainingRecipes().find((r) => r.file === ftJob.recipeFile)
-      : undefined;
     const deployContainer =
       (trainingRecipe?.deploy?.container as string | undefined) ?? "vllm-node";
     // localModelPath was persisted by the original finetune deploy route as

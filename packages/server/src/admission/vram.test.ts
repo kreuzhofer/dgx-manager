@@ -16,8 +16,10 @@ import { describe, it, expect } from "vitest";
 import { test, fc } from "@fast-check/vitest";
 import {
   computeVramShortfall,
+  DEFAULT_GPU_MEM_UTIL,
   fineTuneHoldingStatus,
   reclaimForRestart,
+  resolveAuthorisedShare,
   vramShortfallMessage,
   SAFETY_MARGIN_FRACTION,
   type NodeSnapshot,
@@ -501,5 +503,110 @@ describe("vramShortfallMessage — naming the holders", () => {
 
   it("renders nothing at all when there are no shortfalls", () => {
     expect(vramShortfallMessage([])).toBe("");
+  });
+});
+
+describe("resolveAuthorisedShare", () => {
+  describe("invariants (property tests)", () => {
+    const candidateArb = fc.oneof(
+      utilArb,
+      fc.constant(undefined),
+      fc.constant(null),
+      fc.constant(0),
+      fc.constant(NaN),
+      fc.integer({ min: -100, max: -1 }),
+      fc.integer({ min: 2, max: 100 }),
+      fc.string(),
+    );
+
+    /**
+     * The resolver always hands back a share a node can actually be asked for:
+     * a finite fraction above zero and at most one whole node. Whatever arrives
+     * from a config blob — a hand-edited string, a zero, a 5 — the reclaim bound
+     * downstream is only as trustworthy as this guarantee.
+     */
+    test.prop([fc.array(candidateArb, { maxLength: 8 })])(
+      "always returns a usable share, whatever the candidates are",
+      (candidates) => {
+        const share = resolveAuthorisedShare(candidates);
+        expect(Number.isFinite(share)).toBe(true);
+        expect(share).toBeGreaterThan(0);
+        expect(share).toBeLessThanOrEqual(1);
+      },
+    );
+
+    /**
+     * The chain is ordered, not a maximum. What a deployment's own row records
+     * is what it was authorised for, so an earlier candidate wins even when a
+     * later one is larger — a recipe edited since the deploy must never widen
+     * an existing deployment's claim.
+     */
+    test.prop([fc.array(candidateArb, { maxLength: 8 })])(
+      "returns the first usable candidate, regardless of how large the later ones are",
+      (candidates) => {
+        const firstUsable = candidates.find(
+          (c) => typeof c === "number" && Number.isFinite(c) && c > 0 && c <= 1,
+        );
+        if (firstUsable !== undefined) {
+          expect(resolveAuthorisedShare(candidates)).toBe(firstUsable);
+        } else {
+          expect(resolveAuthorisedShare(candidates)).toBe(DEFAULT_GPU_MEM_UTIL);
+        }
+      },
+    );
+
+    /**
+     * Adding candidates behind a usable one cannot change the answer — the
+     * property that makes it safe to extend the chain, as #118 and #123 each
+     * did, without auditing every row that already resolves.
+     */
+    test.prop([fc.array(candidateArb, { maxLength: 4 }), fc.array(candidateArb, { maxLength: 4 })])(
+      "appending candidates never changes an already-resolved share",
+      (head, tail) => {
+        const resolvedFromHead = resolveAuthorisedShare(head);
+        if (resolvedFromHead !== DEFAULT_GPU_MEM_UTIL) {
+          expect(resolveAuthorisedShare([...head, ...tail])).toBe(resolvedFromHead);
+        }
+      },
+    );
+  });
+
+  describe("hand-picked cases", () => {
+    it("takes the row's own record ahead of any recipe, even when the recipe is larger", () => {
+      // The restart route's chain, in order: stored share, the pre-#118 way of
+      // recording one, the dgxrun recipe in the row's blob, a fine-tune's
+      // training recipe, the sparkrun catalog.
+      expect(resolveAuthorisedShare([0.5, 0.8, 0.88, 0.9, 0.94])).toBe(0.5);
+      expect(resolveAuthorisedShare([undefined, 0.8, 0.88, 0.9, 0.94])).toBe(0.8);
+      expect(resolveAuthorisedShare([undefined, undefined, 0.88, 0.9, 0.94])).toBe(0.88);
+      expect(resolveAuthorisedShare([undefined, undefined, undefined, 0.9, 0.94])).toBe(0.9);
+      expect(resolveAuthorisedShare([undefined, undefined, undefined, undefined, 0.94])).toBe(0.94);
+    });
+
+    it("falls back to the default when a row records nothing and no recipe is reachable", () => {
+      // Every pre-#118 fine-tune row, before #123 gave the chain its training
+      // recipe: no stored share, no recipeFile, nothing to recover.
+      expect(resolveAuthorisedShare([])).toBe(DEFAULT_GPU_MEM_UTIL);
+      expect(resolveAuthorisedShare([undefined, undefined])).toBe(DEFAULT_GPU_MEM_UTIL);
+    });
+
+    it("skips a value that cannot be a share at all, rather than trusting it", () => {
+      // A zero, a negative, a >1, a string from a hand-edited blob. None can be
+      // a real authorised share — vLLM cannot serve at 0 — so the only source is
+      // corruption, and the best available guess is the next candidate down. The
+      // guess is bounded by what a fresh deploy of the same recipe could request,
+      // which is the residual gap ADR 0004 Decision 4 already accepts.
+      expect(resolveAuthorisedShare([0, 0.9])).toBe(0.9);
+      expect(resolveAuthorisedShare([-1, 0.9])).toBe(0.9);
+      expect(resolveAuthorisedShare([5, 0.9])).toBe(0.9);
+      expect(resolveAuthorisedShare([NaN, 0.9])).toBe(0.9);
+      expect(resolveAuthorisedShare(["0.9", 0.7])).toBe(0.7);
+      expect(resolveAuthorisedShare([null, 0.9])).toBe(0.9);
+    });
+
+    it("accepts a whole node as a share, but nothing beyond it", () => {
+      expect(resolveAuthorisedShare([1])).toBe(1);
+      expect(resolveAuthorisedShare([1.0001, 0.9])).toBe(0.9);
+    });
   });
 });

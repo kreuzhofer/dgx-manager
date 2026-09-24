@@ -17,6 +17,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import express from "express";
 import request from "supertest";
+import type { TrainingRecipe } from "../../ws/agent-hub.js";
 
 const TMP_DIR = mkdtempSync(join(tmpdir(), "dgx-deploy-restart-ft-test-"));
 const DB_PATH = join(TMP_DIR, "test.db");
@@ -47,7 +48,14 @@ afterAll(async () => {
 
 type SentMessage = { nodeId: string; message: { type: string; payload: Record<string, unknown> } };
 
-const TRAINING_RECIPE = {
+/**
+ * The slice of the real `TrainingRecipe` the restart route reads. Typed against
+ * it rather than `unknown` so renaming `deploy.gpu_memory_utilization` fails
+ * here instead of leaving these tests quietly green.
+ */
+type StubTrainingRecipe = Pick<TrainingRecipe, "file" | "name" | "deploy">;
+
+const TRAINING_RECIPE: StubTrainingRecipe = {
   file: "recipes/test-training",
   name: "Test Training Recipe",
   deploy: {
@@ -57,12 +65,12 @@ const TRAINING_RECIPE = {
   },
 };
 
-function makeStubHub() {
+function makeStubHub(trainingRecipe: StubTrainingRecipe = TRAINING_RECIPE) {
   const sent: SentMessage[] = [];
   return {
     hub: {
       getRecipes: () => [],
-      getTrainingRecipes: () => [TRAINING_RECIPE],
+      getTrainingRecipes: () => [trainingRecipe],
       getOllamaModels: () => [],
       sendToAgent: (nodeId: string, message: { type: string; payload: Record<string, unknown> }) => {
         sent.push({ nodeId, message });
@@ -254,5 +262,142 @@ describe("POST /api/deployments/:id/restart for fine-tune deployments", () => {
 
     expect(sent[0].message.type).toBe("cmd:deploy");
     expect(sent[0].message.payload.recipeFile).toBe("recipes/plain.yaml");
+  });
+});
+
+/**
+ * kreuzhofer/dgx-manager#123 — the authorised share a fine-tune deployment
+ * recovers on restart.
+ *
+ * #118 made the share explicit as `config.authorisedGpuMem`, with a fallback
+ * chain for rows created before it. Every term in that chain missed for a
+ * fine-tune deployment: the sparkrun-catalog lookup is keyed on
+ * `config.recipeFile`, and a fine-tune deployment has none — its recipe lives
+ * on the FineTuneJob. So such a row recovered a flat 0.85 however large a share
+ * its training recipe declared, and the restart was charged for memory that was
+ * genuinely its own.
+ *
+ * Nodes here are 128,000 MB, so the safety margin is 6,400 MB and a share of
+ * 0.85 is 108,800 MB against the recipe's 0.9 = 115,200 MB. The node reads
+ * 124,000 MB — all of it the deployment's own resident model — which is the band
+ * where those two shares disagree about admission.
+ */
+const NODE_TOTAL_MB = 128_000;
+const NODE_READING_MB = 124_000;
+/** A training recipe declaring a larger share than the 0.85 fallback. */
+const RECIPE_AT_090: StubTrainingRecipe = {
+  ...TRAINING_RECIPE,
+  deploy: { ...TRAINING_RECIPE.deploy!, gpu_memory_utilization: 0.9 },
+};
+/** A training recipe that declares a container but no share at all. */
+const RECIPE_NO_SHARE: StubTrainingRecipe = {
+  ...TRAINING_RECIPE,
+  deploy: { container: "vllm-node-custom", max_model_len: 8192 },
+};
+
+/**
+ * A fine-tune deployment whose saved config is exactly `config` — no `gpuMem`
+ * and no `authorisedGpuMem` unless the caller supplies them — on a node already
+ * reading `NODE_READING_MB`.
+ */
+async function seedFineTuneDeploymentWithConfig(config: Record<string, unknown>) {
+  const node = await prisma.node.create({
+    data: { name: "n1", status: "online", vramTotal: NODE_TOTAL_MB, ipAddress: "10.0.0.10" },
+  });
+  await prisma.metricSnapshot.create({
+    data: { nodeId: node.id, vramUsed: NODE_READING_MB, gpuUtil: 0, timestamp: new Date() },
+  });
+  const job = await prisma.fineTuneJob.create({
+    data: {
+      nodeId: node.id,
+      baseModel: "meta-llama/Llama-3.1-8B",
+      method: "lora",
+      dataset: "test-dataset",
+      recipeFile: "recipes/test-training",
+      // Terminal on every holding column, so the job itself is not a conflict —
+      // the memory on this node is the deployment's own resident model.
+      status: "completed",
+      mergeStatus: "completed",
+      outputDir: "/mnt/tank/outputs/job1",
+      mergedPath: "/mnt/tank/outputs/job1/merged",
+    },
+  });
+  const model = await prisma.model.create({
+    data: { name: "finetune-job1", runtime: "vllm", finetuneJobId: job.id },
+  });
+  const deployment = await prisma.deployment.create({
+    data: {
+      nodeId: node.id,
+      modelId: model.id,
+      status: "running",
+      port: 8000,
+      config: JSON.stringify({ port: 8000, localModelPath: "/mnt/tank/outputs/job1/merged", ...config }),
+    },
+  });
+  return { node, job, model, deployment };
+}
+
+describe("POST /api/deployments/:id/restart — the share a fine-tune deployment recovers (#123)", () => {
+  it("recovers the training recipe's share, so a restart is not refused for memory that is its own", async () => {
+    const { deployment } = await seedFineTuneDeploymentWithConfig({});
+    const { hub, sent } = makeStubHub(RECIPE_AT_090);
+
+    const res = await request(makeApp(hub))
+      .post(`/api/deployments/${deployment.id}/restart`)
+      .send({});
+
+    // Credited 115,200 of the 124,000 the node reads, leaving 8,800 counted and
+    // 119,200 free against the 115,200 needed. Recovering 0.85 instead credits
+    // only 108,800, and the restart 409s.
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("restarting");
+    expect(sent).toHaveLength(1);
+    expect(sent[0].message.type).toBe("cmd:finetune:deploy");
+  });
+
+  // The refusals, which is where the chain ORDER is observable: each row differs
+  // only in which term wins, and `vramUsedMB` is the node reading minus the share
+  // that won. A max-of-chain implementation would admit all three.
+  it.each([
+    {
+      why: "falls back to 0.85 when the training recipe declares no share",
+      config: {} as Record<string, unknown>,
+      recipe: RECIPE_NO_SHARE,
+      shareMB: 108_800,
+      requested: 0.85,
+    },
+    {
+      // `authorisedGpuMem` feeds the authorised chain ONLY: the request still
+      // resolves 0.85, which is what makes the two independently observable.
+      why: "lets a stored authorisedGpuMem win over the recipe, even when it is smaller",
+      config: { authorisedGpuMem: 0.5 },
+      recipe: RECIPE_AT_090,
+      shareMB: 64_000,
+      requested: 0.85,
+    },
+    {
+      // A saved `gpuMem`, by contrast, is the first term of BOTH chains — it is
+      // what the deployment asked for and what it was therefore authorised for.
+      why: "lets a stored gpuMem win over the recipe for a row predating authorisedGpuMem",
+      config: { gpuMem: 0.8 },
+      recipe: RECIPE_AT_090,
+      shareMB: 102_400,
+      requested: 0.8,
+    },
+  ])("$why", async ({ config, recipe, shareMB, requested }) => {
+    const { deployment } = await seedFineTuneDeploymentWithConfig(config);
+    const { hub, sent } = makeStubHub(recipe);
+
+    const res = await request(makeApp(hub))
+      .post(`/api/deployments/${deployment.id}/restart`)
+      .send({});
+
+    expect(res.status).toBe(409);
+    expect(res.body.shortfalls[0].vramUsedMB).toBe(NODE_READING_MB - shareMB);
+    // The REQUEST side stays untouched by this change: it never reaches the
+    // training recipe, so it resolves 0.85 unless the row itself named a share.
+    // Widening it is #122's subject, not this one.
+    expect(res.body.gpuMemoryUtilization).toBe(requested);
+    expect(sent).toHaveLength(0);
   });
 });

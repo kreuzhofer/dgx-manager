@@ -154,6 +154,42 @@ export function fineTuneHoldingStatus(job: {
 }
 
 /**
+ * The share of a node a deployment is assumed to have been authorised for when
+ * its row does not say, and the share every other term in the chain is measured
+ * against. Matches the value the deploy paths fall back to.
+ */
+export const DEFAULT_GPU_MEM_UTIL = 0.85;
+
+/**
+ * Pick the **authorised share** out of an ordered list of candidates: the first
+ * one that could actually be a share, else {@link DEFAULT_GPU_MEM_UTIL}.
+ *
+ * The order is the caller's to state, because it is domain knowledge rather than
+ * arithmetic — what a deployment's own row records comes before what its recipe
+ * declares, so a recipe edited since the deploy can never widen an existing
+ * deployment's claim. The chain is ordered, not a maximum.
+ *
+ * A candidate counts only when it is a finite number in (0, 1]. Anything else —
+ * a zero, a negative, a 5, a string from a hand-edited blob — cannot be a real
+ * authorised share (vLLM cannot serve at 0), so its only source is corruption
+ * and the next candidate down is the better guess. That guess is bounded by what
+ * a fresh deploy of the same recipe would be permitted to request, which is the
+ * residual gap ADR 0004 Decision 4 already accepts.
+ *
+ * Lives here rather than in the route so the resolution order is unit-testable
+ * without a database, the split `computeVramShortfall` established.
+ */
+export function resolveAuthorisedShare(candidates: readonly unknown[]): number {
+  for (const candidate of candidates) {
+    if (typeof candidate !== "number") continue;
+    if (!Number.isFinite(candidate)) continue;
+    if (candidate <= 0 || candidate > 1) continue;
+    return candidate;
+  }
+  return DEFAULT_GPU_MEM_UTIL;
+}
+
+/**
  * The memory (MB) a restart may be credited with on one node — its *reclaim*,
  * in the sense CONTEXT.md § Node memory gives that word.
  *
