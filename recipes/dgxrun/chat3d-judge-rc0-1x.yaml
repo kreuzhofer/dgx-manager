@@ -1,0 +1,155 @@
+# @dgxrun/chat3d-judge-rc0-1x — chat3d judge rc0, merged BF16, one Spark.
+#
+# DRAFT — not yet in ./recipes. Nothing has been pulled or deployed; this exists
+# so the deploy is a single step once the weights are staged and approved.
+#
+# Structurally identical to @dgxrun/qwen3.8-27b-nvfp4 (and so to
+# qwen3.8-27b-bf16.yaml, which it was derived from) — see the note under the
+# command block. Only `model` and `served_model_name` differ.
+#
+# MODEL IS A REPO ID, NOT A PATH. dgxrun bind-mounts the host weights dir to
+# /cache/huggingface and pins HF_HOME=/cache/huggingface + HF_HUB_OFFLINE=1
+# (dgxrun-args.ts:316,340). So serving resolves this id out of the pre-populated
+# cache with no network and no token — exactly how unsloth/Qwen3.8-27B-NVFP4
+# works today. A bare /mnt/tank/... path would ALSO work but diverges from every
+# other recipe here for no gain.
+#
+# ⚠ THE REVISION TRAP, and the one thing to get right during the pull.
+# `hf download --revision 32e8690` writes snapshots/<full-sha>/ but may not
+# update refs/main. Offline resolution of a bare repo id reads a ref, so a
+# sha-only pull can leave this recipe unable to find the snapshot at boot —
+# a failure that looks like a missing model, not a missing ref. Two ways out,
+# pick one BEFORE pulling:
+#   (a) confirm the repo's main IS 32e8690 and download without --revision, so
+#       refs/main is written; or
+#   (b) keep the pin and add `--revision 32e8690` to the serve command below,
+#       so vLLM asks for the snapshot by sha.
+# (a) is simpler and is what the other recipes rely on.
+#
+# CONTAINER: the same eugr nightly the BF16 reference uses. Not rebuilt — rc0 is
+# Qwen3.8-27B post-LoRA-merge, so it declares the same architecture
+# (qwen3_5, with vision_config) and needs no new image work. Confirm the tag is
+# present on the target node before deploying: dgxrun never pulls images, and
+# `:latest`-style drift has silently changed numbers here before.
+recipe_version: "2"
+runner: dgxrun
+model: danielkreuzhofer/chat3d-judge-rc0
+runtime: vllm
+container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:2026081501
+description: chat3d judge rc0 (Qwen3.8-27B + LoRA, merged BF16), one Spark
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+
+  # One Spark. 54.7 GB of BF16 weights fit a 124,546 MiB GB10 without sharding,
+  # and a judge screen wants no inter-node fabric in the path.
+  tensor_parallel: 1
+
+  # 0.88 is the BF16 reference's value and the one the fleet's startup guard is
+  # known to clear — vLLM compares gmu × total against CUDA-visible free, which
+  # sits ~7 GiB below MemFree.
+  gpu_memory_utilization: 0.88
+
+  # Judge calls are 8 images + guided JSON, not long prose. 262144 is what the
+  # BF16 reference pins, and max_model_len taxes every request on this hardware
+  # as a cliff — if the screen's prompts are far below this, lowering it is the
+  # cheapest throughput win available. Worth measuring, not assuming.
+  max_model_len: 262144
+
+  # Asked for explicitly. Also the reference's value.
+  max_num_seqs: 8
+
+  # Chunked prefill's chunk size. 2048 here is load-bearing on this fleet for a
+  # different model (the b12x indexer prewarm workspace scales with it), and is
+  # what the reference pins; kept for consistency.
+  max_num_batched_tokens: 2048
+
+
+  # The gateway publishes whatever the runtime answers to. A displayName on the
+  # deploy overrides this via --served-model-name, so POSTing with
+  # displayName: chat3d-judge-rc0 makes the published name match regardless.
+  served_model_name: chat3d-judge-rc0
+
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      --tensor-parallel-size {tensor_parallel} \
+      --max-model-len {max_model_len} \
+      --max-num-seqs {max_num_seqs} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --enable-auto-tool-choice \
+      --tool-call-parser qwen3_coder \
+      --reasoning-parser qwen3 \
+      --generation-config auto \
+      --default-chat-template-kwargs '{"reasoning_effort":"medium"}'
+
+# ⚠ NOT AN EXACT MIRROR, AND IT CANNOT BE. One flag is missing relative to
+# @dgxrun/qwen3.8-27b-nvfp4: `--speculative-config '{"method":"mtp",...}'`.
+#
+# rc0 HAS NO MTP WEIGHTS. rc0 carries 1,184 tensors against the base model's
+# 1,199; the 15 absent ones are exactly `mtp.fc.weight` and `mtp.layers.0.*` — the
+# MTP head. The vision tower's 333 are all present. The cause is upstream of this
+# fleet: transformers' `Qwen3_5ForConditionalGeneration` has no MTP head, so the
+# merge that produced rc0 could not carry one. Confirmed two ways, from the staged
+# snapshot here (0 of 1,184 tensors match mtp/pre_fc_norm/nextn, no
+# `model_mtp.safetensors`, no `num_nextn_predict_layers` in config.json) and from
+# the Hub by whoever ran the merge. The incumbent's checkpoint
+# (unsloth/Qwen3.8-27B-NVFP4) DOES carry `model_mtp.safetensors`.
+#
+# With the flag in, vLLM loads the main model fine and then dies in
+# `self.drafter.load_model`:
+#   ValueError: Following weights were not initialized from checkpoint:
+#     {model.layers.0.self_attn.q_norm.weight, model.pre_fc_norm_embedding.weight,
+#      model.norm.weight, ...}
+# Verified: deployment cmuftg5ji31dz2auhbrng3ma1 failed this way at 17:45.
+#
+# WHAT THIS COSTS, and it matters to anyone comparing the two:
+#   - THROUGHPUT is not comparable. The incumbent gets MTP speculative decoding
+#     and rc0 cannot, so rc0 will read slower in tok/s for reasons that have
+#     nothing to do with its weights. Do not put the two tok/s figures in a table
+#     as though they measured the same thing.
+#   - QUALITY is unaffected. Under temperature-0 decoding MTP is output-equivalent,
+#     because a verified draft never changes the greedy token — so the screen's
+#     items are unaffected by serving rc0 without it.
+#     (An earlier draft of this comment claimed temp-0 is "not deterministic with
+#     MTP on this fleet". That overstated the evidence: the observed divergence is
+#     between REPLICAS ACROSS NODES, its cause is recorded as unknown, and it was
+#     never attributed to MTP. Do not cite MTP as a reproducibility hazard here.)
+#
+# Three ways to restore a real like-for-like, none of them this file's to choose:
+#   (a) serve rc0 without MTP — what this recipe does, and the only one that needs
+#       nothing from anybody;
+#   (b) append the base model's MTP tensors to the rc0 checkpoint. THIS IS
+#       HAPPENING — a complete checkpoint is being produced for a later redeploy
+#       with MTP on. The screen is not waiting for it. Note that the drafter reads
+#       hidden states the merge changed, so acceptance rate wants measuring rather
+#       than assuming once it lands;
+#   (c) drop MTP from the incumbent too, for the duration of the screen — the only
+#       option that makes both arms identical, and it means redeploying a live
+#       model.
+#
+# EVERYTHING ELSE IS STILL AN EXACT MIRROR: same container tag, same eight
+# remaining defaults, same flags in the same order. Diff the two files before
+# changing either.
+#
+# That rule decided the one open question here. A judge returns guided JSON, so
+# `--enable-auto-tool-choice` / `--tool-call-parser qwen3_coder` have nothing to
+# do, and dropping them was proposed. They stay, because they sit on the
+# completion path: with guided JSON they very probably never fire, and "very
+# probably" is what a confound is made of. Whether a judge recipe should carry
+# tool-call flags at all is a later change to BOTH recipes, never to one arm.
+# (Agreed with the requester, 2026-09-24.)
+#
+# `--reasoning-parser qwen3` stays for the same reason. With thinking off per
+# request it is idle, and it stops a thinking-on probe leaking <think> into
+# content.
+#
+# FLASHINFER is NOT a recipe flag here. The incumbent carries no
+# attention-backend flag and no env block, so the backend is whatever the eugr
+# nightly defaults to — and rc0 uses the same tag. Adding a FlashInfer flag to
+# rc0 alone would itself be the serving-shape difference this file exists to
+# avoid.
