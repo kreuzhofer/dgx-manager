@@ -151,3 +151,60 @@ on a staging job, but it never owns one.
 The distinction that gives the concept its point is between weights that are
 *absent* and weights that are *arriving*. Without it, a runner that cannot find
 weights can only fail, and a user who wants them can only be told no.
+
+## Node memory
+
+### Admission
+
+The refusal of a deploy or a restart *before* anything is launched, because the
+node cannot hold what is being asked for. Admission never evicts: it names what
+is holding the memory and leaves the decision about what to stop with the user.
+
+A refusal that cannot name the holder has failed at half its job. Being told a
+node is full is not actionable; being told which deployment or training run
+fills it is.
+
+_Avoid_: validation, pre-flight check.
+
+### Node reading
+
+The memory in use on a node, as the node itself reports it. It is the only
+*measured* quantity admission has.
+
+The manager measures nodes, never deployments. Consequently no per-deployment
+memory figure is ever a measurement, however it is labelled — a figure stamped
+on a deployment is a sample of the node it was running on at some moment, and
+is not a property of the deployment at all.
+
+_Avoid_: actual usage, VRAM used.
+
+### Authorised share
+
+The share of a node's memory a deployment is permitted to request, established
+when the deployment is created and carried with it thereafter.
+
+It is a claim, not a measurement: a deployment may hold less than its share and
+frequently does, but it may never legitimately hold more. That asymmetry is what
+makes it safe to reason with — it is an honest ceiling even when it is a loose
+one.
+
+_Avoid_: estimate, footprint, allocation.
+
+### Unattributed memory
+
+Memory inside a node reading that belongs to nothing the manager has a record
+of — a training run, a hand-started container, a survivor of an offboarded node.
+
+It always exists, because a node reading counts every holder while the manager
+only has concepts for some of them. Any rule that explains a node's memory
+entirely in terms of the deployments it knows about is therefore wrong, and is
+wrong in the dangerous direction: it makes a full node look empty.
+
+### Reclaim
+
+The memory a restart will release before it needs it again — its own resident
+model, which is torn down before relaunch.
+
+Reclaim is bounded by the restarting deployment's authorised share, never by
+whatever a node reading leaves unexplained. A restart is not charged for memory
+it is about to free; it is also not credited with memory that was never its own.
