@@ -41,6 +41,15 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * must clear FineTuneClusterNode/ClusterNode rows keyed on this node's id even
  * when the parent job/deployment lives on a different node.
  */
+/**
+ * Remove every row that references a node, then the node.
+ *
+ * This is a hand-maintained list and the schema is the source of truth: ANY new
+ * model with a `nodeId` relation must be added here, or offboarding that node
+ * breaks with a foreign-key violation. As of 2026-09-25 the referencing models are
+ * MetricSnapshot, ClusterNode, FineTuneClusterNode, AuditEvent, Deployment and
+ * FineTuneJob — `grep -n "nodeId" prisma/schema.prisma` is the check.
+ */
 async function deleteNodeRecords(nodeId: string): Promise<void> {
   await prisma.metricSnapshot.deleteMany({ where: { nodeId } });
   // Cluster memberships: this node as a worker elsewhere, and members of this
@@ -51,6 +60,13 @@ async function deleteNodeRecords(nodeId: string): Promise<void> {
   // and members of this node's own jobs (the latter also cascades on job delete).
   await prisma.fineTuneClusterNode.deleteMany({ where: { nodeId } });
   await prisma.fineTuneClusterNode.deleteMany({ where: { job: { nodeId } } });
+  // Agent v2 diag/exec audit rows. Easy to forget — nothing in the product reads
+  // them back on a node page — and forgetting it broke offboarding outright: any
+  // node an operator had ever run a capability against failed at `node.delete()`
+  // with a foreign-key violation, AFTER the agent had been told to deprovision.
+  // That left the node uninstalled but still in the database, and `force=true` did
+  // not help because it runs this same cleanup (aihost01, 2026-09-25).
+  await prisma.auditEvent.deleteMany({ where: { nodeId } });
   // Deployments on this node (BenchmarkRun.deploymentId is SetNull, so runs survive).
   await prisma.deployment.deleteMany({ where: { nodeId } });
   // Fine-tune jobs on this node (cascades TrainingMetric, FineTuneClusterNode, Model).

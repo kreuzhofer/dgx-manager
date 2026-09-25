@@ -55,6 +55,7 @@ afterEach(async () => {
   await prisma.trainingMetric.deleteMany();
   await prisma.clusterNode.deleteMany();
   await prisma.metricSnapshot.deleteMany();
+  await prisma.auditEvent.deleteMany();
   await prisma.deployment.deleteMany();
   await prisma.model.deleteMany();
   await prisma.fineTuneJob.deleteMany();
@@ -113,6 +114,11 @@ async function seedNodeWithForeignKeys() {
   await prisma.metricSnapshot.create({
     data: { nodeId: worker.id, gpuUtil: 10, vramUsed: 100 },
   });
+  // An Agent v2 diag/exec audit row. Any node that has ever had a capability run
+  // against it has these, which in practice is every node an operator has touched.
+  await prisma.auditEvent.create({
+    data: { nodeId: worker.id, cap: "diag.nvidia-smi", cmd: "nvidia-smi", code: 0 },
+  });
 
   return { head, worker, job, deployment };
 }
@@ -132,6 +138,35 @@ describe("DELETE /api/nodes/:id — FK cleanup", () => {
     // The parent job (on the head node) is untouched.
     expect(await prisma.fineTuneJob.count()).toBe(1);
     expect(await prisma.deployment.count({ where: { nodeId: worker.id } })).toBe(0);
+  });
+
+  /**
+   * AuditEvent was the one Node relation `deleteNodeRecords` did not clean up, so
+   * `node.delete()` hit "Foreign key constraint violated" and the offboard failed
+   * at the last step — after the agent had already been told to deprovision,
+   * leaving the node uninstalled but still in the database. `force=true` did not
+   * help, because it runs the same cleanup. Found offboarding aihost01, 2026-09-25.
+   */
+  it("deletes a node carrying Agent v2 audit rows, gracefully and with force", async () => {
+    for (const force of [true, false]) {
+      const node = await prisma.node.create({ data: { name: `audited-${force}` } });
+      await prisma.auditEvent.createMany({
+        data: [
+          { nodeId: node.id, cap: "diag.nvidia-smi", cmd: "nvidia-smi", code: 0 },
+          { nodeId: node.id, cap: "exec.shell", cmd: "docker ps", reason: "operator check", code: 0 },
+        ],
+      });
+      // force=false with the agent offline takes the immediate-delete branch, so
+      // both paths reach deleteNodeRecords and both used to fail here.
+      const res = await request(makeApp({})).delete(
+        `/api/nodes/${node.id}${force ? "?force=true" : ""}`,
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ deleted: true });
+      expect(await prisma.node.findUnique({ where: { id: node.id } })).toBeNull();
+      expect(await prisma.auditEvent.count({ where: { nodeId: node.id } })).toBe(0);
+    }
   });
 
   it("force via body { force: true } also deletes", async () => {

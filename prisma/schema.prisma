@@ -109,7 +109,7 @@ model Deployment {
   vramActual   Int?
   createdAt    DateTime               @default(now())
   updatedAt    DateTime               @updatedAt
-  node         Node                   @relation(fields: [nodeId], references: [id])
+  node         Node                   @relation(fields: [nodeId], references: [id], onDelete: Cascade)
   model        Model                  @relation(fields: [modelId], references: [id])
   clusterNodes  ClusterNode[]
   benchmarkRuns BenchmarkRun[]
@@ -133,8 +133,8 @@ model ClusterNode {
   nodeId       String
   role         String     @default("worker")
   status       String     @default("pending")
-  deployment   Deployment @relation(fields: [deploymentId], references: [id])
-  node         Node       @relation(fields: [nodeId], references: [id])
+  deployment   Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  node         Node       @relation(fields: [nodeId], references: [id], onDelete: Cascade)
 }
 
 model MetricSnapshot {
@@ -167,7 +167,7 @@ model MetricSnapshot {
   sshdConns    Int?
   tempC        Int?
   timestamp      DateTime @default(now())
-  node           Node     @relation(fields: [nodeId], references: [id])
+  node           Node     @relation(fields: [nodeId], references: [id], onDelete: Cascade)
 
   @@index([nodeId, timestamp(sort: Desc)])
 }
@@ -175,6 +175,14 @@ model MetricSnapshot {
 // Audit trail for Agent v2 diag/exec actions run against a node — e.g. which
 // capability ("cap") was invoked, the resolved command, and its exit code.
 // `reason` records why the action was taken (e.g. operator-supplied note).
+//
+// Cascades from Node, along with every other model that references one. This was
+// the model that proved the point: it was the one `deleteNodeRecords` forgot, so
+// offboarding any node an operator had run a capability against died on a foreign
+// key AFTER the agent had been told to deprovision — leaving it uninstalled but
+// still in the database, and `force=true` no help since it runs the same cleanup.
+// The route still deletes these rows explicitly; the cascade is what makes the
+// next model with a `nodeId` safe without anyone remembering to.
 model AuditEvent {
   id     String   @id @default(cuid())
   nodeId String
@@ -183,7 +191,7 @@ model AuditEvent {
   reason String?
   code   Int?
   ts     DateTime @default(now())
-  node   Node     @relation(fields: [nodeId], references: [id])
+  node   Node     @relation(fields: [nodeId], references: [id], onDelete: Cascade)
 
   @@index([nodeId, ts(sort: Desc)])
 }
@@ -219,7 +227,7 @@ model FineTuneJob {
   startedAt    DateTime?
   completedAt  DateTime?
   createdAt    DateTime  @default(now())
-  node         Node      @relation(fields: [nodeId], references: [id])
+  node         Node      @relation(fields: [nodeId], references: [id], onDelete: Cascade)
   model        Model?
   metrics      TrainingMetric[]
   // For multi-node runs, one row per participating node (head + workers).
@@ -235,7 +243,7 @@ model FineTuneClusterNode {
   role      String      @default("worker")
   createdAt DateTime    @default(now())
   job       FineTuneJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
-  node      Node        @relation(fields: [nodeId], references: [id])
+  node      Node        @relation(fields: [nodeId], references: [id], onDelete: Cascade)
 
   @@unique([jobId, nodeId])
   @@index([jobId])
