@@ -65,6 +65,7 @@ defaults:
   # what the reference pins; kept for consistency.
   max_num_batched_tokens: 2048
 
+  num_speculative_tokens: 5
 
   # The gateway publishes whatever the runtime answers to. A displayName on the
   # deploy overrides this via --served-model-name, so POSTing with
@@ -85,71 +86,78 @@ command: |
       --tool-call-parser qwen3_coder \
       --reasoning-parser qwen3 \
       --generation-config auto \
-      --default-chat-template-kwargs '{"reasoning_effort":"medium"}'
+      --default-chat-template-kwargs '{"reasoning_effort":"medium"}' \
+      --speculative-config '{"method":"mtp","num_speculative_tokens":{num_speculative_tokens}}'
 
-# ⚠ NOT AN EXACT MIRROR, AND IT CANNOT BE. One flag is missing relative to
-# @dgxrun/qwen3.8-27b-nvfp4: `--speculative-config '{"method":"mtp",...}'`.
+# THIS IS AN EXACT MIRROR of @dgxrun/qwen3.8-27b-nvfp4, the incumbent rc0 was
+# screened against. Stripped of comments the two files differ in three lines —
+# `model`, `served_model_name`, `description` — and nothing else. Diff them before
+# changing either: the screen's value rests on weights alone differing.
 #
-# rc0 HAS NO MTP WEIGHTS. rc0 carries 1,184 tensors against the base model's
-# 1,199; the 15 absent ones are exactly `mtp.fc.weight` and `mtp.layers.0.*` — the
-# MTP head. The vision tower's 333 are all present. The cause is upstream of this
-# fleet: transformers' `Qwen3_5ForConditionalGeneration` has no MTP head, so the
-# merge that produced rc0 could not carry one. Confirmed two ways, from the staged
-# snapshot here (0 of 1,184 tensors match mtp/pre_fc_norm/nextn, no
-# `model_mtp.safetensors`, no `num_nextn_predict_layers` in config.json) and from
-# the Hub by whoever ran the merge. The incumbent's checkpoint
-# (unsloth/Qwen3.8-27B-NVFP4) DOES carry `model_mtp.safetensors`.
+# IT WAS NOT ALWAYS SO, AND THE REASON IS WORTH KEEPING.
 #
-# With the flag in, vLLM loads the main model fine and then dies in
-# `self.drafter.load_model`:
-#   ValueError: Following weights were not initialized from checkpoint:
-#     {model.layers.0.self_attn.q_norm.weight, model.pre_fc_norm_embedding.weight,
-#      model.norm.weight, ...}
-# Verified: deployment cmuftg5ji31dz2auhbrng3ma1 failed this way at 17:45.
+# The first merged checkpoint (32e8690) had no MTP head: 1,184 tensors against the
+# base's 1,199, the 15 absent ones exactly `mtp.fc.weight` and `mtp.layers.0.*`.
+# With the incumbent's --speculative-config in place, vLLM loaded the main model
+# and then died in drafter load with "Following weights were not initialized from
+# checkpoint". rc0's first serving run was therefore MTP-off, and both arms of the
+# 125-item screen ran that way.
 #
-# WHAT THIS COSTS, and it matters to anyone comparing the two:
-#   - THROUGHPUT is not comparable. The incumbent gets MTP speculative decoding
-#     and rc0 cannot, so rc0 will read slower in tok/s for reasons that have
-#     nothing to do with its weights. Do not put the two tok/s figures in a table
-#     as though they measured the same thing.
-#   - QUALITY is unaffected. Under temperature-0 decoding MTP is output-equivalent,
-#     because a verified draft never changes the greedy token — so the screen's
-#     items are unaffected by serving rc0 without it.
-#     (An earlier draft of this comment claimed temp-0 is "not deterministic with
-#     MTP on this fleet". That overstated the evidence: the observed divergence is
-#     between REPLICAS ACROSS NODES, its cause is recorded as unknown, and it was
-#     never attributed to MTP. Do not cite MTP as a reproducibility hazard here.)
+# The cause is upstream and silent in BOTH directions: **transformers has no MTP
+# implementation for this architecture at all**. The only mentions of `mtp` in its
+# modeling file are two `_keys_to_ignore_on_load_unexpected` regexes on the shared
+# base class, so any path loading through Qwen3_5ForConditionalGeneration — merge,
+# quantize, convert — drops the head with no warning. A parity check guarding one
+# merge script does not generalise to the next path.
 #
-# Three ways to restore a real like-for-like, none of them this file's to choose:
-#   (a) serve rc0 without MTP — what this recipe does, and the only one that needs
-#       nothing from anybody;
-#   (b) append the base model's MTP tensors to the rc0 checkpoint. THIS IS
-#       HAPPENING — a complete checkpoint is being produced for a later redeploy
-#       with MTP on. The screen is not waiting for it. Note that the drafter reads
-#       hidden states the merge changed, so acceptance rate wants measuring rather
-#       than assuming once it lands;
-#   (c) drop MTP from the incumbent too, for the duration of the screen — the only
-#       option that makes both arms identical, and it means redeploying a live
-#       model.
+# This recipe now serves 6cbd3011, which carries the head (three shards, the third
+# an 849 MB / 424.7M-param MTP module), so the flag works and the mirror is whole.
 #
-# EVERYTHING ELSE IS STILL AN EXACT MIRROR: same container tag, same eight
-# remaining defaults, same flags in the same order. Diff the two files before
-# changing either.
+# THE DRAFTER IS TRANSPLANTED, which is a throughput caveat and nothing more.
+# 6cbd3011's head is the BASE model's, copied verbatim — never instantiated during
+# training, so it learned to predict from base hidden states and is now fed states
+# the LoRA merge has changed. Cosine between base and merged final hidden states —
+# the exact tensor `fc` consumes — is 0.79 over 40k real positions.
 #
-# That rule decided the one open question here. A judge returns guided JSON, so
-# `--enable-auto-tool-choice` / `--tool-call-parser qwen3_coder` have nothing to
-# do, and dropping them was proposed. They stay, because they sit on the
-# completion path: with guided JSON they very probably never fire, and "very
-# probably" is what a confound is made of. Whether a judge recipe should carry
-# tool-call flags at all is a later change to BOTH recipes, never to one arm.
-# (Agreed with the requester, 2026-09-24.)
+# MEASURED on this deployment, 9 judge calls, runaways excluded (2026-09-25):
 #
-# `--reasoning-parser qwen3` stays for the same reason. With thinking off per
-# request it is idle, and it stops a thinking-on probe leaking <think> into
-# content.
+#                        rc0 (transplanted)   incumbent (aligned)
+#   acceptance length          2.93                  4.39
+#   acceptance rate           42.9%                 68.3%
+#   per-position       70.4/57.4/31.8/20.7/13.1   86.9/75.4/65.9/58.3/52.2
 #
-# FLASHINFER is NOT a recipe flag here. The incumbent carries no
-# attention-backend flag and no env block, so the backend is whatever the eugr
-# nightly defaults to — and rc0 uses the same tag. Adding a FlashInfer flag to
-# rc0 alone would itself be the serving-shape difference this file exists to
-# avoid.
+# So ~33% fewer tokens per verification step, and a much steeper decay: by position
+# 2 rc0 keeps under half what the incumbent keeps. MTP is still worth having — it
+# lifts this workload from 3.4-3.8 to 7.5 tok/s, about 2x — and an aligned head
+# would be worth roughly another 50% (2.93 -> 4.39 tokens per step at similar cost).
+#
+# `num_speculative_tokens: 5` is consequently over-provisioned HERE: positions 3-4
+# return 20.7% and 13.1% and cost compute to propose. Lowering it to 3 would
+# recover overhead at little loss — but it would break the three-line diff with the
+# incumbent, so leave it while that comparison matters.
+#
+# None of this can cost quality: the target model verifies every draft, so a stale
+# drafter loses speed and nothing else.
+#
+# MEASUREMENT NOTE, because this number is easy to get wrong by a third. A judge
+# call that runs away to the token cap emits highly repetitive text, which drafts
+# far too easily: the same probe gave 3.74 when one runaway supplied 87% of tokens,
+# 3.16 at 39%, and 2.93 with runaways excluded per-rep. Attribute acceptance per
+# call and drop any rep whose finish_reason is "length".
+#
+# Three facts for anyone touching this head, from vLLM's Qwen3_5MTP
+# (vllm/model_executor/models/qwen3_5_mtp.py), the only implementation that exists:
+#   - The trunk is a Gated DeltaNet / attention HYBRID, only 16 of 64 layers
+#     full-attention, but `mtp.layers.0` IS full-attention. vLLM sets
+#     mtp_start_layer_idx = num_hidden_layers = 64, so a port must make layer_types
+#     report full_attention at index 64 or it builds the wrong layer type.
+#   - `mtp.fc` must stay BF16 in an NVFP4 checkpoint. ModelOpt has been omitting it
+#     from hf_quant_config.json exclude_modules and vLLM force-unquantizes it as a
+#     workaround (vllm#38650, NVIDIA/Model-Optimizer#1124). MTP-in-BF16 beside
+#     quantized weights is the convention, not a packaging preference.
+#   - The head shares `embed_tokens` and `lm_head` with the trunk — no
+#     mtp.embed_tokens, no mtp.lm_head — per mtp_use_dedicated_embeddings: false.
+#
+# FLASHINFER is not a recipe flag: the incumbent carries no attention-backend flag
+# and no env block, so the backend is the container default, and rc0 uses the same
+# tag. Adding one here alone would be the serving-shape difference this file avoids.
