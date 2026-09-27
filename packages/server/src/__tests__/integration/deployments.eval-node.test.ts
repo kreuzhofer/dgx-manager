@@ -70,10 +70,12 @@ describe("eval-node deploy admission", () => {
 
     expect(res.status).toBe(400);
     expect(res.body.error).toContain("agenthost");
-    expect(res.body.error).toContain("ollama");
+    // The message used to name `ollama` as the allowed runtime. With an empty
+    // allow-list it says the node hosts nothing instead — see role.ts.
+    expect(res.body.error).toContain("cannot host any");
   });
 
-  it("permits an ollama deployment onto an eval node", async () => {
+  it("refuses an ollama deployment onto an eval node (it hosts nothing)", async () => {
     await wipeAll();
     await prisma.node.create({
       data: {
@@ -86,7 +88,8 @@ describe("eval-node deploy admission", () => {
       .post("/api/deployments")
       .send({ nodeId: "evalnode", runtime: "ollama", modelName: "nomic-embed-text" });
 
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("agenthost");
   });
 
   // The role only restricts. A normal node is unaffected.
@@ -177,7 +180,11 @@ describe("auto node selection skips eval nodes", () => {
     expect(clusterNodes.map((c) => c.nodeId).sort()).toEqual(["gpunode1", "gpunode2"]);
   });
 
-  it("still lets an Ollama auto-deploy land on the eval node (role only restricts vLLM/dgxrun)", async () => {
+  // The auto-selection filter must TRACK the allow-list, not restate it. A hardcoded
+  // `isOllama ||` exception there would have kept agenthost a candidate once the eval
+  // role stopped permitting Ollama, then 400'd it at the role guard — exactly the
+  // failure that filter's own comment says it exists to prevent.
+  it("keeps an Ollama auto-deploy off the eval node now that it hosts nothing", async () => {
     await wipeAll();
     await seedEvalAndGpuNodes(1);
 
@@ -185,9 +192,9 @@ describe("auto node selection skips eval nodes", () => {
       .post("/api/deployments")
       .send({ nodeId: "auto", runtime: "ollama", modelName: "nomic-embed-text" });
 
+    // Must land on the GPU node, and must NOT 400: the eval node has to be filtered
+    // out as a candidate rather than picked and then refused.
     expect(res.status).toBe(201);
-    // Either online node is a legal Ollama target — the point is it never 400s
-    // because the eval node was wrongly filtered out for Ollama too.
-    expect(["evalnode", "gpunode1"]).toContain(res.body.nodeId);
+    expect(res.body.nodeId).toBe("gpunode1");
   });
 });

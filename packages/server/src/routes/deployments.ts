@@ -318,15 +318,21 @@ deploymentsRouter.post("/", async (req, res) => {
 
   // Auto-resolve idle nodes
   if (nodeId === "auto" || nodeIds === "auto") {
-    // An `eval` node (agenthost) may only serve Ollama — see the role-admission
-    // check below. It must never be a candidate for a vLLM/dgxrun auto-deploy,
-    // or a name that happens to sort first alphabetically (e.g. "agenthost")
-    // gets auto-picked and then 400s at the role guard instead of falling
-    // through to a real GPU node.
+    // A node that cannot host this runtime must never be a candidate, or a name
+    // that happens to sort first alphabetically (e.g. "agenthost") gets picked and
+    // then 400s at the role guard below instead of falling through to a real GPU
+    // node.
+    //
+    // This asks `runtimeAllowedOnNode` rather than restating the rule. It used to
+    // read `isOllama || n.role !== "eval"` — a second copy of the allow-list — and
+    // when the eval role stopped permitting Ollama (2026-09-27) that copy would
+    // have kept agenthost a candidate and produced the exact failure the paragraph
+    // above describes. One rule, one place.
+    const effectiveRuntimeForPick = isOllama ? "ollama" : (isDgxrun ? "dgxrun" : "vllm");
     const idleNodes = (await prisma.node.findMany({
       where: { status: "online" },
       orderBy: { name: "asc" },
-    })).filter((n) => isOllama || n.role !== "eval");
+    })).filter((n) => runtimeAllowedOnNode(n.role, effectiveRuntimeForPick));
 
     if (idleNodes.length === 0) {
       return res.status(409).json({ error: "No online nodes available" });

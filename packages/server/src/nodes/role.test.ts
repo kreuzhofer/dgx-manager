@@ -24,11 +24,10 @@ describe("isEvalNode", () => {
 });
 
 describe("runtimeAllowedOnNode", () => {
-  it("permits ollama on an eval node", () => {
-    expect(runtimeAllowedOnNode("eval", "ollama")).toBe(true);
-  });
-
-  it.each([["vllm"], ["dgxrun"], ["sglang"], [""], ["VLLM"]])(
+  // An eval node hosts NOTHING as of 2026-09-27. It previously served small Ollama
+  // models (embeddings); the owner's decision is that agenthost is a benchmark
+  // runner only. `ollama` joins the refused list rather than getting its own case.
+  it.each([["ollama"], ["vllm"], ["dgxrun"], ["sglang"], [""], ["VLLM"]])(
     "refuses %j on an eval node",
     (runtime) => {
       expect(runtimeAllowedOnNode("eval", runtime)).toBe(false);
@@ -57,10 +56,12 @@ describe("runtimeAllowedOnNode", () => {
 });
 
 describe("evalNodeRejectionMessage", () => {
-  it("names the node and the runtime, and says what is allowed", () => {
+  it("names the node and the runtime, and says the node hosts nothing", () => {
     const m = evalNodeRejectionMessage("agenthost", "vllm");
     expect(m).toContain("agenthost");
     expect(m).toContain("vllm");
-    expect(m).toContain("ollama");
+    // An empty allow-list must not render as "Allowed runtimes: ."
+    expect(m).not.toMatch(/Allowed runtimes:\s*\./);
+    expect(m.toLowerCase()).toContain("cannot host any");
   });
 });
