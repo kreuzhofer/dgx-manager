@@ -1,0 +1,147 @@
+# @dgxrun/chat3d-judge-rc1-nvfp4-1x — chat3d judge rc1, NVFP4, one Spark.
+#
+# THE QUALIFICATION ARTEFACT for chat3d #126. Daniel decided rc1 qualifies in its
+# NVFP4 build directly, so unlike rc0 (which was screened in BF16) there is no
+# BF16 serving step for this candidate.
+#
+# AN EXACT MIRROR of @dgxrun/chat3d-judge-rc0-1x — and therefore of
+# @dgxrun/qwen3.8-27b-nvfp4, which rc0 was derived from — in every serving
+# dimension. Stripped of comments the two files differ in `model`,
+# `served_model_name` and `description`, and in NOTHING else. That is deliberate
+# and it is the whole point: the screen has to attribute a difference to the
+# WEIGHTS, and rc1 already differs from rc0 by a retrained trunk AND a precision
+# change. Adding serving-shape differences on top would make the comparison
+# uninterpretable. Diff this against rc0 before changing either.
+#
+# ⚠ MODEL IS A DIRECTORY PATH, NOT A REPO ID — the one forced divergence from
+# every other recipe in this catalog. The NVFP4 build lives in the `nvfp4/`
+# SUBFOLDER of danielkreuzhofer/chat3d-judge-rc1, and a bare repo id cannot
+# address a subfolder. dgxrun bind-mounts the host weights dir to
+# /cache/huggingface and pins HF_HOME + HF_HUB_OFFLINE=1, so the snapshot
+# resolves offline at the path below. nebius's own verified command is likewise
+# `vllm serve <dir>`.
+#   Consequence: this recipe is pinned to a SNAPSHOT SHA by construction, so it
+#   does not depend on refs/main and is immune to the revision trap documented in
+#   the rc0 recipe — but it must be re-pointed by hand if the build is ever
+#   re-pushed.
+#
+# THE CHECKPOINT, from nvfp4/README.md (nebius wrote it as the deployment
+# contract — read it before changing anything here):
+#   NVFP4   168 modules    mlp on layers 0-55
+#   FP8     233 modules    all self_attn + GDN projections, lm_head, mlp 56-63
+#   FP8 static KV cache
+#   BF16, untouched        vision tower, GDN non-projections, norms, and re:^mtp.*
+# Calibrated on 128 rc1 rows with their renders, so activation scales come from
+# the real judge input distribution. Same recipe as rc0's NVFP4 build, which is in
+# turn read from unsloth/Qwen3.8-27B-NVFP4's own config.
+#
+# WHY NO --kv-cache-dtype fp8 HERE, THOUGH THE CHECKPOINT HAS A STATIC FP8 SCHEME.
+# nebius recommends it and it is correct for the checkpoint; it is omitted ONLY to
+# hold the mirror with rc0. It is the first thing to try after qualification
+# closes, together with the two other deltas they justified (below).
+#
+# THE DRAFTER IS THE BASE MODEL'S HEAD, exactly as in rc0 — 15 tensors,
+# 849,400,424 bytes, bit-identical to Qwen3.8-27B's. rc1 was MEANT to ship an
+# aligned head and does not: freeze-the-trunk head training measured 21.9% WORSE
+# than the base head on held-out rows (0.6192 vs 0.5080) while memorising the
+# training rows, at every epoch, so it was not shipped.
+#   EXPECT rc0-LIKE ACCEPTANCE, ~2.93 against the incumbent's 4.39. Trunk drift is
+#   unchanged (final-hidden-state cosine 0.777 vs base, rc0 was 0.788), so the
+#   stale-mapping cost should reappear within noise. This costs THROUGHPUT ONLY —
+#   the target model verifies every draft, so a stale drafter can never cost
+#   quality.
+#
+# ⚠ NEVER PASS --language-model-only. It disables image input, which a judge
+# screening renders cannot do without. nebius's own serve script carried that bug.
+#
+# nst=5 IS INHERITED AND IS KNOWN TO BE OVER-PROVISIONED HERE. With a base
+# drafter, rc0 measured position-3/4 acceptance at 20.7% and 13.1%, so those two
+# draft passes cost compute to propose and mostly miss; nebius recommends 3. It
+# stays at 5 solely to preserve the mirror with rc0 — change both files together
+# or neither, and measure the pair.
+recipe_version: "2"
+runner: dgxrun
+model: /cache/huggingface/hub/models--danielkreuzhofer--chat3d-judge-rc1/snapshots/55030a92048287c044dcb8d7a66a4406ca3edfe3/nvfp4
+runtime: vllm
+container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:2026081501
+description: chat3d judge rc1 (Qwen3.8-27B + LoRA, merged, NVFP4), one Spark — the qualification artefact
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+
+  # One Spark, as rc0. 21.8 GiB of NVFP4 weights leave far more room than rc0's
+  # 54.7 GiB of BF16, but the mirror fixes this at 1 and a judge screen wants no
+  # inter-node fabric in the path.
+  tensor_parallel: 1
+
+  # 0.88, the fleet value the startup guard is known to clear — vLLM compares
+  # gmu x total against CUDA-VISIBLE free, which sits ~7 GiB below MemFree.
+  gpu_memory_utilization: 0.88
+
+  # 262144, mirroring rc0. nebius suggests 10240 and that is very likely a real
+  # throughput win on this hardware, where max_model_len taxes every request as a
+  # cliff — but it is a serving-shape change and so waits for qualification to
+  # close. NOTE a judge call carries 8 renders at ~580 tokens per 768px view,
+  # i.e. ~4.6K tokens before text and guided JSON, so 10240 fits but is not
+  # generous; measure actual prompt sizes before pinning it.
+  max_model_len: 262144
+
+  max_num_seqs: 8
+  max_num_batched_tokens: 2048
+  num_speculative_tokens: 5
+
+  # Its own published name, NOT pooled with rc0. These are different models and
+  # pooling them under one name would make every request a coin flip between
+  # candidate and incumbent, and any screen a measurement of the mixture.
+  served_model_name: chat3d-judge-rc1
+
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      --tensor-parallel-size {tensor_parallel} \
+      --max-model-len {max_model_len} \
+      --max-num-seqs {max_num_seqs} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --enable-auto-tool-choice \
+      --tool-call-parser qwen3_coder \
+      --reasoning-parser qwen3 \
+      --generation-config auto \
+      --default-chat-template-kwargs '{"reasoning_effort":"medium"}' \
+      --speculative-config '{"method":"mtp","num_speculative_tokens":{num_speculative_tokens}}'
+
+# ---------------------------------------------------------------------------------------
+# THE sm_121 KERNEL QUESTION IS ALREADY ANSWERED, and not by inference from this
+# checkpoint. nebius flagged the GB10 path as ours to confirm (their cluster is
+# sm_103). The same mixed recipe booted on dgx-spark-04 on 2026-08-31 and the
+# engine selected NvFp4LinearKernel / fp4_gemm — NOT the FP4 Marlin fallback the
+# qwen recipe was written around — with the FP8 half loading through
+# CompressedTensorsW8A8Fp8. vllm#51884's family-12 DeepGEMM gate never fired,
+# because this checkpoint's FP8 is `strategy: channel`, not blockwise. So the
+# VLLM_USE_DEEP_GEMM=0 escape hatch is expected NOT to be needed here either.
+#
+# ⚠ MANDATORY FIRST-BOOT COHERENCE CHECK, inherited from the qwen NVFP4 recipe and
+# NOT optional. sglang#34895 reports a dropped `lm_head weight_scale` on that repo
+# family producing degenerate repetition — a SILENT failure in which the server
+# comes up healthy and serves garbage. A load success proves nothing. Run a few
+# prompts at temperature 0 and check 6-gram repetition before handing the endpoint
+# to a screen. This matters more here than usual: a judge returning plausible
+# garbage would corrupt a qualification rather than obviously fail it.
+#
+# PAIRING AND BYTE-STABILITY — read before designing the screen.
+# A pinned node reproduces itself byte-identically; two nodes running the SAME
+# model, same build, same flags, diverge on ~7.4% of items for reasons that remain
+# unexplained (the FlashInfer-autotune hypothesis was refuted on hardware, #96).
+# So rc0-on-one-node against rc1-on-another CONFOUNDS the model change with a node
+# change, and 7.4% is large enough to swamp a judge-quality delta. The clean design
+# is both arms on the SAME node sequentially; failing that, run a same-model
+# control across the two nodes first to size the node effect.
+# ALSO: the live rc0 deployment serves BF16, so comparing it against this NVFP4
+# build mixes precision with the trunk retrain. That confound is bounded small —
+# NVFP4 vs BF16 on this architecture measured SWE-bench 378 vs 380/500 and
+# identical GPQA with 100% token agreement — but rc0's NVFP4 build exists
+# (ded8796d) if the screen needs like-for-like.
+# ---------------------------------------------------------------------------------------
